@@ -1166,7 +1166,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             nativeThreadId: "launch-mcp-thread",
             nativeTurnId: "unused",
             prompt: "unused",
-          }).slice(0, 5),
+          })
+            .slice(0, 5)
+            .map((entry) =>
+              entry.type === "expect_outbound" && entry.label === "thread/start"
+                ? {
+                    ...entry,
+                    frame: {
+                      id: 2,
+                      method: "thread/start",
+                      params: {
+                        config: {
+                          "tools.update_plan.enabled": true,
+                          mcp_optional_startup_grace_ms: 10_000,
+                          "shell_environment_policy.set.T3_MCP_URL": "http://127.0.0.1:43123/mcp",
+                          "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "secret-codex-token",
+                        },
+                      },
+                    },
+                  }
+                : entry,
+            ),
         }),
         () => Effect.void,
         (method, params) =>
@@ -1181,6 +1201,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           config: {
             "tools.update_plan.enabled": true,
             mcp_optional_startup_grace_ms: 10_000,
+            "shell_environment_policy.set.T3_MCP_URL": "http://127.0.0.1:43123/mcp",
+            "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "secret-codex-token",
             "mcp_servers.t3-code": {
               url: "http://127.0.0.1:43123/mcp",
               tool_timeout_sec: 3_900,

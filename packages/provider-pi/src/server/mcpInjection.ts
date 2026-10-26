@@ -2,12 +2,13 @@ import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
-import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import {
+  withMcpSessionEnvironment,
+  type McpProviderSessionConfig,
+} from "@t3tools/provider-core/server/mcpSession";
 import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
-  T3_MCP_BEARER_ENV,
-  T3_MCP_URL_ENV,
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
@@ -159,10 +160,6 @@ export function resolvePiLaunchArgs(launchArgs: string): PiLaunchArgsResolution 
   return { ok: true, args };
 }
 
-function bearerTokenFromAuthorizationHeader(header: string): string {
-  return header.startsWith("Bearer ") ? header.slice("Bearer ".length) : header;
-}
-
 function normalizedPiPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
 }
@@ -280,10 +277,10 @@ export function buildPiRpcLaunch(input: {
   ) {
     args.push("--extension", input.extensionPath);
   }
-  const environment = { ...input.environment };
-  // MCP credentials belong to this T3 session; discard inherited server/parent credentials.
-  delete environment[T3_MCP_URL_ENV];
-  delete environment[T3_MCP_BEARER_ENV];
+  const environment = withMcpSessionEnvironment({
+    environment: input.environment,
+    mcpSession: hasT3Mcp ? input.mcpSession : undefined,
+  });
   delete environment[T3_PI_MCP_EXTENSION_PATH_ENV];
 
   return {
@@ -297,14 +294,6 @@ export function buildPiRpcLaunch(input: {
         ? {
             [T3_PI_RUNTIME_MODE_ENV]:
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
-          }
-        : {}),
-      ...(hasT3Mcp && input.mcpSession !== undefined
-        ? {
-            [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
-            [T3_MCP_BEARER_ENV]: bearerTokenFromAuthorizationHeader(
-              input.mcpSession.authorizationHeader,
-            ),
           }
         : {}),
     },

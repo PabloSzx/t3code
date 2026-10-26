@@ -2871,6 +2871,67 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  it.effect("refreshes shell credentials when the thread MCP session changes", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        freshQueueOnReopen: true,
+        environment: {
+          T3_MCP_URL: "http://stale.invalid/mcp",
+          T3_MCP_BEARER_TOKEN: "inherited-token",
+          T3_ACP_MCP_AUTHORIZATION: "Bearer inherited-acp-token",
+          PROVIDER_KEY: "provider-key",
+        },
+      });
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      let previous: ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
+      for (const [index, token] of [
+        undefined,
+        "first-token",
+        "rotated-token",
+        undefined,
+      ].entries()) {
+        if (token === undefined) yield* sessions.clear(harness.threadId);
+        else
+          yield* sessions.set({
+            environmentId: EnvironmentId.make("environment-shell-credentials"),
+            threadId: harness.threadId,
+            providerSessionId: "mcp-shell-credentials",
+            providerInstanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: `Bearer ${token}`,
+            browserToolsAvailable: true,
+          });
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`shell-credentials-${index}`),
+            text: "Run the skill.",
+            attachments: [],
+          }),
+        );
+        const opened = harness.getOpenedOptions();
+        assert.isDefined(opened);
+        assert.notStrictEqual(opened, previous);
+        assert.equal(opened?.env?.T3_MCP_URL, token ? "http://127.0.0.1:43123/mcp" : undefined);
+        assert.equal(opened?.env?.T3_MCP_BEARER_TOKEN, token);
+        assert.isUndefined(opened?.env?.T3_ACP_MCP_AUTHORIZATION);
+        assert.equal(opened?.env?.PROVIDER_KEY, "provider-key");
+        previous = opened;
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: `shell-credentials-result-${index}`, result: "Done." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+      }
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each(["release-after", "cancel-after", "release-before", "resume-pending"] as const)(
     "keeps attachment reservations across compaction: %s boundary",
     (outcome) =>

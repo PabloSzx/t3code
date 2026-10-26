@@ -2545,7 +2545,13 @@ describe("AcpAdapterV2", () => {
           makeRuntime,
         },
         selfInvocation,
-        clientTerminals: {},
+        clientTerminals: {
+          environment: {
+            T3_MCP_URL: "http://stale.invalid/mcp",
+            T3_MCP_BEARER_TOKEN: "inherited-token",
+            T3_ACP_MCP_AUTHORIZATION: "Bearer inherited-acp-token",
+          },
+        },
       });
       const sourceThreadId = ThreadId.make("thread-acp-native-fork-source");
       const targetThreadId = ThreadId.make("thread-acp-native-fork-target");
@@ -2649,7 +2655,10 @@ describe("AcpAdapterV2", () => {
         {
           sessionId: "mock-child-session-without-credential-scope",
           command: process.execPath,
-          args: ["-e", "process.stdout.write(process.env.T3_ACP_MCP_AUTHORIZATION ?? '')"],
+          args: [
+            "-e",
+            "process.stdout.write(JSON.stringify([process.env.T3_MCP_URL, process.env.T3_MCP_BEARER_TOKEN, process.env.T3_ACP_MCP_AUTHORIZATION]))",
+          ],
         },
         { requestId: "test-unknown-terminal-create", method: "terminal/create" },
       );
@@ -2667,13 +2676,16 @@ describe("AcpAdapterV2", () => {
         },
         { requestId: "test-unknown-terminal-output", method: "terminal/output" },
       );
-      assert.equal(unknownTerminalOutput.output, "");
+      assert.equal(unknownTerminalOutput.output, "[null,null,null]");
 
       const terminal = yield* createTerminal(
         {
           sessionId: "mock-session-1-fork",
           command: process.execPath,
-          args: ["-e", "process.stdout.write(process.env.T3_ACP_MCP_AUTHORIZATION ?? '')"],
+          args: [
+            "-e",
+            "process.stdout.write(JSON.stringify([process.env.T3_MCP_URL, process.env.T3_MCP_BEARER_TOKEN, process.env.T3_ACP_MCP_AUTHORIZATION]))",
+          ],
         },
         { requestId: "test-terminal-create", method: "terminal/create" },
       );
@@ -2691,7 +2703,56 @@ describe("AcpAdapterV2", () => {
         },
         { requestId: "test-terminal-output", method: "terminal/output" },
       );
-      assert.equal(terminalOutput.output, "Bearer target-thread-token");
+      assert.equal(
+        terminalOutput.output,
+        JSON.stringify([
+          "http://127.0.0.1:43123/mcp",
+          "target-thread-token",
+          "Bearer target-thread-token",
+        ]),
+      );
+
+      yield* runtime.resumeThread({
+        threadId: sourceThreadId,
+        providerThread: sourceProviderThread,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-acp-native-fork-source"),
+        threadId: sourceThreadId,
+        providerSessionId: "mcp-session-acp-native-fork-source",
+        providerInstanceId: instanceId,
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer rotated-source-token",
+        browserToolsAvailable: true,
+      });
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId: sourceThreadId,
+          providerThread: sourceProviderThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+      );
+      const rotatedTerminal = yield* createTerminal(
+        {
+          sessionId: "mock-session-1",
+          command: process.execPath,
+          args: ["-e", "process.stdout.write(process.env.T3_MCP_BEARER_TOKEN ?? '')"],
+        },
+        { requestId: "rotated-terminal-create", method: "terminal/create" },
+      );
+      yield* waitForTerminalExit(
+        { sessionId: "mock-session-1", terminalId: rotatedTerminal.terminalId },
+        { requestId: "rotated-terminal-wait", method: "terminal/wait_for_exit" },
+      );
+      const rotatedOutput = yield* readTerminalOutput(
+        { sessionId: "mock-session-1", terminalId: rotatedTerminal.terminalId },
+        { requestId: "rotated-terminal-output", method: "terminal/output" },
+      );
+      assert.equal(rotatedOutput.output, "rotated-source-token");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 

@@ -13,6 +13,36 @@ export interface McpProviderSessionConfig {
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
 }
 
+const T3_MCP_URL_ENV = "T3_MCP_URL";
+const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
+
+interface McpSessionEnvironmentOptions {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly mcpSession:
+    | Pick<McpProviderSessionConfig, "endpoint" | "authorizationHeader">
+    | undefined;
+}
+
+export function withMcpSessionEnvironment(input: McpSessionEnvironmentOptions): NodeJS.ProcessEnv {
+  // Explicit undefined also removes inherited values when a spawner extends the host environment.
+  const environment: NodeJS.ProcessEnv = {
+    ...input.environment,
+    [T3_MCP_URL_ENV]: undefined,
+    [T3_MCP_BEARER_ENV]: undefined,
+    T3_ACP_MCP_ENDPOINT: undefined,
+    T3_ACP_MCP_AUTHORIZATION: undefined,
+    T3_ACP_MCP_NODE: undefined,
+    T3_ACP_MCP_ENTRYPOINT: undefined,
+  };
+  const session = input.mcpSession;
+  const token = session?.authorizationHeader.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (session !== undefined && token !== undefined) {
+    environment[T3_MCP_URL_ENV] = session.endpoint;
+    environment[T3_MCP_BEARER_ENV] = token;
+  }
+  return environment;
+}
+
 export function withAgentDeviceEnvironment(
   base: NodeJS.ProcessEnv,
   config: Pick<McpProviderSessionConfig, "agentDeviceEnvironment"> | undefined,

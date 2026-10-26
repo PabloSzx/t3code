@@ -1295,6 +1295,8 @@ export class CodexAppServerClientFactory extends Context.Service<
 export const CODEX_THREAD_CONFIG = {
   "tools.update_plan.enabled": true,
   mcp_optional_startup_grace_ms: 10_000,
+  "shell_environment_policy.set.T3_MCP_URL": "",
+  "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "",
 } as const;
 
 // T3 waits can block for an hour; keep Codex's MCP timeout above that.
@@ -1310,11 +1312,19 @@ function codexThreadRuntimeParams(input: {
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
   const { mcpSession } = input;
+  const shellEnvironment = McpProviderSession.withMcpSessionEnvironment({
+    environment: {},
+    mcpSession,
+  });
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      // The app-server can host multiple threads; never put a thread token in its process environment.
+      "shell_environment_policy.set.T3_MCP_URL": shellEnvironment.T3_MCP_URL ?? "",
+      "shell_environment_policy.set.T3_MCP_BEARER_TOKEN":
+        shellEnvironment.T3_MCP_BEARER_TOKEN ?? "",
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1472,7 +1482,10 @@ export const layerAppServerClientFactory: Layer.Layer<
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
         const scope = yield* Scope.Scope;
         const environment = {
-          ...codexAppServerEnvironment(input.environment),
+          ...McpProviderSession.withMcpSessionEnvironment({
+            environment: codexAppServerEnvironment(input.environment),
+            mcpSession: undefined,
+          }),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
         };
         const command = yield* makeCodexAppServerSpawnCommand({

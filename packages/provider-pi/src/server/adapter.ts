@@ -20,6 +20,7 @@ import {
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
+  type ThreadId,
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import { PiSettings } from "../settings.ts";
@@ -2115,10 +2116,24 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.forkIn(scope),
       );
 
+      // Pi RPC cannot update process.env or the extension's MCP client after launch.
+      const requireLaunchMcpSession = Effect.fn("PiAdapter.requireLaunchMcpSession")(function* (
+        threadId: ThreadId,
+      ) {
+        const current = yield* mcpSessions.read(threadId);
+        if (
+          current?.endpoint !== mcpSession?.endpoint ||
+          current?.authorizationHeader !== mcpSession?.authorizationHeader ||
+          (mcpSession !== undefined && threadId !== input.threadId)
+        )
+          return yield* protocolError("MCP credential changes require a new Pi provider session");
+      });
+
       const registerThread = Effect.fnUntraced(function* (
         threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
         publish = true,
       ) {
+        yield* requireLaunchMcpSession(threadInput.threadId);
         if (rollbackBarrier !== null)
           return yield* protocolError("Cannot register a Pi thread during rollback");
         if (threadState !== null && threadState.activeTurn !== null) {
@@ -2402,6 +2417,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ) {
               return yield* protocolError("Pi turn requested for a different native session");
             }
+            yield* requireLaunchMcpSession(turnInput.threadId);
             // Fork adoption uses the orchestrator-allocated row; preserve that identity in later updates.
             const continuation =
               turnInput.message.createdBy === "agent" &&
@@ -2569,6 +2585,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
               return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
             }
+            yield* requireLaunchMcpSession(steerInput.threadId);
             const compactCommand = parsePiCompactCommand(steerInput.message.text);
             const payload =
               compactCommand === null
@@ -2936,6 +2953,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         ),
         forkThread: Effect.fn("PiAdapter.forkThread")(
           function* (forkInput) {
+            yield* requireLaunchMcpSession(forkInput.targetThreadId);
             if (threadState?.activeTurn != null) {
               return yield* protocolError("Cannot fork while a Pi turn is active");
             }

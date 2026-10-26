@@ -1573,6 +1573,47 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect.each(["rotate", "clear", "switch"] as const)(
+    "requires a new Pi process instead of reusing another MCP credential scope: %s",
+    (change) =>
+      Effect.gen(function* () {
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const config = {
+          environmentId: EnvironmentId.make("environment-pi-mcp"),
+          threadId: THREAD_ID,
+          providerSessionId: "mcp-session-pi",
+          providerInstanceId: PI_INSTANCE_ID,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer secret-pi-token",
+          browserToolsAvailable: true,
+        };
+        yield* sessions.set(config);
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        if (change === "rotate")
+          yield* sessions.set({ ...config, authorizationHeader: "Bearer rotated-token" });
+        if (change === "clear") yield* sessions.clear(THREAD_ID);
+        const result = yield* (
+          change === "switch"
+            ? runtime.ensureThread({
+                threadId: ThreadId.make("another-thread"),
+                modelSelection: modelSelection("default"),
+                runtimePolicy,
+              })
+            : startTurn(runtime, providerThread)
+        ).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure")
+          assert.match(String(result.failure.cause), /new Pi provider session/);
+        assert.isFalse(fake.allRequests().some((request) => request.type === "prompt"));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("rejects a resume while a turn is active", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

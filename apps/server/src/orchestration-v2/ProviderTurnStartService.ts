@@ -27,6 +27,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -122,6 +123,9 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+      Effect.provide(TreehouseLeases.layer),
+    );
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -1365,6 +1369,12 @@ export const layer: Layer.Layer<
           // Storage cleanup removes worktrees under the same lease. Only startup
           // holds it; the provider turn runs after it is released.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
+          if (thread.worktreePath !== null)
+            yield* leases.assertThread({
+              path: thread.worktreePath,
+              threadId: input.threadId,
+              requireBinding: false,
+            });
           const providerTurn = yield* thread.worktreePath === null
             ? start(input)
             : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));

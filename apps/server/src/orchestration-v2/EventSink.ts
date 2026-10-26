@@ -12,6 +12,9 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -212,6 +215,9 @@ const layerBase: Layer.Layer<
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+      Effect.provide(TreehouseLeases.layer),
+    );
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -241,16 +247,36 @@ const layerBase: Layer.Layer<
         .pipe(Effect.map((thread) => thread.lineage.relationshipToParent === "subagent")),
     );
     // Recorded before publication, so an interrupted publish cannot lose a committed outcome.
+    const commitLeaseBindings = Effect.fn("EventSink.commitLeaseBindings")(function* (
+      events: ReadonlyArray<OrchestrationV2StoredEvent>,
+    ) {
+      for (const stored of events) {
+        const event = stored.event;
+        if (
+          event.type === "thread.created" ||
+          event.type === "thread.metadata-updated" ||
+          event.type === "thread.deleted" ||
+          event.type === "thread.unarchived"
+        ) {
+          yield* leases.commitThread({
+            threadId: event.payload.id,
+            path: event.payload.worktreePath,
+            deleted: event.payload.deletedAt !== null,
+            sequence: stored.sequence,
+          });
+        }
+      }
+    });
     const publishStoredEvents = (
       events: ReadonlyArray<OrchestrationV2StoredEvent>,
       outcomes: ReadonlyArray<RunOutcome>,
     ) =>
-      runOutcomes
-        .record(outcomes)
-        .pipe(
-          Effect.andThen(eventStore.publishCommitted(events)),
-          Effect.andThen(publishLiveEvents(events)),
-        );
+      commitLeaseBindings(events).pipe(
+        Effect.ignoreCause({ log: true }),
+        Effect.andThen(runOutcomes.record(outcomes)),
+        Effect.andThen(eventStore.publishCommitted(events)),
+        Effect.andThen(publishLiveEvents(events)),
+      );
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
@@ -353,9 +379,25 @@ const layerBase: Layer.Layer<
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
-        yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
-          concurrency: 1,
-        });
+        yield* Effect.forEach(
+          storedEvents,
+          (stored) =>
+            Effect.gen(function* () {
+              const event = stored.event;
+              if (
+                (event.type === "thread.created" || event.type === "thread.metadata-updated") &&
+                event.payload.worktreePath !== null
+              ) {
+                yield* leases.bindThread({
+                  path: event.payload.worktreePath,
+                  threadId: event.payload.id,
+                  sequence: stored.sequence,
+                });
+              }
+              yield* projectionStore.apply(event);
+            }),
+          { concurrency: 1 },
+        );
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);
@@ -988,7 +1030,7 @@ const layerBase: Layer.Layer<
         ),
     } satisfies EventSinkV2Shape);
   }),
-);
+).pipe(Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)));
 
 /** Share the worker's outbox instance: enqueue wakeups are in-memory. */
 export const layerFromStores = layerBase;

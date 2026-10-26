@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import type * as GitVcsDriver from "./GitVcsDriver.ts";
+import { treehousePoolForPath } from "../workspace/treehouseLeases.ts";
 
 const INDEX_LIST_MAX_BYTES = 64 * 1024 * 1024;
 
@@ -29,6 +30,26 @@ export const removeLinkedWorktree = Effect.fn("WorktreeRemoval.removeLinkedWorkt
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const worktreePath = input.worktreePath;
+  const treehousePool = yield* treehousePoolForPath(worktreePath).pipe(
+    Effect.mapError(
+      (cause) =>
+        new GitCommandError({
+          operation: input.operation,
+          command: "git worktree remove",
+          cwd: input.cwd,
+          detail: "Cannot verify whether this worktree belongs to Treehouse.",
+          cause,
+        }),
+    ),
+  );
+  if (treehousePool !== null)
+    return yield* new GitCommandError({
+      operation: input.operation,
+      command: "git worktree remove",
+      cwd: input.cwd,
+      detail:
+        "Treehouse pool slots must be returned through their owning lease, never removed with Git.",
+    });
   const gitFile = path.join(worktreePath, ".git");
   // Git refuses to remove a worktree with untracked files unless forced, but
   // its check honors `status.showUntrackedFiles=no` and would delete them.

@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import {
   DEFAULT_TERMINAL_ID,
   DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
@@ -1494,6 +1495,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+    Effect.provide(TreehouseLeases.layer),
+  );
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
 
@@ -2293,6 +2297,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
 
     let ptyProcess: PtyAdapter.PtyProcess | null = null;
+    let releaseLeaseUse: Effect.Effect<void> = Effect.void;
     let startedShell: string | null = null;
 
     const startResult = yield* Effect.result(
@@ -2338,8 +2343,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
               }
             }
+            releaseLeaseUse = yield* leases
+              .pinUse({
+                path: input.worktreePath ?? input.cwd,
+                threadId: session.threadId,
+                kind: "terminal",
+              })
+              .pipe(
+                Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })),
+              );
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
+            // Keep the pin through asynchronous kill escalation, until the process actually exits.
+            spawnResult.process.onExit(() => {
+              runFork(releaseLeaseUse);
+            });
             startedShell = spawnResult.shellLabel;
 
             const processPid = ptyProcess.pid;
@@ -2393,6 +2411,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const error = startResult.failure;
       if (ptyProcess) {
         yield* startKillEscalation(ptyProcess, session.threadId, session.terminalId);
+      } else {
+        yield* releaseLeaseUse;
       }
 
       yield* modifyManagerState((state) => {
@@ -2693,10 +2713,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
+  const assertTreehouseWorkspace = Effect.fn("terminal.assertTreehouseWorkspace")(
+    function* (input: { cwd: string; worktreePath?: string | null | undefined; threadId: string }) {
+      yield* leases
+        .assertThread({
+          path: input.worktreePath ?? input.cwd,
+          threadId: input.threadId,
+          requireBinding: input.worktreePath != null,
+        })
+        .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
+    },
+  );
+
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     input: TerminalOpenInput,
   ) {
     const terminalId = input.terminalId;
+    yield* assertTreehouseWorkspace(input);
     yield* assertValidCwd(input.cwd);
 
     const sessionKey = toSessionKey(input.threadId, terminalId);
@@ -3274,7 +3307,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.flatMap((resolved) =>
           withWorkspaceLease(
             path.resolve(resolved.worktreePath ?? resolved.cwd),
-            restartResolved(resolved),
+            assertTreehouseWorkspace(resolved).pipe(Effect.andThen(restartResolved(resolved))),
           ),
         ),
       ),

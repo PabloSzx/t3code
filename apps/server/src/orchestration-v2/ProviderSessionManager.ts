@@ -41,6 +41,8 @@ import {
   withMetrics,
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
+import * as NodePath from "@effect/platform-node/NodePath";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
@@ -308,6 +310,9 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
       const fileSystem = yield* FileSystem.FileSystem;
+      const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+        Effect.provide(TreehouseLeases.layer.pipe(Layer.provide(NodePath.layer))),
+      );
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
@@ -2053,6 +2058,18 @@ export const layerWithOptions = (
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
               if (cwd !== null) {
+                yield* leases
+                  .assertThread({ path: cwd, threadId: input.threadId, requireBinding: false })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  );
                 const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
                   Effect.map((stat) => stat.type === "Directory"),
                   Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
@@ -2108,6 +2125,21 @@ export const layerWithOptions = (
                 }
               });
               const sessionScope = yield* Scope.fork(sessionScopes);
+              if (cwd !== null) {
+                const releaseLeaseUse = yield* leases
+                  .pinUse({ path: cwd, threadId: input.threadId, kind: "provider" })
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  );
+                yield* Scope.addFinalizer(sessionScope, releaseLeaseUse);
+              }
               yield* agentScope.clear(input.threadId);
               const runtime = yield* adapter
                 .openSession({

@@ -62,7 +62,10 @@ const normalize = (target: string) => {
 const layerWorktreeLocation = (worktreesDir = managedWorktreesDir) =>
   Layer.mergeAll(
     Path.layer,
-    Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as ServerConfig.ServerConfig["Service"]),
+    Layer.mock(ServerConfig.ServerConfig)({
+      worktreesDir,
+      stateDir: "/synthetic-state",
+    } as ServerConfig.ServerConfig["Service"]),
     ServerSettings.layerTest(),
   );
 
@@ -127,11 +130,11 @@ function startWithMissingWorktree(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
         Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
         IdAllocator.layer,
-        Layer.succeed(FileSystem.FileSystem, {
+        FileSystem.layerNoop({
           exists: () => Effect.succeed(false),
           realPath: (target: string) =>
             normalize(target) in realPaths
-              ? Effect.succeed(realPaths[normalize(target)])
+              ? Effect.succeed(realPaths[normalize(target)]!)
               : Effect.fail(
                   PlatformError.systemError({
                     _tag: "NotFound",
@@ -140,7 +143,7 @@ function startWithMissingWorktree(
                     pathOrDescriptor: target,
                   }),
                 ),
-        } as never),
+        }),
         layerWorktreeLocation(),
         Layer.mock(GitWorkflow.GitWorkflowService)({ pruneWorktrees, createWorktree }),
         Layer.mock(ProjectService.ProjectService)({

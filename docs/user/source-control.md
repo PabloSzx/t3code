@@ -142,6 +142,44 @@ For a local Git repository without a remote, **Publish Repository** creates a ho
 adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
 make your first commit before pushing.
 
+## Use Treehouse for new worktrees
+
+This fork optionally uses an installed [Treehouse](https://github.com/kunchenguid/treehouse)
+binary to allocate pooled Git worktrees. Configure it in each repository on the server machine:
+
+```bash
+git config --local t3.worktree-manager treehouse
+# Optional when Treehouse is not on the server's PATH:
+git config --local t3.treehouse-binary "$HOME/.bun/bin/treehouse"
+```
+
+The binary override must be an absolute executable path. Treehouse must support identified leases,
+`get --lease --json --lease-holder --no-fetch`, conditional return with `--if-lease-id`, and
+version 4 pool snapshots. T3 does not install or update Treehouse. Without this configuration,
+worktrees continue to use Git directly. To switch new allocations back to Git, run
+`git config --local --unset t3.worktree-manager`. Existing leases remain protected.
+
+Treehouse chooses the checkout location, ignoring T3's Storage folder setting. T3 keeps ownership
+of threads and child tasks, selects their exact requested branch or commit after allocation, and
+runs the project's T3 setup on that checkout. Treehouse may run its own hooks on its default base
+before T3 selects the requested ref. Keep shared provisioning in one place to avoid running it
+twice, and leave branch-specific setup in T3. T3 does not add a fetch, rebase, or forced reset.
+
+Automatic reclamation of pooled slots is disabled, even when the pool overlaps the Storage folder.
+Explicit removal returns the original lease ID, never with `--force`. It refuses while any
+nondeleted thread still references the checkout, including archived threads and children, or
+while a provider session or terminal still uses it. Delete or detach those threads and stop
+their sessions and terminals before returning the slot. If its lease changes, old T3 threads
+cannot resume in the recycled slot. Failed checkout, setup, or return operations retain leases
+rather than falling back to Git removal.
+
+T3 keeps lease identities, thread bindings, and live-use pins under `treehouse-leases` in its
+userdata directory, never inside the Treehouse pool. Keep T3 home outside the pool and retain
+this metadata across restarts. A server crash can leave a conservative `lifecycle.lock` or
+live-use pin there. These block return until an operator verifies that the relevant operations
+and processes have stopped and removes the stale lock or pin. T3 never guesses that a slot is
+free from its path or age.
+
 ## Create a pull request
 
 Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit

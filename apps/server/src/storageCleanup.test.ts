@@ -20,6 +20,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as TreehouseLeases from "./workspace/treehouseLeases.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Settings from "./serverSettings.ts";
@@ -1256,6 +1257,43 @@ describe("orphan worktree reports", () => {
 });
 
 describe("storage cleanup reports and local file policies", () => {
+  it.effect.each(["snapshot", "registry"])(
+    "never cleans a pooled slot identified by %s inside the storage folder",
+    (identity) =>
+      Effect.gen(function* () {
+        const f = yield* cleanupFixture();
+        f.setPolicy("tracked-changes");
+        if (identity === "snapshot") {
+          yield* f.fs.writeFileString(
+            `${f.config.worktreesDir}/treehouse-state.json`,
+            "unreadable pool state",
+          );
+        } else {
+          const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+            Effect.provide(TreehouseLeases.layer),
+          );
+          yield* leases.register({
+            pool: f.config.worktreesDir,
+            binary: "treehouse",
+            lease: {
+              path: f.worktree,
+              lease_id: "a".repeat(32),
+              lease_holder: "t3-code:test",
+              leased_at: "2026-01-01T00:00:00Z",
+            },
+          });
+        }
+        yield* f.fs.writeFileString(`${f.worktree}/notes.txt`, "keep this untracked file\n");
+        const report = yield* f.service.runNow;
+        expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
+          outcome: "kept",
+        });
+        expect(yield* f.fs.readFileString(`${f.worktree}/notes.txt`)).toBe(
+          "keep this untracked file\n",
+        );
+        expect(yield* f.fs.exists(`${f.worktree}/.git`)).toBe(true);
+      }).pipe(runCleanupTest),
+  );
   it.effect("automatically removes an eligible archived thread checkout", () =>
     runCleanupTest(
       Effect.gen(function* () {

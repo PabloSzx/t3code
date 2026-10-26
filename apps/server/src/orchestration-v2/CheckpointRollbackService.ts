@@ -21,6 +21,7 @@ import type * as ServerConfig from "../config.ts";
 import type * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -131,6 +132,9 @@ export const layer: Layer.Layer<
     const fileSystem = yield* FileSystem.FileSystem;
     const projects = yield* ProjectStore.ProjectStoreV2;
     const path = yield* Path.Path;
+    const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+      Effect.provide(TreehouseLeases.layer),
+    );
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
@@ -358,6 +362,12 @@ export const layer: Layer.Layer<
         function* (input) {
           // Storage cleanup removes worktrees under the same lease.
           const thread = yield* projections.getThread(input.threadId);
+          if (thread.worktreePath !== null)
+            yield* leases.assertThread({
+              path: thread.worktreePath,
+              threadId: input.threadId,
+              requireBinding: false,
+            });
           yield* thread.worktreePath === null
             ? execute(input)
             : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));

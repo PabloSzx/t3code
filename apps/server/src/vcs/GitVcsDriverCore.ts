@@ -40,6 +40,7 @@ import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import { resolveProjectFileBackedSetting } from "@t3tools/shared/projectSettings";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { removeEmptyDirectory } from "./removeEmptyDirectory.ts";
 import { explicitBareRepositoryEnv, gitConfigEnv } from "./VcsProcess.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
@@ -925,6 +926,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const { worktreesDir } = yield* ServerConfig.ServerConfig;
+  const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+    Effect.provide(TreehouseWorktrees.layer),
+  );
   const crypto = yield* Crypto.Crypto;
   const hostPlatform = yield* HostProcess.Platform;
   const serviceScope = yield* Effect.scope;
@@ -3682,7 +3686,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
     // Resolve sub/.. before taking the basename.
     const repoName = path.basename(path.resolve(input.cwd));
-    let worktreePath = input.path;
+    const treehousePath = yield* treehouse.create(input);
+    let worktreePath = treehousePath ?? input.path;
     if (worktreePath == null) {
       const parentDir = resolveWorktreesDirectory(
         options?.worktreesDirectory ?? "",
@@ -3707,28 +3712,29 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const onCheckoutProgress = progress?.onCheckoutProgress;
 
     const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
-    yield* executeGitWithStableDiagnostics(
-      "GitVcsDriver.createWorktree",
-      input.cwd,
-      ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
-      {
-        fallbackErrorDetail: "git worktree add failed",
-        timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
-        ...(onCheckoutProgress
-          ? {
-              // Git only prints checkout progress when stderr is a tty or the
-              // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0" },
-              progress: {
-                onStderrLine: (line) => {
-                  const parsed = parseGitCheckoutProgressLine(line);
-                  return parsed ? onCheckoutProgress(parsed) : Effect.void;
+    if (treehousePath === null)
+      yield* executeGitWithStableDiagnostics(
+        "GitVcsDriver.createWorktree",
+        input.cwd,
+        ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+        {
+          fallbackErrorDetail: "git worktree add failed",
+          timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
+          ...(onCheckoutProgress
+            ? {
+                // Git only prints checkout progress when stderr is a tty or the
+                // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
+                env: { GIT_PROGRESS_DELAY: "0" },
+                progress: {
+                  onStderrLine: (line) => {
+                    const parsed = parseGitCheckoutProgressLine(line);
+                    return parsed ? onCheckoutProgress(parsed) : Effect.void;
+                  },
                 },
-              },
-            }
-          : {}),
-      },
-    );
+              }
+            : {}),
+        },
+      );
 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);
@@ -4161,6 +4167,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // folder than this path. Resolving it once keeps Git, the Windows deletion
     // in removeLinkedWorktree, and the leftover cleanup below on one directory.
     const target = path.resolve(input.cwd, input.path);
+    if (yield* treehouse.remove({ cwd: input.cwd, path: target })) return;
     const result = yield* removeLinkedWorktree({
       operation: "GitVcsDriver.removeWorktree",
       cwd: input.cwd,

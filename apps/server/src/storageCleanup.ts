@@ -48,6 +48,7 @@ import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirect
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { removeLinkedWorktree } from "./vcs/worktreeRemoval.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
+import * as TreehouseLeases from "./workspace/treehouseLeases.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { isNetworkPath } from "@t3tools/shared/path";
@@ -217,6 +218,9 @@ const make = Effect.gen(function* () {
   const terminals = yield* TerminalManager.TerminalManager;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const treehouseLeases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+    Effect.provide(TreehouseLeases.layer),
+  );
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const orphanSizes = new Map<string, number | null>();
   const noteTerminal = (terminal: TerminalSummary) => {
@@ -781,6 +785,11 @@ const make = Effect.gen(function* () {
       };
       const keep = (reason: string) => entries.push({ ...entry, reason: sentence(reason) });
       yield* Effect.gen(function* () {
+        if (
+          (yield* treehouseLeases.knownPath(worktreePath)) ||
+          (yield* TreehouseLeases.treehousePoolForPath(worktreePath)) !== null
+        )
+          return keep("Treehouse automatic reclamation is disabled");
         if (!(yield* fs.exists(worktreePath))) return;
         if (deleted && !settings.worktreeOnDelete) return keep("no rules apply");
         if (members.length > 1 && worktreeOwner(members) === undefined)

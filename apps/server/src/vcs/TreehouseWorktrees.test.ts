@@ -2,8 +2,10 @@ import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import {
+  CheckpointScopeId,
   ContextTransferId,
   EventId,
+  NodeId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -12,6 +14,10 @@ import {
   ThreadId,
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as CheckpointService from "../orchestration-v2/CheckpointService.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
@@ -34,6 +40,124 @@ import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(testLayer));
+
+const historyLayer = EventSink.layer.pipe(
+  Layer.provideMerge(
+    Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+      Layer.provideMerge(Sqlite.layerMemory),
+    ),
+  ),
+  Layer.provideMerge(testLayer),
+);
+
+const returnedFamily = Effect.fn("test.returnedTreehouseFamily")(function* () {
+  const f = yield* fixture();
+  yield* f.driver.createWorktree({
+    cwd: f.cwd,
+    refName: f.parentSha,
+    newRefName: "retained-family",
+    path: null,
+  });
+  const sink = yield* EventSink.EventSinkV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const ownerId = ThreadId.make("retained-owner");
+  const owner: OrchestrationV2AppThread = {
+    id: ownerId,
+    projectId: ProjectId.make("retained-project"),
+    title: "Retained owner",
+    createdBy: "user",
+    creationSource: "web",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: "retained-family",
+    worktreePath: f.slot,
+    activeProviderThreadId: null,
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: ownerId },
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+  };
+  const children = ["retained-first", "retained-second"].map(
+    (id, index): OrchestrationV2AppThread => ({
+      ...owner,
+      id: ThreadId.make(id),
+      createdBy: "agent",
+      creationSource: "provider",
+      archivedAt: index === 1 ? now : null,
+      lineage: { parentThreadId: ownerId, relationshipToParent: "subagent", rootThreadId: ownerId },
+    }),
+  );
+  for (const thread of [owner, ...children]) {
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`create-${thread.id}`),
+          type: "thread.created",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: thread,
+        },
+      ],
+    });
+  }
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make("delete-owner"),
+        type: "thread.deleted",
+        threadId: ownerId,
+        occurredAt: now,
+        payload: { ...owner, deletedAt: now },
+      },
+    ],
+  });
+  const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+    Effect.provide(TreehouseWorktrees.layer),
+  );
+  const threadIds = [ownerId, ...children.map((thread) => thread.id)];
+  assert.isNull(
+    yield* treehouse.returnIdle({
+      cwd: f.cwd,
+      path: f.slot,
+      branch: owner.branch!,
+      headSha: f.parentSha,
+      threadIds,
+      recheck: Effect.succeed(null),
+    }),
+  );
+  return { f, sink, projections, now, owner, children, thread: children[0]!, threadIds, treehouse };
+});
+
+const resumeFamily = Effect.fn("test.resumeTreehouseFamily")(function* (
+  family: Effect.Success<ReturnType<typeof returnedFamily>>,
+) {
+  const { f, thread, treehouse } = family;
+  yield* f.driver.createWorktree({
+    cwd: f.cwd,
+    refName: f.parentSha,
+    newRefName: "unrelated-occupant",
+    path: null,
+  });
+  yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+  const scope = yield* Scope.make();
+  yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+  const resumed = yield* treehouse.resume({
+    cwd: f.cwd,
+    path: f.slot,
+    branch: thread.branch!,
+    threadId: thread.id,
+    preparationScope: scope,
+  });
+  return { path: resumed, scope };
+});
 
 describe("Treehouse worktrees", () => {
   it.live(
@@ -690,6 +814,187 @@ describe("Treehouse worktrees", () => {
         requireBinding: false,
       });
     }).pipe(provide),
+  );
+
+  it.live("preserves metadata edits without claiming a returned or recycled slot", () =>
+    Effect.gen(function* () {
+      const family = yield* returnedFamily();
+      const { f, sink, projections, thread, now } = family;
+      for (const recycled of [false, true]) {
+        if (recycled) {
+          yield* f.driver.createWorktree({
+            cwd: f.cwd,
+            refName: f.parentSha,
+            newRefName: "unrelated-occupant",
+            path: null,
+          });
+        }
+        const current = yield* projections.getThread(thread.id);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`metadata-${recycled}`),
+              type: "thread.metadata-updated",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: { ...current, title: `Edited ${recycled}`, lastVisitedAt: now },
+            },
+          ],
+        });
+        assert.strictEqual((yield* projections.getThread(thread.id)).title, `Edited ${recycled}`);
+        assert.isTrue(
+          Result.isFailure(
+            yield* f.leases.assertThread({ path: f.slot, threadId: thread.id }).pipe(Effect.result),
+          ),
+        );
+      }
+      assert.strictEqual(
+        yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
+        "unrelated-occupant",
+      );
+    }).pipe(Effect.scoped, Effect.provide(historyLayer)),
+  );
+
+  it.live(
+    "relocates checkpoint capture and history restore without changing unrelated scopes",
+    () =>
+      Effect.gen(function* () {
+        const family = yield* returnedFamily();
+        const { f, sink, projections, thread, now } = family;
+        const runId = RunId.make("resumed-checkpoint-run");
+        const scopes = ["historical", "current", "other-workspace"].map((kind) => ({
+          id: CheckpointScopeId.make(`${kind}-scope`),
+          threadId: thread.id,
+          runId: kind === "current" ? runId : RunId.make(`${kind}-run`),
+          nodeId: NodeId.make(`${kind}-node`),
+          parentScopeId: null,
+          providerThreadId: null,
+          kind: "root_run" as const,
+          ordinalWithinParent: 0,
+          advancesAppRunCount: true,
+          cwd: kind === "other-workspace" ? f.path.join(f.root, "other-workspace") : f.slot,
+          createdAt: now,
+        }));
+        yield* sink.write({
+          events: scopes.map((scope) => ({
+            id: EventId.make(`create-${scope.id}`),
+            type: "checkpoint-scope.created" as const,
+            threadId: thread.id,
+            occurredAt: now,
+            payload: scope,
+          })),
+        });
+        const { path: replacement, scope: preparation } = yield* resumeFamily(family);
+        assert.isNotNull(replacement);
+        yield* sink.rebindWorktree({
+          threadId: thread.id,
+          familyThreadIds: family.threadIds,
+          previousPath: f.slot,
+          path: replacement!,
+          branch: thread.branch!,
+          eventId: EventId.make("rebind-checkpoints"),
+          occurredAt: now,
+        });
+        yield* Scope.close(preparation, Exit.void);
+        const records = yield* projections.getThreadRecords(thread.id, ["checkpointScopes"]);
+        const current = records.checkpointScopes.find((scope) => scope.runId === runId)!;
+        const historical = records.checkpointScopes.find((scope) => scope.id === scopes[0]!.id)!;
+        assert.strictEqual(
+          records.checkpointScopes.find((scope) => scope.id === scopes[2]!.id)?.cwd,
+          scopes[2]!.cwd,
+        );
+        const captured: string[] = [];
+        const restored: string[] = [];
+        const checkpoints = yield* CheckpointService.CheckpointServiceV2.pipe(
+          Effect.provide(
+            CheckpointService.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  IdAllocator.layer,
+                  Layer.mock(CheckpointStore.CheckpointStore)({
+                    isGitRepository: () => Effect.succeed(true),
+                    hasCheckpointRef: () => Effect.succeed(false),
+                    captureCheckpoint: (input) =>
+                      Effect.sync(() => {
+                        captured.push(input.cwd);
+                      }),
+                    restoreCheckpoint: (input) =>
+                      Effect.sync(() => {
+                        restored.push(input.cwd);
+                        return true;
+                      }),
+                  }),
+                ),
+              ),
+              Layer.provide(NodeCrypto.layer),
+            ),
+          ),
+        );
+        yield* checkpoints.captureBaseline({ scope: current, ordinalWithinScope: 0 });
+        yield* checkpoints.capture({
+          scope: current,
+          ordinalWithinScope: 1,
+          runId,
+          nodeId: current.nodeId,
+          appRunOrdinal: 1,
+          capturedAt: now,
+        });
+        const historicalCheckpoint = yield* checkpoints.capture({
+          scope: historical,
+          ordinalWithinScope: 1,
+          runId: historical.runId,
+          nodeId: historical.nodeId,
+          appRunOrdinal: 0,
+          capturedAt: now,
+        });
+        yield* checkpoints.restore({ scope: historical, checkpoint: historicalCheckpoint });
+        assert.deepStrictEqual(captured, [replacement, replacement, replacement]);
+        assert.deepStrictEqual(restored, [replacement]);
+      }).pipe(Effect.scoped, Effect.provide(historyLayer)),
+  );
+
+  it.live("retains a deleted owner's association when its sharing siblings relocate", () =>
+    Effect.gen(function* () {
+      const family = yield* returnedFamily();
+      const { f, sink, projections, thread, now, owner, children, threadIds } = family;
+      const { path: replacement, scope: preparation } = yield* resumeFamily(family);
+      assert.isNotNull(replacement);
+      yield* sink.rebindWorktree({
+        threadId: thread.id,
+        familyThreadIds: threadIds,
+        previousPath: f.slot,
+        path: replacement!,
+        branch: thread.branch!,
+        eventId: EventId.make("rebind-family"),
+        occurredAt: now,
+      });
+      yield* Scope.close(preparation, Exit.void);
+      const tombstone = yield* projections.getThread(owner.id);
+      assert.strictEqual(tombstone.worktreePath, replacement);
+      assert.deepStrictEqual(tombstone.deletedAt, now);
+      for (const child of children) {
+        const rebound = yield* projections.getThread(child.id);
+        assert.strictEqual(rebound.worktreePath, replacement);
+        assert.deepStrictEqual(rebound.lineage, child.lineage);
+        assert.deepStrictEqual(rebound.archivedAt, child.archivedAt);
+        yield* f.leases.assertThread({ path: replacement!, threadId: child.id });
+      }
+      for (const child of children) {
+        const current = yield* projections.getThread(child.id);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`delete-${child.id}`),
+              type: "thread.deleted",
+              threadId: child.id,
+              occurredAt: now,
+              payload: { ...current, deletedAt: now },
+            },
+          ],
+        });
+      }
+      yield* f.driver.removeWorktree({ cwd: f.cwd, path: replacement! });
+    }).pipe(Effect.scoped, Effect.provide(historyLayer)),
   );
 
   it.live(

@@ -994,14 +994,20 @@ effectIt.live(
         failReadsAfterRunning: true,
         rebindWorktree: (input) =>
           sink.rebindWorktree(input).pipe(
-            Effect.andThen(projections.getThread(input.threadId).pipe(Effect.orDie)),
-            Effect.tap((thread) =>
-              Effect.sync(() => harness.setProjection({ ...harness.projection(), thread })),
+            Effect.andThen(
+              projections.getThreadRecords(input.threadId, ["checkpointScopes"]).pipe(Effect.orDie),
+            ),
+            Effect.tap(({ thread, checkpointScopes }) =>
+              Effect.sync(() =>
+                harness.setProjection({ ...harness.projection(), thread, checkpointScopes }),
+              ),
             ),
             Effect.asVoid,
           ),
       });
       const threadId = harness.projection().thread.id;
+      const checkpointScope = { ...harness.projection().checkpointScopes[0]!, cwd: f.slot };
+      harness.setProjection({ ...harness.projection(), checkpointScopes: [checkpointScope] });
       const now = yield* DateTime.now;
       yield* sink.write({
         events: [
@@ -1033,6 +1039,17 @@ effectIt.live(
               lastVisitedAt: null,
               deletedAt: null,
             },
+          },
+        ],
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("resume-checkpoint-scope"),
+            type: "checkpoint-scope.created",
+            threadId,
+            occurredAt: now,
+            payload: checkpointScope,
           },
         ],
       });
@@ -1086,6 +1103,7 @@ effectIt.live(
         expect.objectContaining({
           appThread: expect.objectContaining({ worktreePath: replacement }),
           runtimePolicy: expect.objectContaining({ cwd: replacement }),
+          checkpointScope: expect.objectContaining({ cwd: replacement }),
         }),
       );
       expect(yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] })).toBe("unrelated");

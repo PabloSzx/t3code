@@ -271,6 +271,14 @@ const layerBase: Layer.Layer<
           event.type === "thread.deleted" ||
           event.type === "thread.unarchived"
         ) {
+          if (
+            event.type === "thread.metadata-updated" &&
+            event.payload.deletedAt === null &&
+            event.payload.worktreePath !== null &&
+            (yield* leases.knownPath(event.payload.worktreePath))
+          )
+            // Positive workspace changes bind in the transaction; metadata cannot detach a pending rebind.
+            continue;
           yield* leases.commitThread({
             threadId: event.payload.id,
             path: event.payload.worktreePath,
@@ -391,7 +399,11 @@ const layerBase: Layer.Layer<
 
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
-      Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
+      Effect.fnUntraced(function* (input: {
+        events: ReadonlyArray<OrchestrationV2StoredEvent>;
+        rebindWorktrees?: boolean;
+      }) {
+        const storedEvents = input.events;
         yield* Effect.forEach(
           storedEvents,
           (stored) =>
@@ -401,16 +413,26 @@ const layerBase: Layer.Layer<
                 (event.type === "thread.created" || event.type === "thread.metadata-updated") &&
                 event.payload.worktreePath !== null
               ) {
-                yield* leases.bindThread({
-                  path: event.payload.worktreePath,
-                  threadId: event.payload.id,
-                  sequence: stored.sequence,
-                  ...(event.type === "thread.created" &&
-                  event.payload.lineage.relationshipToParent === "fork" &&
-                  event.payload.forkedFrom?.type === "run"
-                    ? { sourceThreadId: event.payload.forkedFrom.threadId }
-                    : {}),
-                });
+                let bindWorkspace =
+                  input.rebindWorktrees === true || event.type === "thread.created";
+                if (!bindWorkspace && event.type === "thread.metadata-updated") {
+                  const previous = yield* projectionStore.getThread(event.threadId);
+                  bindWorkspace =
+                    previous.worktreePath !== event.payload.worktreePath ||
+                    previous.branch !== event.payload.branch ||
+                    (previous.deletedAt === null) !== (event.payload.deletedAt === null);
+                }
+                if (bindWorkspace)
+                  yield* leases.bindThread({
+                    path: event.payload.worktreePath,
+                    threadId: event.payload.id,
+                    sequence: stored.sequence,
+                    ...(event.type === "thread.created" &&
+                    event.payload.lineage.relationshipToParent === "fork" &&
+                    event.payload.forkedFrom?.type === "run"
+                      ? { sourceThreadId: event.payload.forkedFrom.threadId }
+                      : {}),
+                  });
               }
               yield* projectionStore.apply(event);
             }),
@@ -501,7 +523,7 @@ const layerBase: Layer.Layer<
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
             events: normalized,
           });
-          const outcomes = yield* applyStoredEvents(committed);
+          const outcomes = yield* applyStoredEvents({ events: committed });
           yield* effectOutbox.enqueue(input.effects);
           return { committed, outcomes };
         }).pipe(Effect.withTracerEnabled(false)),
@@ -521,28 +543,32 @@ const layerBase: Layer.Layer<
         yield* commitThenPublish(
           Effect.gen(function* () {
             const events: OrchestrationV2DomainEvent[] = [];
+            const reboundThreads: ThreadId[] = [];
             for (const threadId of new Set([input.threadId, ...(input.familyThreadIds ?? [])])) {
               const current = yield* projectionStore.getThread(threadId);
+              if (current.deletedAt !== null && threadId === input.threadId)
+                return yield* new TreehouseLeases.TreehouseLeaseError({
+                  path: input.previousPath,
+                  reason: "stale-binding",
+                });
               if (
-                current.deletedAt === null &&
                 current.branch === input.branch &&
                 current.worktreePath === input.path &&
                 input.path !== input.previousPath
               ) {
-                yield* leases.assertThread({ path: input.path, threadId });
+                if (current.deletedAt === null)
+                  yield* leases.assertThread({ path: input.path, threadId });
+                reboundThreads.push(threadId);
                 continue;
               }
-              if (
-                current.deletedAt !== null ||
-                current.branch !== input.branch ||
-                current.worktreePath !== input.previousPath
-              ) {
+              if (current.branch !== input.branch || current.worktreePath !== input.previousPath) {
                 if (threadId !== input.threadId) continue;
                 return yield* new TreehouseLeases.TreehouseLeaseError({
                   path: input.previousPath,
                   reason: "stale-binding",
                 });
               }
+              reboundThreads.push(threadId);
               events.push({
                 id:
                   threadId === input.threadId
@@ -554,8 +580,26 @@ const layerBase: Layer.Layer<
                 payload: { ...current, worktreePath: input.path, updatedAt: input.occurredAt },
               });
             }
+            if (input.path !== input.previousPath) {
+              // Checkpoint cwd routes future captures and historical restores to the relocated checkout.
+              for (const threadId of reboundThreads) {
+                const { checkpointScopes } = yield* projectionStore.getThreadRecords(threadId, [
+                  "checkpointScopes",
+                ]);
+                for (const scope of checkpointScopes) {
+                  if (scope.cwd !== input.previousPath) continue;
+                  events.push({
+                    id: EventId.make(`${input.eventId}:checkpoint:${scope.id}`),
+                    type: "checkpoint-scope.created",
+                    threadId,
+                    occurredAt: input.occurredAt,
+                    payload: { ...scope, cwd: input.path },
+                  });
+                }
+              }
+            }
             const committed = yield* eventStore.append({ events });
-            const outcomes = yield* applyStoredEvents(committed);
+            const outcomes = yield* applyStoredEvents({ events: committed, rebindWorktrees: true });
             return { committed, outcomes };
           }),
           ({ committed, outcomes }) => publishStoredEvents(committed, outcomes),
@@ -608,7 +652,7 @@ const layerBase: Layer.Layer<
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
               events: normalized,
             });
-            const outcomes = yield* applyStoredEvents(storedEvents);
+            const outcomes = yield* applyStoredEvents({ events: storedEvents });
             yield* effectOutbox.enqueue(input.effects ?? []);
             return { committed: true as const, storedEvents, outcomes };
           }),
@@ -673,7 +717,7 @@ const layerBase: Layer.Layer<
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
             events: normalized,
           });
-          const outcomes = yield* applyStoredEvents(storedEvents);
+          const outcomes = yield* applyStoredEvents({ events: storedEvents });
           return { committed: true as const, storedEvents, outcomes };
         }),
         (result) =>
@@ -709,7 +753,7 @@ const layerBase: Layer.Layer<
 
           const normalized = yield* normalizeEvents(input.events);
           const storedEvents = yield* eventStore.append({ events: normalized });
-          const outcomes = yield* applyStoredEvents(storedEvents);
+          const outcomes = yield* applyStoredEvents({ events: storedEvents });
           return { committed: true as const, storedEvents, outcomes };
         }),
         (result) =>
@@ -770,7 +814,7 @@ const layerBase: Layer.Layer<
               new Error(`Command ${input.commandId} produced no orchestration events.`),
             );
           }
-          const outcomes = yield* applyStoredEvents(storedEvents);
+          const outcomes = yield* applyStoredEvents({ events: storedEvents });
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,

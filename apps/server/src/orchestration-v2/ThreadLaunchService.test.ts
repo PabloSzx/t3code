@@ -1100,6 +1100,7 @@ it.effect.each(["stable", "upstream/release"])(
     }).pipe(
       Effect.provide(
         GitVcsDriver.layer.pipe(
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "launch-remote-git-" })),
           Layer.provideMerge(NodeServices.layer),
         ),

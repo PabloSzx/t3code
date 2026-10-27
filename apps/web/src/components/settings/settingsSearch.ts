@@ -520,6 +520,20 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["git submodule init recursive top-level none worktree t3.json"],
   },
   {
+    id: "treehouse-worktrees",
+    title: "Use Treehouse for new worktrees",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["treehouse pooled worktrees allocator git enable disable host environment"],
+  },
+  {
+    id: "treehouse-binary-path",
+    title: "Treehouse binary path",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["treehouse cli executable absolute path host desktop"],
+  },
+  {
     id: "start-from-origin",
     title: "Start from remote",
     to: "/settings/general",

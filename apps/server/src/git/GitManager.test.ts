@@ -651,6 +651,7 @@ function makeManager(input?: {
       )
     : GitVcsDriver.layer;
   const layerVcsDriver = (watchesGitSpawns ? Layer.fresh(gitVcsDriver) : gitVcsDriver).pipe(
+    Layer.provide(layerServerSettings),
     Layer.provide(layerGitDriverSpawner),
     Layer.provideMerge(VcsProcess.layer),
     Layer.provideMerge(NodeServices.layer),
@@ -717,6 +718,7 @@ function makeManager(input?: {
 const asThreadId = (threadId: string) => threadId as ThreadId;
 
 const layerGitManagerTest = GitVcsDriver.layer.pipe(
+  Layer.provide(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-git-manager-test-" })),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),

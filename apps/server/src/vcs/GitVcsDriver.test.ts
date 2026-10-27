@@ -20,6 +20,7 @@ import { CheckpointRef, GitCommandError, VcsProcessExitError } from "@t3tools/co
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { gitCommandDuration, gitCommandsTotal } from "../observability/Metrics.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -31,7 +32,7 @@ import { runVcsDriverContractSuite } from "./testing/VcsDriverContractHarness.ts
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-contract-",
-});
+}).pipe(Layer.provideMerge(ServerSettings.layerTest().pipe(Layer.orDie)));
 const layerGitContract = Layer.mergeAll(GitVcsDriver.layerVcs, GitVcsDriver.layer).pipe(
   Layer.provide(layerServerConfig),
   Layer.provideMerge(VcsProcess.layer),

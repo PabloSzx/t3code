@@ -106,7 +106,7 @@ const clientLaunchHarness = (input: {
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
   ).pipe(
-    Layer.provideMerge(GitVcsDriver.layer),
+    Layer.provideMerge(GitVcsDriver.layer.pipe(Layer.provide(ServerSettings.layerTest()))),
     Layer.provideMerge(VcsProcess.layer),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-client-launch-" }).pipe(

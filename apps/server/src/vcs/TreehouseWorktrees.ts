@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
@@ -18,12 +19,16 @@ import {
   treehousePoolForPath,
 } from "../workspace/treehouseLeases.ts";
 
+export interface TreehouseCreateOptions {
+  readonly preparationScope: Scope.Scope;
+}
+
 export class TreehouseWorktrees extends Context.Service<
   TreehouseWorktrees,
   {
     readonly create: (
       input: VcsCreateWorktreeInput,
-      options: { preparationScope: Scope.Scope },
+      options: TreehouseCreateOptions,
     ) => Effect.Effect<string | null, GitCommandError>;
     readonly remove: (input: {
       cwd: string;
@@ -34,6 +39,7 @@ export class TreehouseWorktrees extends Context.Service<
 
 const isGitError = Schema.is(GitCommandError);
 const isLeaseError = Schema.is(TreehouseLeaseError);
+const isSpawnError = Schema.is(ProcessRunner.ProcessSpawnError);
 const decodeLease = Schema.decodeEffect(Schema.fromJsonString(TreehouseLease));
 
 const make = Effect.gen(function* () {
@@ -41,6 +47,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
     Effect.provide(TreehouseLeases.layer),
   );
@@ -68,27 +75,6 @@ const make = Effect.gen(function* () {
     }
     return output.stdout.trim();
   });
-  const config = Effect.fn("TreehouseWorktrees.config")(function* (input: {
-    cwd: string;
-    key: string;
-  }) {
-    const output = yield* runner.run({
-      command: "git",
-      args: ["config", "--local", "--get", input.key],
-      cwd: input.cwd,
-      stdin: "",
-    });
-    if (output.code === 1) return null;
-    if (output.code !== 0)
-      return yield* new GitCommandError({
-        operation: "TreehouseWorktrees.config",
-        command: "git config",
-        cwd: input.cwd,
-        detail: "Cannot read repository worktree manager configuration.",
-        cause: output,
-      });
-    return output.stdout.trim();
-  });
   const mapError = (input: { cwd: string; cause: unknown }) =>
     isGitError(input.cause)
       ? input.cause
@@ -98,7 +84,9 @@ const make = Effect.gen(function* () {
           cwd: input.cwd,
           detail: isLeaseError(input.cause)
             ? input.cause.message
-            : "Cannot verify Treehouse worktree ownership. No native Git fallback is performed.",
+            : isSpawnError(input.cause)
+              ? "Cannot start Treehouse on this environment. Install a compatible CLI on the host or set its absolute binary path in Settings. No native Git fallback is performed."
+              : "Cannot verify Treehouse worktree ownership. No native Git fallback is performed.",
           cause: input.cause,
         });
 
@@ -114,15 +102,8 @@ const make = Effect.gen(function* () {
         ) {
           return yield* new TreehouseLeaseError({ path: input.path, reason: "missing" });
         }
-        const manager = yield* config({ cwd: input.cwd, key: "t3.worktree-manager" });
-        if (manager === null || manager === "git") return null;
-        if (manager !== "treehouse")
-          return yield* new GitCommandError({
-            operation: "TreehouseWorktrees.create",
-            command: "git config",
-            cwd: input.cwd,
-            detail: "t3.worktree-manager must be git or treehouse.",
-          });
+        const current = yield* settings.getSettings;
+        if (!current.treehouseWorktreesEnabled) return null;
         if (input.path != null)
           return yield* new GitCommandError({
             operation: "TreehouseWorktrees.create",
@@ -130,14 +111,14 @@ const make = Effect.gen(function* () {
             cwd: input.cwd,
             detail: "Treehouse chooses the pool path; an explicit worktree path is not supported.",
           });
-        const binary =
-          (yield* config({ cwd: input.cwd, key: "t3.treehouse-binary" })) ?? "treehouse";
-        if (binary !== "treehouse" && !path.isAbsolute(binary))
+        const binary = current.treehouseBinaryPath || "treehouse";
+        if (current.treehouseBinaryPath !== "" && !path.isAbsolute(binary))
           return yield* new GitCommandError({
             operation: "TreehouseWorktrees.create",
             command: "treehouse",
             cwd: input.cwd,
-            detail: "t3.treehouse-binary must name an absolute executable path.",
+            detail:
+              "Treehouse binary path must be an absolute executable path on this environment's host. Change it in Settings or leave it empty to use the host PATH.",
           });
         const commit = yield* run({
           cwd: input.cwd,

@@ -144,22 +144,30 @@ make your first commit before pushing.
 
 ## Use Treehouse for new worktrees
 
-This fork optionally uses an installed [Treehouse](https://github.com/kunchenguid/treehouse)
-binary to allocate pooled Git worktrees. Configure it in each repository on the server machine:
+T3 Code can use an installed [Treehouse](https://github.com/kunchenguid/treehouse) CLI to allocate
+pooled Git worktrees. Native Git is the default. In **Settings → General → Projects & threads**,
+select the environment and enable **Use Treehouse for new worktrees**. On mobile, use
+**Settings → Source control → Worktrees** with **All projects** selected.
 
-```bash
-git config --local t3.worktree-manager treehouse
-# Optional when Treehouse is not on the server's PATH:
-git config --local t3.treehouse-binary "$HOME/.bun/bin/treehouse"
-```
+This applies to new worktrees in any Git repository on the selected environment. It is saved on
+that server, shared by its connected clients, and survives restarts. Remote and tunnel connections
+use the host's Treehouse installation, not the client's. **All environments** changes the connected
+servers you select, not offline or future servers. Update older servers before enabling it.
 
-The binary override must be an absolute executable path. Treehouse must support identified leases,
+If Treehouse is not on the server's PATH, set **Treehouse binary path** to its absolute executable
+path on that host. This is often needed when launching the desktop app outside a terminal.
+Run `command -v treehouse` in a terminal on the host to find the path. Leave the setting empty to
+use the host PATH. T3 does not install or update Treehouse. The CLI must support identified leases,
 `get --lease --json --lease-holder --no-fetch`, conditional return with `--if-lease-id`, and
-version 4 pool snapshots. T3 does not install or update Treehouse. Without this configuration,
-worktrees continue to use Git directly. To switch new allocations back to Git, run
-`git config --local --unset t3.worktree-manager`. Existing leases remain protected.
+version 4 pool snapshots. An unavailable or incompatible CLI stops allocation with an error;
+T3 never silently falls back to native Git while Treehouse is enabled.
 
-Treehouse chooses the checkout location, ignoring T3's Storage folder setting. T3 keeps ownership
+Turn the setting off to use native Git for future allocations. Neither enabling nor disabling it
+moves existing worktrees, switches their branches, or releases their leases. Existing Treehouse
+checkouts keep their ownership and live-use protections even when the setting is off.
+
+Treehouse chooses the checkout location, ignoring T3's Storage folder setting. Requests for an
+explicit new checkout path are not supported while it is enabled. T3 keeps ownership
 of threads and child tasks, selects their exact requested branch or commit after allocation, and
 runs the project's T3 setup on that checkout. Treehouse may run its own hooks on its default base
 before T3 selects the requested ref. Keep shared provisioning in one place to avoid running it

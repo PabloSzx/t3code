@@ -5,11 +5,29 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 
-import { filterSharedServerPatch, pickSharedServerSettings } from "./sharedSettings.ts";
+import {
+  filterSharedServerPatch,
+  pickSharedServerSettings,
+  splitSharedServerPatch,
+} from "./sharedSettings.ts";
 
 const restartCapabilities = { threadRestartContinuation: true };
 
 describe("filterSharedServerPatch", () => {
+  it("keeps host allocator opt-in and executable paths out of automatic cross-environment sync", () => {
+    const patch = {
+      treehouseWorktreesEnabled: true,
+      treehouseBinaryPath: "/opt/tools/treehouse",
+      newWorktreesStartFromOrigin: true,
+    };
+    expect(splitSharedServerPatch(patch)).toEqual({
+      localPatch: { treehouseWorktreesEnabled: true, treehouseBinaryPath: "/opt/tools/treehouse" },
+      sharedPatch: { newWorktreesStartFromOrigin: true },
+    });
+    const shared = pickSharedServerSettings({ ...DEFAULT_SERVER_SETTINGS, ...patch });
+    expect(shared).not.toHaveProperty("treehouseWorktreesEnabled");
+    expect(shared).not.toHaveProperty("treehouseBinaryPath");
+  });
   it.each([true, false])(
     "resets a disabled default provider only on the originating environment (%s)",
     (targetIsSource) => {

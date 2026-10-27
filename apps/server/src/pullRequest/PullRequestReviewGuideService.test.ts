@@ -217,6 +217,7 @@ const makeLayer = (input: {
 
 const layerBase = Layer.mergeAll(
   GitVcsDriver.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
     Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-review-guide-git-" })),
     Layer.provideMerge(VcsProcess.layer),
   ),

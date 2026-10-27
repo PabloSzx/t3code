@@ -16,6 +16,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
@@ -220,6 +221,7 @@ it.effect.each(["--bare", "source.git"])(
     }).pipe(
       Effect.provide(
         GitVcsDriver.layer.pipe(
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provide(
             ServerConfig.layerTest(process.cwd(), {
               prefix: "t3-clone-options-config-",

@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
@@ -44,6 +45,7 @@ it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
           ),
           Layer.provide(Layer.mock(GitManager.GitManager)({})),
           Layer.provideMerge(GitVcsDriver.layer),
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provideMerge(VcsProcess.layer),
           Layer.provideMerge(
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-ref-named-" }).pipe(

@@ -28,6 +28,7 @@ import * as Result from "effect/Result";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
@@ -38,6 +39,7 @@ const allocator = `import { readFileSync, writeFileSync, appendFileSync, existsS
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 const root = dirname(fileURLToPath(import.meta.url));
 const repo = join(root, "repo");
 const pool = join(root, "pool");
@@ -57,7 +59,7 @@ if (args[0] === "get") {
   if (!existsSync(slot)) git(repo, ["worktree", "add", "--detach", slot, "main"]);
   else git(slot, ["switch", "--detach", "main"]);
   const holder = args[args.indexOf("--lease-holder") + 1];
-  const lease = { path: slot, lease_id: existsSync(stateFile) ? "b".repeat(32) : "a".repeat(32), lease_holder: holder, leased_at: "2026-01-01T00:00:00Z", base_branch: "" };
+  const lease = { path: slot, lease_id: randomBytes(16).toString("hex"), lease_holder: holder, leased_at: "2026-01-01T00:00:00Z", base_branch: "" };
   writeFileSync(stateFile, JSON.stringify({ version: 4, worktrees: [{ ...lease, leased: true }] }));
   console.log(JSON.stringify(lease));
 } else if (args[0] === "return") {
@@ -68,7 +70,9 @@ if (args[0] === "get") {
   writeFileSync(stateFile, JSON.stringify(state));
 } else process.exit(6);
 `;
-const fixture = Effect.fn("TreehouseTest.fixture")(function* () {
+const fixture = Effect.fn("TreehouseTest.fixture")(function* (
+  options: { treehouseEnabled?: boolean } = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
@@ -101,8 +105,13 @@ const fixture = Effect.fn("TreehouseTest.fixture")(function* () {
   yield* git({ args: ["commit", "-am", "parent"] });
   const parentSha = yield* git({ args: ["rev-parse", "HEAD"] });
   yield* git({ args: ["update-ref", "refs/remotes/origin/main", parentSha] });
-  yield* git({ args: ["config", "t3.worktree-manager", "treehouse"] });
-  yield* git({ args: ["config", "t3.treehouse-binary", binary] });
+  const settings = yield* ServerSettings.ServerSettingsService;
+  if (options.treehouseEnabled !== false) {
+    yield* settings.updateSettings({
+      treehouseWorktreesEnabled: true,
+      treehouseBinaryPath: binary,
+    });
+  }
   const driver = yield* makeGitVcsDriverCore();
   const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
     Effect.provide(TreehouseLeases.layer),
@@ -116,6 +125,8 @@ const fixture = Effect.fn("TreehouseTest.fixture")(function* () {
     git,
     driver,
     leases,
+    settings,
+    binary,
     baseSha,
     parentSha,
     registry: path.join(config.stateDir, "treehouse-leases"),
@@ -123,6 +134,7 @@ const fixture = Effect.fn("TreehouseTest.fixture")(function* () {
   };
 });
 const testLayer = ProcessRunner.layer.pipe(
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(
     ServerConfig.layerTest(process.cwd(), { prefix: "treehouse-config-" }).pipe(
       Layer.provideMerge(NodeServices.layer),
@@ -132,6 +144,70 @@ const testLayer = ProcessRunner.layer.pipe(
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(testLayer));
 
 describe("Treehouse worktrees", () => {
+  it.live(
+    "keeps native allocation and removal by default, ignoring retired repository selectors",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({ treehouseEnabled: false });
+        yield* f.git({ args: ["config", "t3.worktree-manager", "treehouse"] });
+        yield* f.git({ args: ["config", "t3.treehouse-binary", f.binary] });
+        const nativePath = f.path.join(f.root, "native");
+        const created = yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: "main",
+          newRefName: "native-branch",
+          path: nativePath,
+        });
+        assert.strictEqual(created.worktree.path, nativePath);
+        assert.isFalse(yield* f.fs.exists(f.path.join(f.root, "calls")));
+        assert.strictEqual(yield* f.git({ args: ["rev-parse", "HEAD"] }), f.parentSha);
+        yield* f.driver.removeWorktree({ cwd: f.cwd, path: nativePath });
+        assert.isFalse(yield* f.fs.exists(nativePath));
+        assert.strictEqual(
+          yield* f.git({ args: ["rev-parse", "refs/heads/native-branch"] }),
+          f.baseSha,
+        );
+      }).pipe(provide),
+  );
+  it.live(
+    "applies host enablement to unrelated repositories without repository configuration",
+    () =>
+      Effect.gen(function* () {
+        for (let index = 0; index < 2; index++) {
+          const f = yield* fixture();
+          const created = yield* f.driver.createWorktree({
+            cwd: f.cwd,
+            refName: f.parentSha,
+            path: null,
+          });
+          assert.strictEqual(created.worktree.path, f.slot);
+          assert.strictEqual(
+            yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] }),
+            f.parentSha,
+          );
+          assert.strictEqual(yield* f.git({ args: ["branch", "--show-current"] }), "parent");
+        }
+      }).pipe(provide),
+  );
+  it.live.each(["relative/treehouse", "/missing-t3-test/treehouse"])(
+    "refuses unusable host binary %s without creating a native worktree",
+    (binary) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.settings.updateSettings({ treehouseBinaryPath: binary });
+        const result = yield* f.driver
+          .createWorktree({ cwd: f.cwd, refName: "main", path: null })
+          .pipe(Effect.result);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) assert.include(result.failure.message, "Settings");
+        assert.strictEqual(
+          (yield* f.git({ args: ["worktree", "list", "--porcelain"] }))
+            .split("\n")
+            .filter((line) => line.startsWith("worktree ")).length,
+          1,
+        );
+      }).pipe(provide),
+  );
   it.live.each(["parent", "commit", "origin/main", "HEAD", "HEAD~1"])(
     "resolves %s in the caller checkout before creating a branch",
     (ref) =>
@@ -172,6 +248,8 @@ describe("Treehouse worktrees", () => {
           yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
           "main",
         );
+        const initialLease = yield* f.leases.read(f.slot);
+        assert.isNotNull(initialLease);
         const restarted = yield* makeGitVcsDriverCore();
         const lock = f.path.join(f.registry, "lifecycle.lock");
         yield* f.fs.makeDirectory(lock);
@@ -184,7 +262,10 @@ describe("Treehouse worktrees", () => {
         yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot, force: true });
         assert.isTrue(yield* f.fs.exists(f.slot));
         const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
-        assert.include(calls, `return ${f.slot} --if-lease-id ${"a".repeat(32)}`);
+        assert.include(
+          calls,
+          `return ${f.slot} --if-lease-id ${initialLease!.record.lease.lease_id}`,
+        );
         assert.notInclude(calls, "--force");
         assert.isTrue(Result.isFailure(yield* f.leases.read(f.slot).pipe(Effect.result)));
       }).pipe(provide),
@@ -277,72 +358,86 @@ describe("Treehouse worktrees", () => {
       assert.include(yield* f.git({ args: ["worktree", "list", "--porcelain"] }), f.slot);
     }).pipe(provide),
   );
-  it.live("blocks all shared references and live uses, then allows explicit return", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
-      yield* f.leases.bindThread({ path: f.slot, threadId: "parent-thread", sequence: 1 });
-      yield* f.leases.bindThread({ path: f.slot, threadId: "child-thread", sequence: 2 });
-      const releaseProvider = yield* f.leases.pinUse({
-        path: f.slot,
-        threadId: "parent-thread",
-        kind: "provider",
-      });
-      const releaseTerminal = yield* f.leases.pinUse({
-        path: f.slot,
-        threadId: "child-thread",
-        kind: "terminal",
-      });
-      yield* f.leases.commitThread({
-        path: f.slot,
-        threadId: "parent-thread",
-        deleted: true,
-        sequence: 3,
-      });
-      const restarted = yield* makeGitVcsDriverCore();
-      assert.isTrue(
-        Result.isFailure(
-          yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
-        ),
-      );
-      yield* f.leases.commitThread({
-        path: null,
-        threadId: "child-thread",
-        deleted: false,
-        sequence: 4,
-      });
-      assert.isTrue(
-        Result.isFailure(
-          yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
-        ),
-      );
-      yield* releaseProvider;
-      assert.isTrue(
-        Result.isFailure(
-          yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
-        ),
-      );
-      yield* releaseTerminal;
-      yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot, force: true });
-      // Reacquire the same physical path, then prove old identities cannot be rebound or resumed.
-      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
-      assert.isTrue(
-        Result.isFailure(
-          yield* f.leases
-            .assertThread({ path: f.slot, threadId: "parent-thread", requireBinding: false })
-            .pipe(Effect.result),
-        ),
-      );
-      assert.isTrue(
-        Result.isFailure(
-          yield* f.leases
-            .bindThread({ path: f.slot, threadId: "child-thread", sequence: 5 })
-            .pipe(Effect.result),
-        ),
-      );
-      yield* f.leases.bindThread({ path: f.slot, threadId: "new-thread", sequence: 6 });
-      yield* f.leases.assertThread({ path: f.slot, threadId: "new-thread" });
-    }).pipe(provide),
+  it.live(
+    "keeps shared references and live uses protected after disablement, then allows explicit return",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+        yield* f.leases.bindThread({ path: f.slot, threadId: "parent-thread", sequence: 1 });
+        yield* f.leases.bindThread({ path: f.slot, threadId: "child-thread", sequence: 2 });
+        const releaseProvider = yield* f.leases.pinUse({
+          path: f.slot,
+          threadId: "parent-thread",
+          kind: "provider",
+        });
+        const releaseTerminal = yield* f.leases.pinUse({
+          path: f.slot,
+          threadId: "child-thread",
+          kind: "terminal",
+        });
+        yield* f.settings.updateSettings({
+          treehouseWorktreesEnabled: false,
+          treehouseBinaryPath: "/missing-t3-test/treehouse",
+        });
+        const nativePath = f.path.join(f.root, "native-after-disable");
+        yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: nativePath });
+        assert.isTrue(yield* f.fs.exists(nativePath));
+        yield* f.driver.removeWorktree({ cwd: f.cwd, path: nativePath });
+        yield* f.leases.commitThread({
+          path: f.slot,
+          threadId: "parent-thread",
+          deleted: true,
+          sequence: 3,
+        });
+        const restarted = yield* makeGitVcsDriverCore();
+        assert.isTrue(
+          Result.isFailure(
+            yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
+          ),
+        );
+        yield* f.leases.commitThread({
+          path: null,
+          threadId: "child-thread",
+          deleted: false,
+          sequence: 4,
+        });
+        assert.isTrue(
+          Result.isFailure(
+            yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
+          ),
+        );
+        yield* releaseProvider;
+        assert.isTrue(
+          Result.isFailure(
+            yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
+          ),
+        );
+        yield* releaseTerminal;
+        yield* restarted.removeWorktree({ cwd: f.cwd, path: f.slot, force: true });
+        // Reacquire the same physical path, then prove old identities cannot be rebound or resumed.
+        yield* f.settings.updateSettings({
+          treehouseWorktreesEnabled: true,
+          treehouseBinaryPath: f.binary,
+        });
+        yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+        assert.isTrue(
+          Result.isFailure(
+            yield* f.leases
+              .assertThread({ path: f.slot, threadId: "parent-thread", requireBinding: false })
+              .pipe(Effect.result),
+          ),
+        );
+        assert.isTrue(
+          Result.isFailure(
+            yield* f.leases
+              .bindThread({ path: f.slot, threadId: "child-thread", sequence: 5 })
+              .pipe(Effect.result),
+          ),
+        );
+        yield* f.leases.bindThread({ path: f.slot, threadId: "new-thread", sequence: 6 });
+        yield* f.leases.assertThread({ path: f.slot, threadId: "new-thread" });
+      }).pipe(provide),
   );
   it.live("refuses unknown leases, missing pooled paths, and raw linked-worktree cleanup", () =>
     Effect.gen(function* () {

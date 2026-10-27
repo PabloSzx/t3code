@@ -3,7 +3,7 @@ import { SettingsRow } from "./components/SettingsRow";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
 import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
-import { AppText as Text } from "../../components/ui/AppText";
+import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import {
   type ResponseStreamingMode,
   type ServerSettings,
@@ -13,7 +13,7 @@ import {
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   type ProjectScopedServerSettingKey,
 } from "@t3tools/contracts";
-import { useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -237,6 +237,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  const supportsTreehouse = targets.every(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.treehouseWorktrees === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -386,6 +390,26 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                   <SettingsSection title="Worktrees">
                     <SettingsSwitchRow
                       icon="arrow.triangle.branch"
+                      label="Use Treehouse for new worktrees"
+                      subtitle={
+                        projectSelected
+                          ? "Environment-wide setting. Select All projects to change it."
+                          : !supportsTreehouse
+                            ? "Update selected environments to enable Treehouse."
+                            : "Use the host's installed Treehouse CLI for any Git repository. Off uses native Git for new allocations. Existing checkouts and leases stay unchanged. T3 does not install Treehouse or fall back to Git on failure."
+                      }
+                      value={uniform("treehouseWorktreesEnabled")}
+                      disabled={disabledFor("treehouseWorktreesEnabled") || !supportsTreehouse}
+                      onValueChange={(value) => write({ treehouseWorktreesEnabled: value })}
+                    />
+                    <TreehouseBinaryPathSetting
+                      key={targetsKey}
+                      path={uniform("treehouseBinaryPath")}
+                      disabled={disabledFor("treehouseBinaryPath") || !supportsTreehouse}
+                      onChange={(treehouseBinaryPath) => write({ treehouseBinaryPath })}
+                    />
+                    <SettingsSwitchRow
+                      icon="arrow.triangle.branch"
                       label="Start from remote"
                       subtitle="Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing."
                       value={uniform("newWorktreesStartFromOrigin")}
@@ -497,6 +521,48 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
         </ScrollView>
       </SettingsScreen>
     </>
+  );
+}
+
+function TreehouseBinaryPathSetting(props: {
+  readonly path: string | null;
+  readonly disabled: boolean;
+  readonly onChange: (value: string) => void;
+}) {
+  const draft = useRef<{ text: string; over: string | null } | null>(null);
+  const save = () => {
+    const edited = draft.current;
+    draft.current = null;
+    if (edited === null || edited.over !== props.path) return;
+    const value = edited.text.trim();
+    if (value !== props.path) props.onChange(value);
+  };
+  // Android Back can hide the keyboard without ending editing.
+  const saveOnExit = useEffectEvent(save);
+  // oxlint-disable-next-line t3code/react-effect-budget -- Save host path edits when Android Back unmounts without ending editing.
+  useEffect(() => () => saveOnExit(), []);
+  return (
+    <View className="gap-2 border-t border-border-subtle px-4 py-3">
+      <Text className="text-base text-foreground">Treehouse binary path</Text>
+      <Text className="text-sm text-foreground-muted">
+        Absolute executable path on the environment's host, not this phone. Leave empty to use the
+        host PATH. Requires identified leases, conditional return, and version 4 pool snapshots.
+      </Text>
+      <AppTextInput
+        key={props.path}
+        accessibilityLabel="Treehouse binary path"
+        defaultValue={props.path ?? ""}
+        placeholder={props.path === null ? "Mixed" : "Host PATH"}
+        editable={!props.disabled}
+        autoCapitalize="none"
+        autoCorrect={false}
+        className="min-h-10 rounded-xl px-3 py-2 text-base text-foreground"
+        onChangeText={(text) => {
+          draft.current = { text, over: props.path };
+        }}
+        onEndEditing={save}
+      />
+    </View>
   );
 }
 

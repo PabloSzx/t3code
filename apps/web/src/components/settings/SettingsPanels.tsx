@@ -506,6 +506,12 @@ export function useSettingsRestore(onRestored?: () => void) {
     DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
       ? ["New worktrees start from remote"]
       : []),
+    ...(settings.treehouseWorktreesEnabled !== DEFAULT_UNIFIED_SETTINGS.treehouseWorktreesEnabled
+      ? ["Use Treehouse for new worktrees"]
+      : []),
+    ...(settings.treehouseBinaryPath !== DEFAULT_UNIFIED_SETTINGS.treehouseBinaryPath
+      ? ["Treehouse binary path"]
+      : []),
     ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
       ? ["Add project base directory"]
       : []),
@@ -622,6 +628,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       providerHealthRefreshInterval: DEFAULT_UNIFIED_SETTINGS.providerHealthRefreshInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+      treehouseWorktreesEnabled: DEFAULT_UNIFIED_SETTINGS.treehouseWorktreesEnabled,
+      treehouseBinaryPath: DEFAULT_UNIFIED_SETTINGS.treehouseBinaryPath,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -813,6 +821,13 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+
+  const supportsTreehouse =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (target) => target.serverConfig?.environment.capabilities.treehouseWorktrees === true,
+    );
+  const mixedTreehouseBinaryPath = useScopedSettingsMixed(["treehouseBinaryPath"]);
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -1590,6 +1605,61 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection id="projects-and-threads" title="Projects & threads">
+        <SettingsRow
+          serverScoped
+          settingKeys={["treehouseWorktreesEnabled"]}
+          {...searchableSetting("treehouse-worktrees")}
+          description="Use an installed Treehouse CLI on each selected environment for new worktrees in any Git repository. Off uses native Git for new allocations. Existing checkouts and leases stay unchanged. T3 does not install Treehouse or fall back to Git if allocation fails."
+          status={
+            !supportsTreehouse ? "Update selected environments to enable Treehouse." : undefined
+          }
+          resetAction={
+            supportsTreehouse && settings.treehouseWorktreesEnabled ? (
+              <SettingResetButton
+                label="Treehouse worktrees"
+                onClick={() => updateSettings({ treehouseWorktreesEnabled: false })}
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["treehouseWorktreesEnabled"]}
+              checked={settings.treehouseWorktreesEnabled}
+              disabled={!supportsTreehouse}
+              onCheckedChange={(checked) =>
+                updateSettings({ treehouseWorktreesEnabled: Boolean(checked) })
+              }
+              aria-label="Use Treehouse for new worktrees"
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["treehouseBinaryPath"]}
+          {...searchableSetting("treehouse-binary-path")}
+          description="Absolute executable path on the environment's host, not this client. Leave empty to find treehouse on the host PATH. Requires identified leases, conditional return, and version 4 pool snapshots."
+          resetAction={
+            supportsTreehouse &&
+            (mixedTreehouseBinaryPath || settings.treehouseBinaryPath !== "") ? (
+              <SettingResetButton
+                label="Treehouse binary path"
+                onClick={() => updateSettings({ treehouseBinaryPath: "" })}
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              size="sm"
+              className="w-full sm:w-72"
+              value={mixedTreehouseBinaryPath ? "" : settings.treehouseBinaryPath}
+              onCommit={(next) => updateSettings({ treehouseBinaryPath: next })}
+              placeholder={mixedTreehouseBinaryPath ? "Mixed" : "Host PATH"}
+              disabled={!supportsTreehouse}
+              spellCheck={false}
+              aria-label="Treehouse binary path"
+            />
+          }
+        />
         <SettingsRow
           serverScoped
           settingKeys={["newWorktreesStartFromOrigin"]}

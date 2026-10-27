@@ -325,6 +325,7 @@ export function layerWithRegistry<Error>(
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
         GitVcsDriver.layer.pipe(
+          Layer.provide(layerServerSettings),
           Layer.provide(layerServerConfig),
           Layer.provide(NodeServices.layer),
         ),
@@ -332,6 +333,7 @@ export function layerWithRegistry<Error>(
     ),
   );
   const layerVcsDriverRegistry = VcsDriverRegistry.layer.pipe(
+    Layer.provide(layerServerSettings),
     Layer.provide(VcsProcess.layer),
     Layer.provide(layerServerConfig),
     Layer.provide(NodeServices.layer),

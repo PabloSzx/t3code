@@ -94,6 +94,46 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect(
+    "persists and broadcasts Treehouse opt-in and disablement across settings reloads",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        assert.isFalse((yield* service.getSettings).treehouseWorktreesEnabled);
+        const changes = yield* service.subscribeChanges;
+        yield* service.updateSettings({
+          treehouseWorktreesEnabled: true,
+          treehouseBinaryPath: "/opt/tools/treehouse",
+        });
+        const enabled = Option.getOrThrow(yield* Stream.runHead(changes));
+        assert.isTrue(enabled.treehouseWorktreesEnabled);
+        assert.strictEqual(enabled.treehouseBinaryPath, "/opt/tools/treehouse");
+        const reloaded = yield* ServerSettingsModule.ServerSettingsService.pipe(
+          Effect.provide(
+            Layer.fresh(ServerSettingsModule.layer).pipe(Layer.provide(ServerSecretStore.layer)),
+          ),
+        );
+        assert.isTrue((yield* reloaded.getSettings).treehouseWorktreesEnabled);
+        assert.strictEqual(
+          (yield* reloaded.getSettings).treehouseBinaryPath,
+          "/opt/tools/treehouse",
+        );
+        yield* reloaded.updateSettings({ treehouseWorktreesEnabled: false });
+        const saved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.isFalse(saved.treehouseWorktreesEnabled);
+        assert.strictEqual(saved.treehouseBinaryPath, "/opt/tools/treehouse");
+        const disabled = yield* ServerSettingsModule.ServerSettingsService.pipe(
+          Effect.provide(
+            Layer.fresh(ServerSettingsModule.layer).pipe(Layer.provide(ServerSecretStore.layer)),
+          ),
+        );
+        assert.isFalse((yield* disabled.getSettings).treehouseWorktreesEnabled);
+      }).pipe(Effect.provide(layerServerSettings())),
+  );
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

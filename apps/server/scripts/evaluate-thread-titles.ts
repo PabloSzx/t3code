@@ -143,9 +143,9 @@ await Effect.runPromise(
         ProcessRunner.layer,
         SourceControlProviderRegistry.layer.pipe(
           Layer.provide(SourceControlBuiltInDrivers.layer),
-          Layer.provide(ServerSettings.layerTest()),
           Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer))),
           Layer.provide(GitVcsDriver.layer),
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provide(VcsProcess.layer),
           Layer.provide(FetchHttpClient.layer),
         ),

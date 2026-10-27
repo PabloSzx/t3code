@@ -444,6 +444,7 @@ describe("t3_worktree_handoff", () => {
     }).pipe(
       Effect.provide(
         GitVcsDriver.layer.pipe(
+          Layer.provide(ServerSettings.layerTest()),
           Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "handoff-remote-git-" })),
           Layer.provideMerge(NodeServices.layer),
         ),

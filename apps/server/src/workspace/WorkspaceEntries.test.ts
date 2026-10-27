@@ -13,6 +13,8 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
+import { WorkspaceOperation } from "@t3tools/contracts";
+import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -29,6 +31,69 @@ const layerTest = Layer.empty.pipe(
     }),
   ),
   Layer.provideMerge(NodeServices.layer),
+);
+
+it.live(
+  "separates recycled search indexes and denies stale indexed and aliased directory delivery",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const entries = yield* WorkspaceEntries.WorkspaceEntries;
+      const aFile = f.path.join(f.slot, "owner-a.txt");
+      yield* f.fs.writeFileString(aFile, "secret-owner-a");
+      const search = entries.search({ cwd: f.slot, query: "owner", limit: 10 });
+      expect(
+        (yield* search.pipe(Effect.provideService(WorkspaceOperation, f.context))).entries.map(
+          (entry) => entry.path,
+        ),
+      ).toContain("owner-a.txt");
+      yield* f.fs.remove(aFile);
+      const foreign = yield* f.recycle;
+      yield* f.fs.writeFileString(f.path.join(f.slot, "owner-b.txt"), "secret-owner-b");
+      const alias = f.path.join(f.cwd, "alias");
+      yield* f.fs.symlink(f.slot, alias);
+      const requests: ReadonlyArray<
+        Effect.Effect<
+          unknown,
+          WorkspaceEntries.WorkspaceEntriesError | WorkspaceEntries.WorkspaceEntriesBrowseError
+        >
+      > = [
+        search,
+        entries.list({ cwd: f.slot }),
+        entries.browse({ cwd: f.cwd, partialPath: `${alias}/` }),
+        entries.list({ cwd: f.cwd, directoryPath: "alias" }),
+      ];
+      for (const effect of requests) {
+        expect(
+          yield* effect.pipe(Effect.provideService(WorkspaceOperation, f.context), Effect.result),
+        ).toMatchObject({ _tag: "Failure", failure: { _tag: "TreehouseLeaseError" } });
+      }
+      expect(
+        (yield* search.pipe(Effect.provideService(WorkspaceOperation, foreign))).entries.map(
+          (entry) => entry.path,
+        ),
+      ).toEqual(["owner-b.txt"]);
+      yield* f.fs.symlink(f.path.join(f.slot, "owner-b.txt"), f.path.join(f.cwd, "linked-b.txt"));
+      const native = yield* entries.searchContents({
+        cwd: f.cwd,
+        query: "secret-owner-b",
+        limit: 10,
+        caseSensitive: true,
+        wholeWord: false,
+        useRegex: false,
+      });
+      expect(native.matches).toEqual([]);
+      expect(
+        (yield* entries.list({ cwd: f.cwd, directoryPath: "" })).entries.map((entry) => entry.path),
+      ).toContain("file");
+    }).pipe(
+      Effect.provide(
+        WorkspaceEntries.layer.pipe(
+          Layer.provide(WorkspacePaths.layer),
+          Layer.provideMerge(treehouseLayer),
+        ),
+      ),
+    ),
 );
 
 const makeTempDir = Effect.fn(function* (opts?: { prefix?: string; git?: boolean }) {

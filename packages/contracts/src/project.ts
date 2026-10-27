@@ -323,6 +323,7 @@ export const ProjectListIgnoredFilesResult = Schema.Struct({
 export type ProjectListIgnoredFilesResult = typeof ProjectListIgnoredFilesResult.Type;
 
 export const ProjectEntriesFailure = Schema.Literals([
+  "workspace_unavailable",
   "workspace_root_not_found",
   "workspace_root_create_failed",
   "workspace_root_stat_failed",

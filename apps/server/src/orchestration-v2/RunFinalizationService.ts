@@ -1,6 +1,7 @@
 import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
@@ -96,6 +97,9 @@ export const layerObserver = Layer.effect(
     const vcsStatus = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(
+      Effect.provide(WorkspaceAccess.layer),
+    );
     return {
       refreshAfterTurn: pullRequests.refreshAfterTurn,
       refresh: Effect.fn("RunFinalizationService.refresh")(
@@ -118,8 +122,10 @@ export const layerObserver = Layer.effect(
             ),
           );
         },
-        (effect, { cwd }) =>
-          effect.pipe(Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd, cause }))),
+        (effect, { cwd, threadId }) =>
+          access
+            .useThread({ cwd, threadId, targets: [], effect })
+            .pipe(Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd, cause }))),
       ),
     };
   }),

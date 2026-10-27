@@ -1,4 +1,5 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { SourceControlProviderKind, WorkspaceOperation } from "@t3tools/contracts";
+import { accessFixture, testLayer as treehouseLayer } from "./TreehouseWorktrees.testkit.ts";
 import { assert, it, describe } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
@@ -154,6 +155,58 @@ function layerBackgroundPolicy(shouldRunScopeWork: (scope: BackgroundScope) => b
     shouldRunOpportunisticWork: Effect.succeed(true),
   });
 }
+
+it.effect(
+  "validates cached status and periodic refresh against the captured generation without retaining a subscription pin",
+  () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+    return Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .getStatus({ cwd: f.slot })
+        .pipe(Effect.provideService(WorkspaceOperation, f.context));
+      const mounted = yield* Deferred.make<void>();
+      const events: VcsStatusStreamEvent[] = [];
+      const subscription = yield* broadcaster.streamStatus({ cwd: f.slot }).pipe(
+        Stream.tap((event) =>
+          Effect.sync(() => events.push(event)).pipe(
+            Effect.andThen(Deferred.succeed(mounted, undefined)),
+          ),
+        ),
+        Stream.runDrain,
+        Effect.provideService(WorkspaceOperation, f.context),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(mounted);
+      const foreign = yield* f.recycle;
+      const calls = state.remoteStatusCalls;
+      yield* TestClock.adjust("30 seconds");
+      assert.equal(state.remoteStatusCalls, calls);
+      const stale = yield* broadcaster
+        .getStatus({ cwd: f.slot })
+        .pipe(Effect.provideService(WorkspaceOperation, f.context), Effect.result);
+      assert.equal(stale._tag, "Failure");
+      if (stale._tag === "Failure") assert.equal(stale.failure._tag, "GitManagerError");
+      state.currentLocalStatus = { ...baseLocalStatus, refName: "foreign-owner" };
+      assert.equal(
+        (yield* broadcaster
+          .getStatus({ cwd: f.slot })
+          .pipe(Effect.provideService(WorkspaceOperation, foreign))).refName,
+        "foreign-owner",
+      );
+      assert.equal(events.length, 1);
+      yield* Fiber.interrupt(subscription);
+    }).pipe(Effect.provide(layerTestFor(state).pipe(Layer.provideMerge(treehouseLayer))));
+  },
+);
 
 describe("VcsStatusBroadcaster", () => {
   it.effect("publishes a terminal branch switch without reading remote status", () => {

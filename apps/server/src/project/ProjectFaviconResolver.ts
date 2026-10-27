@@ -13,6 +13,11 @@ import * as Schema from "effect/Schema";
 
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as T3ProjectFileLoader from "./T3ProjectFileLoader.ts";
+import { T3_PROJECT_FILE_NAME, WorkspaceOperation } from "@t3tools/contracts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
+import { isNetworkPath } from "@t3tools/shared/path";
+import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
 
 const FAVICON_CACHE_CAPACITY = 512;
 const FAVICON_POSITIVE_CACHE_TTL = Duration.minutes(10);
@@ -141,6 +146,48 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const projectFileLoader = yield* T3ProjectFileLoader.T3ProjectFileLoader;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+    Effect.provide(TreehouseLeases.layer),
+  );
+  const guard = Effect.fn("ProjectFaviconResolver.workspaceAccess")(
+    function* <A, E, R>({
+      effect,
+      targets,
+      cwd,
+    }: {
+      effect: Effect.Effect<A, E, R>;
+      targets: ReadonlyArray<string>;
+      cwd: string;
+    }) {
+      const root = yield* leases.canonicalTarget(cwd);
+      for (const target of targets) {
+        const canonical = yield* leases.canonicalTarget(target);
+        if (isNetworkPath(canonical) && !isWithinRoot(path, canonical, root))
+          return yield* new ProjectFaviconResolutionError({
+            operation: "resolve-path",
+            workspaceRoot: cwd,
+            cause: new WorkspacePaths.WorkspacePathOutsideRootError({
+              workspaceRoot: cwd,
+              relativePath: target,
+            }),
+          });
+      }
+      return yield* access.use({ effect, targets });
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) =>
+          TreehouseLeases.isTreehouseLeaseError(cause)
+            ? new ProjectFaviconResolutionError({
+                operation: "resolve-path",
+                workspaceRoot: input.cwd,
+                cause,
+              })
+            : cause,
+        ),
+      ),
+  );
 
   const resolveIconHref = (href: string): ReadonlyArray<string> => {
     const clean = href.replace(/^\//, "");
@@ -183,6 +230,8 @@ export const make = Effect.gen(function* () {
               cause,
             }),
         ),
+        (effect) =>
+          guard({ effect, cwd: projectCwd, targets: [projectCwd, candidate.value.absolutePath] }),
       );
       if (Option.isSome(stats) && stats.value.type === "File") {
         return candidate.value.absolutePath;
@@ -222,6 +271,8 @@ export const make = Effect.gen(function* () {
             cause,
           }),
       ),
+      (effect) =>
+        guard({ effect, cwd: projectCwd, targets: [projectCwd, sourcePath.absolutePath] }),
     );
     if (Option.isNone(source)) {
       return null;
@@ -270,7 +321,11 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    const projectFile = yield* projectFileLoader.load(projectCwd);
+    const projectFile = yield* guard({
+      effect: projectFileLoader.load(projectCwd),
+      cwd: projectCwd,
+      targets: [projectCwd, path.join(projectCwd, T3_PROJECT_FILE_NAME)],
+    });
     if (Option.isSome(projectFile) && projectFile.value.iconPath !== undefined) {
       const existing = yield* findExistingFile(
         projectCwd,
@@ -311,31 +366,37 @@ export const make = Effect.gen(function* () {
 
   const resolvePath: ProjectFaviconResolver["Service"]["resolvePath"] = Effect.fn(
     "ProjectFaviconResolver.resolvePath",
-  )(function* (cwd, faviconPath) {
-    const key = faviconCacheKey(cwd, faviconPath);
-    const cached = yield* Cache.get(faviconCache, key);
-    if (cached === null) {
-      return null;
-    }
+  )(
+    function* (cwd, faviconPath) {
+      if ((yield* WorkspaceOperation)?.generation != null)
+        return yield* resolvePathUncached(cwd, faviconPath);
+      const key = faviconCacheKey(cwd, faviconPath);
+      const cached = yield* Cache.get(faviconCache, key);
+      if (cached === null) {
+        return null;
+      }
 
-    const stats = yield* optionOnNotFound(fileSystem.stat(cached)).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProjectFaviconResolutionError({
-            operation: "stat-candidate",
-            workspaceRoot: cwd,
-            absolutePath: cached,
-            cause,
-          }),
-      ),
-    );
-    if (Option.isSome(stats) && stats.value.type === "File") {
-      return cached;
-    }
+      const stats = yield* optionOnNotFound(fileSystem.stat(cached)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProjectFaviconResolutionError({
+              operation: "stat-candidate",
+              workspaceRoot: cwd,
+              absolutePath: cached,
+              cause,
+            }),
+        ),
+        (effect) => guard({ effect, cwd, targets: [cwd, cached] }),
+      );
+      if (Option.isSome(stats) && stats.value.type === "File") {
+        return cached;
+      }
 
-    yield* Cache.invalidate(faviconCache, key);
-    return yield* Cache.get(faviconCache, key);
-  });
+      yield* Cache.invalidate(faviconCache, key);
+      return yield* Cache.get(faviconCache, key);
+    },
+    (effect, cwd) => guard({ effect, cwd, targets: [cwd] }),
+  );
 
   const invalidate: ProjectFaviconResolver["Service"]["invalidate"] = (cwd) =>
     Cache.keys(faviconCache).pipe(

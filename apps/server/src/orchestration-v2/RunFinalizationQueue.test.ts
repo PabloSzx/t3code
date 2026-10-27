@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CheckpointScopeId, CommandId, GitCommandError, RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -128,5 +129,5 @@ it.effect.each([
     assert.deepEqual(calls, captureFails ? ["capture"] : ["capture", "refresh", "start"]);
     if (captureFails) assert.include(captured.lastError ?? "", "checkpoint storage unavailable");
     else assert.equal(captured.lastError, null);
-  }).pipe(Effect.provide(Layer.fresh(worker)));
+  }).pipe(Effect.provide(Layer.fresh(worker).pipe(Layer.provide(NodeServices.layer))));
 });

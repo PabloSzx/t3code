@@ -16,6 +16,7 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
+  type Project as ProjectRecord,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -23,6 +24,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
 import { McpAttachmentInput } from "./attachment/input.ts";
 import { McpSchema, McpServer } from "effect/ai";
@@ -54,6 +56,18 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { dispatchFailure } from "../threadAccess.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
+import * as WorktreeHandlers from "./worktree/handlers.ts";
+import { WorktreeToolkit } from "./worktree/tools.ts";
+import * as McpToolAccess from "../McpToolAccess.ts";
+import * as WorktreeMcpService from "../WorktreeMcpService.ts";
+import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as GitManager from "../../git/GitManager.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import {
+  accessFixture,
+  testLayer as treehouseLayer,
+} from "../../vcs/TreehouseWorktrees.testkit.ts";
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
@@ -99,6 +113,65 @@ const client = McpSchema.McpServerClient.of({
   },
   getClient: Effect.die("unused"),
 });
+
+it.live(
+  "worktree list binds the authorized target thread, not the native caller, and never resumes returned targets",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const target = {
+        ...McpToolAccessTestkit.liveThreadShell(f.context.threadId),
+        worktreePath: f.slot,
+        branch: "access-owner",
+      };
+      const dependencies = Layer.mergeAll(
+        Layer.mock(WorktreeMcpService.WorktreeMcpService)({}),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (id) =>
+            Effect.succeed(
+              id === f.context.threadId ? target : McpToolAccessTestkit.liveThreadShell(id),
+            ),
+          getProjectThreadRecords: () =>
+            Effect.succeed(McpToolAccessTestkit.idleThreadProjection(target)),
+        }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeedSome({ id: target.projectId, workspaceRoot: f.cwd } as ProjectRecord),
+        }),
+        GitWorkflowService.layer.pipe(
+          Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+          Layer.provide(GitVcsDriver.layer),
+          Layer.provide(Layer.mock(GitManager.GitManager)({})),
+        ),
+      );
+      const toolkit = yield* WorktreeToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(WorktreeHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const list = toolkit.handle("t3_worktree_list", { threadId: f.context.threadId }).pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.provide(dependencies),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...scope,
+          capabilities: new Set(["orchestration", "worktree"] as const),
+        }),
+      );
+      expect((yield* list).at(-1)?.result).toMatchObject({
+        isRepo: true,
+        refs: expect.arrayContaining([
+          expect.objectContaining({ name: "access-owner", current: true }),
+        ]),
+      });
+      yield* f.recycle;
+      const allocations = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+      expect((yield* list).at(-1)?.result).toMatchObject({ code: "orchestration_error" });
+      expect(yield* f.fs.readFileString(f.path.join(f.root, "calls"))).toBe(allocations);
+    }).pipe(Effect.provide(treehouseLayer)),
+);
 
 it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {

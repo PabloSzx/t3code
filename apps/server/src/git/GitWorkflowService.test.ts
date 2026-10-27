@@ -1,4 +1,6 @@
-import { assert, it } from "@effect/vitest";
+import { assert, it, expect } from "@effect/vitest";
+import { WorkspaceOperation, type GitManagerServiceError } from "@t3tools/contracts";
+import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -10,8 +12,69 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
+import * as VcsProvisioningService from "../vcs/VcsProvisioningService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+
+it.live(
+  "rejects recycled Git queries and mutations before repository detection, including aliases and legacy requests",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      const provisioning = yield* VcsProvisioningService.make.pipe(
+        Effect.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+      );
+      const alias = f.path.join(f.root, "git-alias");
+      yield* f.fs.symlink(f.slot, alias);
+      expect(
+        (yield* workflow
+          .listRefs({ cwd: alias })
+          .pipe(Effect.provideService(WorkspaceOperation, f.context))).refs.some(
+          (ref) => ref.current && ref.name === "access-owner",
+        ),
+      ).toBe(true);
+      const foreign = yield* f.recycle;
+      for (const context of [f.context, undefined]) {
+        const requests: ReadonlyArray<Effect.Effect<unknown, GitManagerServiceError>> = [
+          workflow.listRefs({ cwd: alias }),
+          workflow.isRepository(alias),
+          workflow.createRef({ cwd: alias, refName: "must-not-create", switchRef: true }),
+        ];
+        expect(
+          yield* provisioning
+            .initRepository({ cwd: f.slot })
+            .pipe(Effect.provideService(WorkspaceOperation, context), Effect.result),
+        ).toMatchObject({ _tag: "Failure", failure: { cause: { _tag: "TreehouseLeaseError" } } });
+        for (const effect of requests) {
+          expect(
+            yield* effect.pipe(Effect.provideService(WorkspaceOperation, context), Effect.result),
+          ).toMatchObject({ _tag: "Failure", failure: { cause: { _tag: "TreehouseLeaseError" } } });
+        }
+      }
+      expect(yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] })).toBe(
+        "foreign-owner",
+      );
+      expect(
+        (yield* workflow
+          .listRefs({ cwd: alias })
+          .pipe(Effect.provideService(WorkspaceOperation, foreign))).refs.some(
+          (ref) => ref.current && ref.name === "foreign-owner",
+        ),
+      ).toBe(true);
+      expect(yield* workflow.isRepository(f.cwd)).toBe(true);
+      expect(yield* workflow.hasRefNamed({ cwd: f.cwd, refName: "must-not-create" })).toBe(false);
+    }).pipe(
+      Effect.provide(
+        GitWorkflowService.layer.pipe(
+          Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+          Layer.provide(GitVcsDriver.layer),
+          Layer.provide(Layer.mock(GitManager.GitManager)({})),
+          Layer.provideMerge(treehouseLayer),
+        ),
+      ),
+    ),
+);
 
 it.layer(NodeServices.layer)("GitWorkflowService", (it) => {
   it.effect("finds a name among the refs of every namespace", () =>

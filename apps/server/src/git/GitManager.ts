@@ -82,6 +82,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { detachStackFrame } from "./detachStackFrame.ts";
+import { WorkspaceOperation } from "@t3tools/contracts";
 import * as ServerSettings from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -1123,12 +1124,19 @@ export const make = Effect.gen(function* () {
       ...(details.branchChanges ? { branchChanges: details.branchChanges } : {}),
     } satisfies VcsStatusLocalResult;
   });
-  const localStatusResultCache = yield* Cache.makeWith(readLocalStatus, {
-    capacity: STATUS_RESULT_CACHE_CAPACITY,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
+  const statusGenerationKey = Effect.fn("GitManager.statusGenerationKey")(function* (cwd: string) {
+    return `${cwd}\u0000${(yield* WorkspaceOperation)?.generation ?? ""}`;
   });
+  const localStatusResultCache = yield* Cache.makeWith(
+    (key: string) => readLocalStatus(key.split("\u0000")[0]!),
+    {
+      capacity: STATUS_RESULT_CACHE_CAPACITY,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
+    },
+  );
   const invalidateLocalStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
+      Effect.flatMap(statusGenerationKey),
       Effect.flatMap((cacheKey) => Cache.invalidate(localStatusResultCache, cacheKey)),
     );
   const prLookupEpochByCwd = new Map<string, number>();
@@ -1139,7 +1147,7 @@ export const make = Effect.gen(function* () {
         prLookupEpochByCwd.set(cacheKey, prLookupEpoch(cacheKey) + 1);
       }),
     );
-  const prLookupCacheKey = (
+  const prLookupCacheKey = Effect.fn("GitManager.prLookupCacheKey")(function* (
     cwd: string,
     details: {
       branch: string;
@@ -1148,8 +1156,8 @@ export const make = Effect.gen(function* () {
       localBranchExists?: boolean;
       remoteName?: string | null;
     },
-  ) =>
-    [
+  ) {
+    return [
       cwd,
       details.branch,
       details.upstreamRef ?? "",
@@ -1157,7 +1165,9 @@ export const make = Effect.gen(function* () {
       details.localBranchExists === false ? "0" : "1",
       details.remoteName ?? "",
       String(prLookupEpoch(cwd)),
+      (yield* WorkspaceOperation)?.generation ?? "",
     ].join("\u0000");
+  });
   const prLookupFailureStreakByKey = new Map<string, number>();
   const nextPrLookupFailureTtl = (key: string) => {
     if (
@@ -1300,8 +1310,8 @@ export const make = Effect.gen(function* () {
     refreshMissingPullRequest = false,
   ) {
     // Upstream changes must not orphan the same branch's fallback value.
-    const branchKey = `${cwd}\u0000${details.branch}`;
-    const cacheKey = prLookupCacheKey(cwd, details);
+    const branchKey = `${yield* statusGenerationKey(cwd)}\u0000${details.branch}`;
+    const cacheKey = yield* prLookupCacheKey(cwd, details);
     if (refreshMissingPullRequest) {
       const cached = yield* Cache.getOption(prLookupCache, cacheKey).pipe(
         Effect.orElseSucceed(() => Option.none()),
@@ -1399,12 +1409,16 @@ export const make = Effect.gen(function* () {
       pr,
     } satisfies VcsStatusRemoteResult;
   });
-  const remoteStatusResultCache = yield* Cache.makeWith((cwd: string) => readRemoteStatus(cwd), {
-    capacity: STATUS_RESULT_CACHE_CAPACITY,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
-  });
+  const remoteStatusResultCache = yield* Cache.makeWith(
+    (key: string) => readRemoteStatus(key.split("\u0000")[0]!),
+    {
+      capacity: STATUS_RESULT_CACHE_CAPACITY,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? STATUS_RESULT_CACHE_TTL : Duration.zero),
+    },
+  );
   const invalidateRemoteStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
+      Effect.flatMap(statusGenerationKey),
       Effect.flatMap((cacheKey) => Cache.invalidate(remoteStatusResultCache, cacheKey)),
     );
 
@@ -2350,7 +2364,7 @@ export const make = Effect.gen(function* () {
   const localStatus: GitManager["Service"]["localStatus"] = Effect.fn("localStatus")(
     function* (input) {
       const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
-      return yield* Cache.get(localStatusResultCache, cacheKey);
+      return yield* Cache.get(localStatusResultCache, yield* statusGenerationKey(cacheKey));
     },
   );
   const remoteStatus: GitManager["Service"]["remoteStatus"] = Effect.fn("remoteStatus")(
@@ -2359,7 +2373,7 @@ export const make = Effect.gen(function* () {
       if (options?.refreshUpstream === false || options?.refreshMissingPullRequest) {
         return yield* readRemoteStatus(cacheKey, options);
       }
-      return yield* Cache.get(remoteStatusResultCache, cacheKey);
+      return yield* Cache.get(remoteStatusResultCache, yield* statusGenerationKey(cacheKey));
     },
   );
   const status: GitManager["Service"]["status"] = Effect.fn("status")(function* (input) {
@@ -2379,7 +2393,7 @@ export const make = Effect.gen(function* () {
     fresh: boolean,
     read: Effect.Effect<string | null, E>,
   ) {
-    const entryKey = `${cwd}\u0000${key}`;
+    const entryKey = `${yield* statusGenerationKey(cwd)}\u0000${key}`;
     const readAtMs = yield* Clock.currentTimeMillis;
     const remembered = prLookupGitStateByKey.get(entryKey);
     if (
@@ -2550,7 +2564,7 @@ export const make = Effect.gen(function* () {
       `defaultBranch\u0000${defaultRemoteName}`,
       gitCore.resolveDefaultBranchName(cacheCwd, defaultRemoteName),
     ).pipe(Effect.orElseSucceed(() => null));
-    const cacheKey = prLookupCacheKey(cacheCwd, {
+    const cacheKey = yield* prLookupCacheKey(cacheCwd, {
       branch,
       upstreamRef,
       defaultBranch,

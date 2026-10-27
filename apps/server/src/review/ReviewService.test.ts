@@ -4,7 +4,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
-import { ProjectId } from "@t3tools/contracts";
+import { ProjectId, WorkspaceOperation } from "@t3tools/contracts";
+import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -14,6 +16,37 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as ReviewService from "./ReviewService.ts";
+
+it.live("refuses recycled live review reads before detecting a repository", () =>
+  Effect.gen(function* () {
+    const f = yield* accessFixture();
+    const review = yield* ReviewService.ReviewService;
+    yield* f.fs.writeFileString(f.path.join(f.slot, "file"), "review A\n");
+    const preview = yield* review
+      .getDiffPreview({ cwd: f.slot })
+      .pipe(Effect.provideService(WorkspaceOperation, f.context));
+    assert.isTrue(preview.sources.some((source) => source.diff.includes("review A")));
+    yield* f.git({ cwd: f.slot, args: ["restore", "file"] });
+    yield* f.recycle;
+    const result = yield* review
+      .getDiffPreview({ cwd: f.slot })
+      .pipe(Effect.provideService(WorkspaceOperation, f.context), Effect.result);
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") assert.equal(result.failure._tag, "VcsRepositoryDetectionError");
+    assert.isArray((yield* review.getDiffPreview({ cwd: f.cwd })).sources);
+  }).pipe(
+    Effect.provide(
+      ReviewService.layer.pipe(
+        Layer.provide(
+          Layer.mock(KnownWorkspaces.KnownWorkspaces)({ contains: () => Effect.succeed(true) }),
+        ),
+        Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+        Layer.provide(GitVcsDriver.layer),
+        Layer.provideMerge(treehouseLayer),
+      ),
+    ),
+  ),
+);
 
 function layer(input: {
   readonly workspaceRoot: string;

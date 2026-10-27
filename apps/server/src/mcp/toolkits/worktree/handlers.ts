@@ -9,6 +9,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
 import { WorktreeToolkit } from "./tools.ts";
+import * as WorkspaceAccess from "../../../workspace/WorkspaceAccess.ts";
 
 const handlers = {
   t3_worktree_list: McpToolAccess.reads((input) =>
@@ -31,9 +32,23 @@ const handlers = {
           message: "The project was not found.",
         });
       const git = yield* GitWorkflow.GitWorkflowService;
-      return yield* git
-        .listRefs({ ...refs, cwd: thread.worktreePath ?? project.value.workspaceRoot })
-        .pipe(Effect.mapError(unavailable));
+      const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(
+        Effect.provide(WorkspaceAccess.layer),
+      );
+      const cwd = thread.worktreePath ?? project.value.workspaceRoot;
+      return yield* access
+        .useThread({
+          threadId: thread.id,
+          cwd,
+          targets: [],
+          effect: git.listRefs({ ...refs, cwd }),
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.message }),
+          ),
+        );
     }),
   ),
   t3_worktree_handoff: McpToolAccess.actsAsCaller((input) =>

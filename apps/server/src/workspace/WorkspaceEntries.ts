@@ -28,6 +28,9 @@ import { normalizeSearchQuery } from "@t3tools/shared/searchRanking";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
+import * as WorkspaceAccess from "./WorkspaceAccess.ts";
+import { TreehouseLeaseError } from "./treehouseLeases.ts";
+import { WorkspaceOperation } from "@t3tools/contracts";
 import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
 
 export class WorkspaceEntriesWindowsPathUnsupportedError extends Schema.TaggedError<WorkspaceEntriesWindowsPathUnsupportedError>()(
@@ -71,6 +74,7 @@ export class WorkspaceEntriesReadDirectoryError extends Schema.TaggedError<Works
 }
 
 export const WorkspaceEntriesBrowseError = Schema.Union([
+  TreehouseLeaseError,
   WorkspaceEntriesWindowsPathUnsupportedError,
   WorkspaceEntriesCurrentProjectRequiredError,
   WorkspaceEntriesReadDirectoryError,
@@ -78,6 +82,7 @@ export const WorkspaceEntriesBrowseError = Schema.Union([
 export type WorkspaceEntriesBrowseError = typeof WorkspaceEntriesBrowseError.Type;
 
 export const WorkspaceEntriesError = Schema.Union([
+  TreehouseLeaseError,
   WorkspaceEntriesReadDirectoryError,
   WorkspacePaths.WorkspaceRootNotExistsError,
   WorkspacePaths.WorkspaceRootCreateFailedError,
@@ -151,6 +156,33 @@ export const make = Effect.gen(function* () {
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const workspaceSearchIndexes = yield* WorkspaceSearchIndex.WorkspaceSearchIndexMap;
   const vcsProcess = yield* VcsProcess.VcsProcess;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  const guardCwd = <A, E, R>(effect: Effect.Effect<A, E, R>, input: { readonly cwd: string }) =>
+    access.use({ targets: [input.cwd], effect });
+  const useIndex = Effect.fn("WorkspaceEntries.useIndex")(function* <A, E>(input: {
+    readonly cwd: string;
+    readonly variant: WorkspaceSearchIndex.WorkspaceSearchIndexVariant;
+    readonly effect: Effect.Effect<A, E, WorkspaceSearchIndex.WorkspaceSearchIndex>;
+  }) {
+    if ((yield* WorkspaceOperation)?.generation != null) {
+      // Recyclable checkouts cannot own background watchers or incomplete scans beyond their pins.
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const index = yield* WorkspaceSearchIndex.make(input.cwd, input.variant);
+          return yield* input.effect.pipe(
+            Effect.provideService(WorkspaceSearchIndex.WorkspaceSearchIndex, index),
+          );
+        }),
+      );
+    }
+    return yield* input.effect.pipe(
+      Effect.provide(
+        workspaceSearchIndexes.get(
+          WorkspaceSearchIndex.workspaceSearchIndexKey(input.cwd, input.variant),
+        ),
+      ),
+    );
+  });
 
   const normalizeWorkspaceRoot = Effect.fn("WorkspaceEntries.normalizeWorkspaceRoot")(function* (
     cwd: string,
@@ -160,6 +192,7 @@ export const make = Effect.gen(function* () {
 
   const refresh: WorkspaceEntries["Service"]["refresh"] = Effect.fn("WorkspaceEntries.refresh")(
     function* (cwd) {
+      if ((yield* WorkspaceOperation)?.generation != null) return;
       const normalizedCwd = yield* normalizeWorkspaceRoot(cwd).pipe(
         Effect.orElseSucceed(() => cwd),
       );
@@ -196,6 +229,7 @@ export const make = Effect.gen(function* () {
         );
       }
     },
+    (effect, cwd) => access.use({ targets: [cwd], effect }).pipe(Effect.ignoreCause({ log: true })),
   );
 
   const browse: WorkspaceEntries["Service"]["browse"] = Effect.fn("WorkspaceEntries.browse")(
@@ -245,6 +279,15 @@ export const make = Effect.gen(function* () {
         entries: entries.toSorted((left, right) => left.name.localeCompare(right.name)),
       };
     },
+    (effect, input) =>
+      Effect.gen(function* () {
+        const target = yield* resolveBrowseTarget(input, path);
+        const parent =
+          /[\\/]$/.test(input.partialPath) || input.partialPath === "~"
+            ? target
+            : path.dirname(target);
+        return yield* access.use({ targets: [...(input.cwd ? [input.cwd] : []), parent], effect });
+      }),
   );
 
   const search: WorkspaceEntries["Service"]["search"] = Effect.fn("WorkspaceEntries.search")(
@@ -256,14 +299,9 @@ export const make = Effect.gen(function* () {
       return yield* Effect.gen(function* () {
         const searchIndex = yield* WorkspaceSearchIndex.WorkspaceSearchIndex;
         return yield* searchIndex.search(normalizedQuery, input.limit, input.kind, input.imageOnly);
-      }).pipe(
-        Effect.provide(
-          workspaceSearchIndexes.get(
-            WorkspaceSearchIndex.workspaceSearchIndexKey(normalizedCwd, "paths"),
-          ),
-        ),
-      );
+      }).pipe((effect) => useIndex({ cwd: normalizedCwd, variant: "paths", effect }));
     },
+    guardCwd,
   );
 
   const searchContents: WorkspaceEntries["Service"]["searchContents"] = Effect.fn(
@@ -273,14 +311,8 @@ export const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       const searchIndex = yield* WorkspaceSearchIndex.WorkspaceSearchIndex;
       return yield* searchIndex.searchContents(input);
-    }).pipe(
-      Effect.provide(
-        workspaceSearchIndexes.get(
-          WorkspaceSearchIndex.workspaceSearchIndexKey(normalizedCwd, "content"),
-        ),
-      ),
-    );
-  });
+    }).pipe((effect) => useIndex({ cwd: normalizedCwd, variant: "content", effect }));
+  }, guardCwd);
 
   const list: WorkspaceEntries["Service"]["list"] = Effect.fn("WorkspaceEntries.list")(
     function* (input) {
@@ -380,14 +412,13 @@ export const make = Effect.gen(function* () {
       return yield* Effect.gen(function* () {
         const searchIndex = yield* WorkspaceSearchIndex.WorkspaceSearchIndex;
         return yield* searchIndex.list();
-      }).pipe(
-        Effect.provide(
-          workspaceSearchIndexes.get(
-            WorkspaceSearchIndex.workspaceSearchIndexKey(normalizedCwd, "paths"),
-          ),
-        ),
-      );
+      }).pipe((effect) => useIndex({ cwd: normalizedCwd, variant: "paths", effect }));
     },
+    (effect, input) =>
+      access.use({
+        targets: [input.cwd, path.resolve(input.cwd, input.directoryPath ?? ".")],
+        effect,
+      }),
   );
 
   const listIgnoredFiles: WorkspaceEntries["Service"]["listIgnoredFiles"] = Effect.fn(
@@ -437,7 +468,7 @@ export const make = Effect.gen(function* () {
       files: files.filter((file) => file !== null),
       truncated: paths.length > IGNORED_FILES_LIMIT,
     };
-  });
+  }, guardCwd);
 
   return WorkspaceEntries.of({ browse, list, listIgnoredFiles, refresh, search, searchContents });
 });

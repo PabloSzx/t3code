@@ -7,8 +7,10 @@ import {
   type VcsError,
   type VcsInitInput,
   VcsUnsupportedOperationError,
+  VcsRepositoryDetectionError,
 } from "@t3tools/contracts";
 import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 
 export class VcsProvisioningService extends Context.Service<
   VcsProvisioningService,
@@ -38,14 +40,31 @@ function resolveRequestedKind(
 /** @public */
 export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
 
   const initRepository: VcsProvisioningService["Service"]["initRepository"] = Effect.fn(
     "VcsProvisioningService.initRepository",
-  )(function* (input) {
-    const kind = yield* resolveRequestedKind(input.kind);
-    const driver = yield* registry.get(kind);
-    return yield* driver.initRepository(input);
-  });
+  )(
+    function* (input) {
+      const kind = yield* resolveRequestedKind(input.kind);
+      const driver = yield* registry.get(kind);
+      return yield* driver.initRepository(input);
+    },
+    (effect, input) =>
+      access.use({ targets: [input.cwd], effect }).pipe(
+        Effect.catchTags({
+          TreehouseLeaseError: (cause) =>
+            Effect.fail(
+              new VcsRepositoryDetectionError({
+                operation: "VcsProvisioningService.workspaceAccess",
+                cwd: input.cwd,
+                detail: cause.message,
+                cause,
+              }),
+            ),
+        }),
+      ),
+  );
 
   return VcsProvisioningService.of({
     initRepository,

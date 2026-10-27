@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { TestClock } from "effect/testing";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
@@ -49,6 +50,38 @@ const makeResolverWithFileSystem = (fileSystem: FileSystem.FileSystem) =>
 
 it.layer(layerTest)("ProjectFaviconResolverLive", (it) => {
   describe("resolvePath", () => {
+    it.effect.skipIf(!symlinksSupported)(
+      "rejects an unsolicited share hidden behind a local project-config link before reading it",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const config = path.join(cwd, "t3.json");
+          yield* fs.symlink("//nas.test/share/t3.json", config);
+          const reads: string[] = [];
+          const resolver = yield* makeResolverWithFileSystem(
+            FileSystem.FileSystem.of({
+              ...fs,
+              readFileString: (target) => {
+                if (target === config) {
+                  reads.push(target);
+                  return Effect.succeed("{}");
+                }
+                return fs.readFileString(target);
+              },
+            }),
+          );
+          expect(yield* resolver.resolvePath(cwd).pipe(Effect.result)).toMatchObject({
+            _tag: "Failure",
+            failure: {
+              _tag: "ProjectFaviconResolutionError",
+              cause: { _tag: "WorkspacePathOutsideRootError" },
+            },
+          });
+          expect(reads).toEqual([]);
+        }),
+    );
     it.effect("finds a favicon added after a cached miss once the workspace is invalidated", () =>
       Effect.gen(function* () {
         const resolver = yield* ProjectFaviconResolver.ProjectFaviconResolver;

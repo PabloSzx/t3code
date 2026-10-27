@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspaceAccess from "./WorkspaceAccess.ts";
 import { TreehouseLeaseError } from "./treehouseLeases.ts";
+import * as TreehouseLeases from "./treehouseLeases.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
@@ -143,12 +144,19 @@ export const make = Effect.gen(function* () {
   const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+    Effect.provide(TreehouseLeases.layer),
+  );
 
   const metadataForPath = Effect.fnUntraced(function* (requestedPath: string) {
     const expandedPath = expandHomePath(requestedPath, yield* HostProcess.HomeDirectory);
     // Chips ask as soon as an agent's message renders, and touching a network
     // path makes Windows sign in to its host with the user's NTLM credentials.
     if (!path.isAbsolute(expandedPath) || isNetworkPath(expandedPath)) return null;
+    const canonical = yield* leases
+      .canonicalTarget(expandedPath)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (canonical === null || isNetworkPath(canonical)) return null;
     const stat = yield* fileSystem.stat(expandedPath).pipe(Effect.option);
     if (stat._tag === "None") return null;
     if (stat.value.type === "Directory") return { kind: "directory" } as const;
@@ -192,12 +200,13 @@ export const make = Effect.gen(function* () {
     (effect, input) =>
       Effect.gen(function* () {
         const home = yield* HostProcess.HomeDirectory;
-        return yield* access.use({
-          effect,
-          targets: input.paths
-            .map((target) => expandHomePath(target, home))
-            .filter((target) => path.isAbsolute(target) && !isNetworkPath(target)),
-        });
+        const candidates = input.paths
+          .map((target) => expandHomePath(target, home))
+          .filter((target) => path.isAbsolute(target) && !isNetworkPath(target));
+        const targets = yield* Effect.filter(candidates, (target) =>
+          leases.canonicalTarget(target).pipe(Effect.map((canonical) => !isNetworkPath(canonical))),
+        );
+        return yield* access.use({ effect, targets });
       }),
   );
 
@@ -464,15 +473,26 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const home = yield* HostProcess.HomeDirectory;
         const target = expandHomePath(input.relativePath.trim(), home);
-        return yield* access.use({
-          effect,
-          targets: [
-            ...(isNetworkPath(input.cwd) ? [] : [input.cwd]),
-            ...(isNetworkPath(target)
-              ? []
-              : [path.isAbsolute(target) ? target : path.resolve(input.cwd, target)]),
-          ],
-        });
+        const absoluteTarget = path.isAbsolute(target) ? target : path.resolve(input.cwd, target);
+        // Reject unsolicited shares before classification can inspect their control-plane metadata.
+        if (
+          isNetworkPath(target) &&
+          !KnownWorkspaces.isWithinRoot(path, path.resolve(target), path.resolve(input.cwd))
+        )
+          return yield* new WorkspacePaths.WorkspacePathOutsideRootError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+          });
+        const canonicalTarget = yield* leases.canonicalTarget(absoluteTarget);
+        if (isNetworkPath(canonicalTarget)) {
+          const canonicalRoot = yield* leases.canonicalTarget(input.cwd);
+          if (!KnownWorkspaces.isWithinRoot(path, canonicalTarget, canonicalRoot))
+            return yield* new WorkspacePaths.WorkspacePathOutsideRootError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+            });
+        }
+        return yield* access.use({ effect, targets: [input.cwd, absoluteTarget] });
       }),
   );
 

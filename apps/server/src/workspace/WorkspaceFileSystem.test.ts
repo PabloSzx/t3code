@@ -10,8 +10,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import { isNetworkPath } from "@t3tools/shared/path";
 import {
   fixture as treehouseFixture,
+  accessFixture,
   testLayer as treehouseTestLayer,
 } from "../vcs/TreehouseWorktrees.testkit.ts";
 import * as TreehouseWorktrees from "../vcs/TreehouseWorktrees.ts";
@@ -95,6 +98,85 @@ const releasedFileWorkspace = Effect.fn("TestWorkspaceFiles.releasedWorkspace")(
   ).toBeNull();
   return { f, files, context, treehouse };
 });
+
+it.live(
+  "refuses legacy pooled UNC reads before share I/O and leaves network metadata untouched",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      yield* f.recycle;
+      const networkRoot = "\\\\nas.test\\share\\pool\\slot";
+      const indexPath = f.path.join(f.registry, "paths.json");
+      const codec = Schema.fromJsonString(
+        Schema.Array(Schema.Struct({ path: Schema.String, pool: Schema.String })),
+      );
+      const index = yield* f.fs
+        .readFileString(indexPath)
+        .pipe(Effect.flatMap(Schema.decodeEffect(codec)));
+      yield* f.fs.writeFileString(
+        indexPath,
+        yield* Schema.encodeEffect(codec)([
+          ...index,
+          { path: networkRoot, pool: f.path.join(f.root, "pool") },
+        ]),
+      );
+      const alias = f.path.join(f.root, "network-alias");
+      yield* f.fs.symlink(networkRoot, alias);
+      const touched: string[] = [];
+      const local = (target: string) => target.replaceAll("\\", "/");
+      const check = (target: string) => {
+        if (isNetworkPath(target)) {
+          touched.push(target);
+          throw new Error("share I/O is forbidden");
+        }
+        return local(target);
+      };
+      const fs = FileSystem.FileSystem.of({
+        ...f.fs,
+        readFileString: (target) => f.fs.readFileString(check(target)),
+        readLink: (target) => f.fs.readLink(check(target)),
+        stat: (target) => f.fs.stat(check(target)),
+        realPath: (target) =>
+          f.fs.realPath(check(target)).pipe(Effect.map((real) => real.replaceAll("/", "\\"))),
+      });
+      const files = yield* WorkspaceFileSystem.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            WorkspacePaths.layer,
+            layerKnownWorkspacesTest,
+            Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),
+          ).pipe(
+            Layer.provideMerge(
+              Layer.mergeAll(NodePath.layerWin32, Layer.succeed(FileSystem.FileSystem, fs)),
+            ),
+          ),
+        ),
+      );
+      using realpath = vi.spyOn(NodeFSP, "realpath").mockResolvedValue(f.path.join(f.slot, "file"));
+      const result = yield* files
+        .readFile({ cwd: networkRoot, relativePath: `${networkRoot}\\file` })
+        .pipe(Effect.result);
+      expect(result).toMatchObject({ _tag: "Failure", failure: { _tag: "TreehouseLeaseError" } });
+      expect(
+        yield* files.readFile({ cwd: alias, relativePath: "file" }).pipe(Effect.result),
+      ).toMatchObject({ _tag: "Failure", failure: { _tag: "TreehouseLeaseError" } });
+      expect(yield* files.getMetadata({ paths: [`${networkRoot}\\file`, alias] })).toEqual({
+        entries: [null, null],
+      });
+      expect(touched).toEqual([]);
+      expect(realpath).not.toHaveBeenCalled();
+      const nativeFile = f.path.join(f.root, "network-native.txt");
+      yield* f.fs.writeFileString(nativeFile, "native network stand-in");
+      realpath.mockResolvedValue(nativeFile);
+      expect(
+        (yield* files.readFile({
+          cwd: "\\\\native.test\\share",
+          relativePath: "\\\\native.test\\share\\file",
+        })).contents,
+      ).toBe("native network stand-in");
+      expect(realpath).toHaveBeenCalledExactlyOnceWith("\\\\native.test\\share\\file");
+    }).pipe(Effect.provide(treehouseTestLayer)),
+);
 
 describe("recycled workspace file access", () => {
   it.live.each([

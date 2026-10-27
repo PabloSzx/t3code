@@ -1,4 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ThreadId } from "@t3tools/contracts";
+import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { assert } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -113,6 +115,46 @@ export const fixture = Effect.fn("TreehouseTest.fixture")(function* (
     slot: path.join(root, "pool", "1", "repo"),
   };
 });
+export const accessFixture = Effect.fn("TreehouseTest.accessFixture")(function* () {
+  const f = yield* fixture();
+  yield* f.driver.createWorktree({
+    cwd: f.cwd,
+    refName: f.parentSha,
+    newRefName: "access-owner",
+    path: null,
+  });
+  const threadId = ThreadId.make("access-owner");
+  yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 1 });
+  const generation = yield* f.leases.operationGeneration({ path: f.slot, threadId });
+  const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+    Effect.provide(TreehouseWorktrees.layer),
+  );
+  const release = treehouse.returnIdle({
+    cwd: f.cwd,
+    path: f.slot,
+    branch: "access-owner",
+    headSha: f.parentSha,
+    threadIds: [threadId],
+    recheck: Effect.succeed(null),
+  });
+  const recycle = Effect.gen(function* () {
+    yield* release;
+    yield* f.driver.createWorktree({
+      cwd: f.cwd,
+      refName: f.baseSha,
+      newRefName: "foreign-owner",
+      path: null,
+    });
+    const threadId = ThreadId.make("foreign-owner");
+    yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 2 });
+    return {
+      threadId,
+      generation: yield* f.leases.operationGeneration({ path: f.slot, threadId }),
+    };
+  });
+  return { ...f, treehouse, context: { threadId, generation }, release, recycle };
+});
+
 export const testLayer = ProcessRunner.layer.pipe(
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(

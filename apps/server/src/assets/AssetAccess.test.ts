@@ -9,6 +9,7 @@ import {
   SOURCE_CONTROL_MEDIA_ASSET,
   ThreadId,
   TurnItemId,
+  WorkspaceOperation,
 } from "@t3tools/contracts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import { MCP_APP_MAX_HTML_BYTES } from "@t3tools/shared/mcpApp";
@@ -21,6 +22,11 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+import * as Scope from "effect/Scope";
+import * as Clock from "effect/Clock";
+import * as Exit from "effect/Exit";
+import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
+import { base64UrlEncode, signPayload } from "../auth/utils.ts";
 import { HttpClientRequest, HttpClientResponse, HttpServerResponse } from "effect/http";
 import { vi } from "vite-plus/test";
 
@@ -44,6 +50,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFSP>();
   return { ...actual, open: vi.fn(actual.open), realpath: vi.fn(actual.realpath) };
 });
+
+const encodeLegacyWorkspaceClaim = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      kind: Schema.Literal("workspace-file"),
+      workspaceRoot: Schema.String,
+      baseRelativePath: Schema.String,
+      expiresAt: Schema.Number,
+    }),
+  ),
+);
 
 const layerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
@@ -120,6 +138,154 @@ const layerTest = Layer.mergeAll(
   NativeAppIconResolver.layer.pipe(Layer.provide(layerConfig)),
   ServerSecretStore.layer.pipe(Layer.provide(layerConfig)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
+
+it.live.each(["lifetime", "media", "workspace", "legacy", "favicon"] as const)(
+  "protects %s asset access across workspace return",
+  (mode) =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const faviconResolver = yield* ProjectFaviconResolver.make.pipe(
+        Effect.provide(Layer.mergeAll(WorkspacePaths.layer, T3ProjectFileLoader.layer)),
+      );
+      const mediaPath = f.path.join(f.slot, "media.mp4");
+      yield* f.fs.writeFileString(mediaPath, "A-media");
+      yield* f.fs.writeFileString(f.path.join(f.slot, "preview.html"), "A-html");
+      yield* f.fs.writeFileString(
+        f.path.join(f.slot, "favicon.svg"),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
+      );
+      yield* f.git({ cwd: f.slot, args: ["add", "media.mp4", "preview.html", "favicon.svg"] });
+      yield* f.git({ cwd: f.slot, args: ["commit", "-m", "fixture media"] });
+      const headSha = yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] });
+      const release = f.treehouse.returnIdle({
+        cwd: f.cwd,
+        path: f.slot,
+        branch: "access-owner",
+        headSha,
+        threadIds: [f.context.threadId],
+        recheck: Effect.succeed(null),
+      });
+      const retained = f.path.join(f.root, "retained-media");
+      yield* f.fs.link(mediaPath, retained);
+      const urls = yield* Effect.all([
+        issueAssetUrl({
+          resource: { _tag: "media-file", threadId: f.context.threadId, path: mediaPath },
+          workspaceRoot: f.cwd,
+        }),
+        issueAssetUrl({
+          resource: { _tag: "workspace-file", threadId: f.context.threadId, path: "preview.html" },
+          workspaceRoot: f.slot,
+        }),
+        issueAssetUrl({
+          resource: {
+            _tag: "media-file",
+            threadId: f.context.threadId,
+            path: f.path.join(f.cwd, "file"),
+            disposition: "attachment",
+          },
+        }),
+        issueAssetUrl({ resource: { _tag: "project-favicon", cwd: f.slot } }),
+      ]).pipe(
+        Effect.provideService(WorkspaceOperation, f.context),
+        Effect.provideService(ProjectFaviconResolver.ProjectFaviconResolver, faviconResolver),
+      );
+      const parts = urls.map(({ relativeUrl }) => {
+        const suffix = relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        return {
+          token: suffix.slice(0, suffix.indexOf("/")),
+          name: suffix.slice(suffix.indexOf("/") + 1),
+        };
+      });
+      const requestScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+        Scope.close(scope, Exit.void),
+      );
+      const asset = yield* resolveAsset(parts[0]!.token, parts[0]!.name).pipe(
+        Effect.provideService(Scope.Scope, requestScope),
+      );
+      expect(asset?.kind).toBe("file");
+      if (!asset || asset.kind !== "file") return yield* Effect.die("missing media fixture");
+      if (mode === "lifetime")
+        expect(yield* release.pipe(Effect.result)).toMatchObject({
+          _tag: "Failure",
+          failure: { cause: { reason: "in-use" } },
+        });
+      const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(yield* Effect.promise(() => response.text())).toBe("A-media");
+      yield* Scope.close(requestScope, Exit.void);
+      expect(yield* release).toBeNull();
+      if (mode === "lifetime") return;
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.baseSha,
+        newRefName: "foreign-owner",
+        path: null,
+      });
+      yield* f.fs.link(retained, mediaPath);
+      yield* f.fs.writeFileString(mediaPath, "B-media");
+      yield* f.fs.writeFileString(f.path.join(f.slot, "preview.html"), "B-html");
+      yield* f.fs.writeFileString(
+        f.path.join(f.slot, "favicon.svg"),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"/>',
+      );
+      if (mode !== "legacy") {
+        const part = parts[mode === "favicon" ? 3 : mode === "media" ? 0 : 1]!;
+        expect(yield* resolveAsset(part.token, part.name)).toBeNull();
+      }
+      if (mode === "favicon") {
+        const threadId = ThreadId.make("favicon-B");
+        yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 2 });
+        const generation = yield* f.leases.operationGeneration({ path: f.slot, threadId });
+        yield* f.fs.writeFileString(
+          f.path.join(f.slot, "brand-b.svg"),
+          '<svg xmlns="http://www.w3.org/2000/svg" width="3" height="3"/>',
+        );
+        yield* f.fs.writeFileString(f.path.join(f.slot, "t3.json"), '{"iconPath":"brand-b.svg"}');
+        expect(
+          (yield* issueAssetUrl({ resource: { _tag: "project-favicon", cwd: f.slot } }).pipe(
+            Effect.provideService(WorkspaceOperation, { threadId, generation }),
+            Effect.provideService(ProjectFaviconResolver.ProjectFaviconResolver, faviconResolver),
+          )).sourcePath,
+        ).toBe("brand-b.svg");
+      }
+      const secret = yield* (yield* ServerSecretStore.ServerSecretStore).getOrCreateRandom(
+        "asset-access-signing-key",
+        32,
+      );
+      const payload = base64UrlEncode(
+        yield* encodeLegacyWorkspaceClaim({
+          version: 1,
+          kind: "workspace-file",
+          workspaceRoot: f.slot,
+          baseRelativePath: ".",
+          expiresAt: (yield* Clock.currentTimeMillis) + 60_000,
+        }),
+      );
+      if (mode === "legacy")
+        expect(
+          yield* resolveAsset(`${payload}.${signPayload(payload, secret)}`, "preview.html"),
+        ).toBeNull();
+      expect(
+        (yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId: f.context.threadId, path: mediaPath },
+        }).pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      const native = yield* resolveAsset(parts[2]!.token, parts[2]!.name);
+      expect(native?.kind).toBe("file");
+      const image = yield* issueAssetUrl({
+        resource: {
+          _tag: "tool-output-image",
+          threadId: screenshotItem.threadId,
+          itemId: screenshotItem.id,
+          index: 0,
+        },
+      });
+      const suffix = image.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      expect((yield* resolveAsset(suffix.slice(0, suffix.indexOf("/")), "image.png"))?.kind).toBe(
+        "bytes",
+      );
+    }).pipe(Effect.provide(layerTest.pipe(Layer.provideMerge(treehouseLayer)))),
+);
 
 describe("AssetAccess", () => {
   describe("readMcpAppHtml", () => {

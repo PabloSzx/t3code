@@ -448,6 +448,8 @@ function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesEr
   readonly detail?: string;
 } {
   switch (error._tag) {
+    case "TreehouseLeaseError":
+      return { failure: "workspace_unavailable", detail: error.message };
     case "WorkspaceRootNotExistsError":
       return {
         failure: "workspace_root_not_found",
@@ -504,6 +506,8 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
   readonly platform?: string;
 } {
   switch (error._tag) {
+    case "TreehouseLeaseError":
+      return { failure: "workspace_unavailable" };
     case "WorkspaceEntriesWindowsPathUnsupportedError":
       return { failure: "windows_path_unsupported", platform: error.platform };
     case "WorkspaceEntriesCurrentProjectRequiredError":

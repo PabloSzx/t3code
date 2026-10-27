@@ -45,6 +45,7 @@ export const FilesystemBrowseResult = Schema.Struct({
 export type FilesystemBrowseResult = typeof FilesystemBrowseResult.Type;
 
 export const FilesystemBrowseFailure = Schema.Literals([
+  "workspace_unavailable",
   "windows_path_unsupported",
   "current_project_required",
   "read_directory_failed",

@@ -10,7 +10,8 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
-import type { WorkspaceOperationContext } from "@t3tools/contracts";
+import { ThreadId, type WorkspaceOperationContext } from "@t3tools/contracts";
+import { isNetworkPath } from "@t3tools/shared/path";
 
 const LeaseId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/));
 export const TreehouseLease = Schema.Struct({
@@ -81,11 +82,11 @@ export class TreehouseLeaseError extends Schema.TaggedError<TreehouseLeaseError>
     return `Treehouse workspace ${this.path} is unavailable (${this.reason}). T3 retains its ownership records rather than using or deleting an unverified slot.`;
   }
 }
-const isLeaseError = Schema.is(TreehouseLeaseError);
+export const isTreehouseLeaseError = Schema.is(TreehouseLeaseError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeLeaseId = Schema.decodeEffect(LeaseId);
 const metadataError = (input: { path: string; cause: unknown }) =>
-  isLeaseError(input.cause)
+  isTreehouseLeaseError(input.cause)
     ? input.cause
     : new TreehouseLeaseError({ ...input, reason: "metadata" });
 
@@ -188,6 +189,7 @@ export class TreehouseLeaseStore extends Context.Service<
       threadId: string;
       kind: "provider" | "terminal";
     }) => Effect.Effect<Effect.Effect<void>, TreehouseLeaseError>;
+    readonly canonicalTarget: (target: string) => Effect.Effect<string, TreehouseLeaseError>;
     readonly operationGeneration: (
       input: TreehouseReleasedThreadOptions,
     ) => Effect.Effect<string | null, TreehouseLeaseError>;
@@ -290,8 +292,8 @@ const make = Effect.gen(function* () {
     function* (target: string) {
       const index = yield* readIndex();
       const pool =
-        (yield* treehousePoolForPath(target)) ??
-        index.find((entry) => matches({ root: entry.path, target: path.resolve(target) }))?.pool;
+        index.find((entry) => matches({ root: entry.path, target: path.resolve(target) }))?.pool ??
+        (isNetworkPath(target) ? null : yield* treehousePoolForPath(target));
       if (pool == null) return null;
       const state = yield* fs
         .readFileString(path.join(pool, "treehouse-state.json"))
@@ -465,6 +467,7 @@ const make = Effect.gen(function* () {
   });
   const operationTarget = Effect.fn("TreehouseLeases.operationTarget")(function* (target: string) {
     const absolute = path.isAbsolute(target) && path.sep !== "\\" ? target : path.resolve(target);
+    if (isNetworkPath(absolute)) return path.sep === "/" ? absolute : path.resolve(absolute);
     const root = path.parse(absolute).root;
     // Callback realpath collapses raw '..' before following links; I/O follows the links first.
     const segments = absolute.slice(root.length).split(path.sep);
@@ -484,6 +487,10 @@ const make = Effect.gen(function* () {
         continue;
       }
       if (++links > 40) return yield* new TreehouseLeaseError({ path: target, reason: "missing" });
+      if (isNetworkPath(link.value))
+        return path.sep === "/"
+          ? `${link.value}/${segments.join("/")}`
+          : path.resolve(link.value, ...segments);
       const linkRoot = path.parse(link.value).root;
       if (linkRoot !== "") ancestor = linkRoot;
       segments.unshift(...link.value.slice(linkRoot.length).split(path.sep));
@@ -506,18 +513,64 @@ const make = Effect.gen(function* () {
       ancestor = path.dirname(ancestor);
     }
   });
-  const pooledTarget = Effect.fn("TreehouseLeases.pooledTarget")(function* (target: string) {
+  const validateOperationContext = Effect.fn("TreehouseLeases.validateOperationContext")(function* (
+    context: WorkspaceOperationContext | undefined,
+  ) {
+    if (context?.generation == null) return;
+    const binding = yield* readBinding(context.threadId);
+    if (binding === null || !binding.active || binding.leaseId !== context.generation)
+      return yield* new TreehouseLeaseError({ path: context.threadId, reason: "stale-binding" });
+    const owned = yield* readRecord(binding.leaseId);
+    if (
+      owned.record.returned ||
+      owned.record.release !== undefined ||
+      owned.record.lease.path !== binding.path
+    )
+      return yield* new TreehouseLeaseError({ path: binding.path, reason: "stale-binding" });
+  });
+  const pooledTarget = Effect.fn("TreehouseLeases.pooledTarget")(function* ({
+    target,
+    context,
+  }: {
+    readonly target: string;
+    readonly context: WorkspaceOperationContext | undefined;
+  }) {
     const canonical = yield* operationTarget(target);
-    const known = (yield* knownPath(target)) || (yield* knownPath(canonical));
-    const slot = yield* inspect(canonical);
+    const index = yield* readIndex();
+    const entry = index.find(
+      (entry) =>
+        matches({ root: entry.path, target: canonical }) ||
+        matches({ root: entry.path, target: path.resolve(target) }),
+    );
+    const known = entry !== undefined;
+    // Registry and binding checks precede any share access, including through local links.
+    if (known) {
+      if (context?.generation == null)
+        return yield* new TreehouseLeaseError({
+          path: target,
+          reason: context === undefined ? "update-required" : "stale-binding",
+        });
+      const binding = yield* readBinding(context.threadId);
+      if (binding?.path !== entry.path || binding.leaseId !== context.generation || !binding.active)
+        return yield* new TreehouseLeaseError({ path: target, reason: "stale-binding" });
+    }
+    if (!known && isNetworkPath(canonical)) return null;
+    const leasePath = entry?.path ?? canonical;
+    const slot = yield* inspect(leasePath);
     if (!known && (slot === null || !slot.lease_holder.startsWith("t3-code:"))) return null;
-    const owned = yield* read(canonical);
+    const owned = yield* read(leasePath);
     if (owned === null) return yield* new TreehouseLeaseError({ path: target, reason: "missing" });
     return owned;
   });
   const operationGeneration = Effect.fn("TreehouseLeases.operationGeneration")(
     function* (input: TreehouseReleasedThreadOptions) {
-      const owned = yield* pooledTarget(input.path);
+      const binding = yield* readBinding(input.threadId);
+      const context = {
+        threadId: ThreadId.make(input.threadId),
+        generation: binding?.active ? binding.leaseId : null,
+      };
+      yield* validateOperationContext(context);
+      const owned = yield* pooledTarget({ target: input.path, context });
       yield* assertThread({
         path: owned?.record.lease.path ?? input.path,
         threadId: input.threadId,
@@ -533,7 +586,10 @@ const make = Effect.gen(function* () {
   )(
     function* (input) {
       const targets = [...new Set(input.targets)];
-      const pooled = yield* Effect.forEach(targets, pooledTarget);
+      yield* validateOperationContext(input.context);
+      const pooled = yield* Effect.forEach(targets, (target) =>
+        pooledTarget({ target, context: input.context }),
+      );
       if (pooled.every((owned) => owned === null) && input.context?.generation == null) {
         const binding =
           input.context === undefined ? null : yield* readBinding(input.context.threadId);
@@ -548,6 +604,7 @@ const make = Effect.gen(function* () {
         path: targets[0] ?? input.context?.threadId ?? "workspace",
         effect: Effect.gen(function* () {
           const context = input.context;
+          yield* validateOperationContext(context);
           if (context === undefined)
             return yield* new TreehouseLeaseError({
               path: targets[0] ?? "workspace",
@@ -564,7 +621,7 @@ const make = Effect.gen(function* () {
           }
           const ownedById = new Map<string, Owned>();
           for (const target of targets) {
-            const owned = yield* pooledTarget(target);
+            const owned = yield* pooledTarget({ target, context });
             if (owned === null) continue;
             if (context.generation !== owned.record.lease.lease_id)
               return yield* new TreehouseLeaseError({ path: target, reason: "stale-binding" });
@@ -591,6 +648,11 @@ const make = Effect.gen(function* () {
   return TreehouseLeaseStore.of({
     read,
     operationGeneration,
+    canonicalTarget: Effect.fn("TreehouseLeases.canonicalTarget")((target) =>
+      operationTarget(target).pipe(
+        Effect.mapError((cause) => metadataError({ path: target, cause })),
+      ),
+    ),
     pinOperation,
     knownPath,
     withLock,

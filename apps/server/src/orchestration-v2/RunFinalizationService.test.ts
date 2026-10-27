@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CheckpointScopeId,
   RunId,
@@ -96,6 +97,7 @@ it.effect.each(
   const threadId = ThreadId.make("thread-pr-refresh");
   const runId = RunId.make("completed-run");
   const layer = RunFinalization.layerObserver.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),

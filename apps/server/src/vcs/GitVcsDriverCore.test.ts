@@ -2,7 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { assert, it, describe } from "@effect/vitest";
+import { assert, it, describe, expect } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -20,6 +20,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   GitCommandError,
+  WorkspaceOperation,
   ReviewDiffPreviewInput,
   VcsRef,
   VcsListRefsResult,
@@ -38,6 +39,51 @@ import {
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { gitConfigEnv } from "./VcsProcess.ts";
+import { accessFixture, testLayer as treehouseLayer } from "./TreehouseWorktrees.testkit.ts";
+
+it.live(
+  "a detached status fetch retains its captured checkout pin after the request is interrupted",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      yield* f.git({ cwd: f.slot, args: ["remote", "add", "origin", f.cwd] });
+      yield* f.git({ cwd: f.slot, args: ["config", "branch.access-owner.remote", "origin"] });
+      yield* f.git({
+        cwd: f.slot,
+        args: ["config", "branch.access-owner.merge", "refs/heads/main"],
+      });
+      const entered = yield* Deferred.make<void>();
+      const continueFetch = yield* Deferred.make<void>();
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (command._tag === "StandardCommand" && command.args.includes("fetch")) {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(continueFetch);
+              }
+              return yield* spawner.spawn(command);
+            }),
+          ),
+        ),
+      );
+      const read = driver
+        .statusDetailsRemote(f.slot)
+        .pipe(Effect.provideService(WorkspaceOperation, f.context));
+      const request = yield* read.pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(request);
+      expect(yield* f.release.pipe(Effect.result)).toMatchObject({
+        _tag: "Failure",
+        failure: { cause: { reason: "in-use" } },
+      });
+      yield* Deferred.succeed(continueFetch, undefined);
+      yield* read;
+      assert.isNull(yield* f.release);
+    }).pipe(Effect.provide(treehouseLayer)),
+);
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 const decodeVcsRef = Schema.decodeUnknownSync(VcsRef);

@@ -1,4 +1,7 @@
 import * as Cache from "effect/Cache";
+import { WorkspaceOperation } from "@t3tools/contracts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
+import { isTreehouseLeaseError } from "../workspace/treehouseLeases.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
@@ -142,6 +145,8 @@ type TraceTailState = {
 };
 
 class StatusRemoteRefreshCacheKey extends Data.Class<{
+  cwd: string;
+  workspaceGeneration: string | null;
   gitCommonDir: string;
   remoteName: string;
 }> {}
@@ -932,6 +937,21 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const crypto = yield* Crypto.Crypto;
   const hostPlatform = yield* HostProcess.Platform;
   const serviceScope = yield* Effect.scope;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  const guard = <A, E, R>(input: WorkspaceAccess.WorkspaceUseOptions<A, E, R>) =>
+    access.use(input).pipe(
+      Effect.mapError((cause) =>
+        isTreehouseLeaseError(cause)
+          ? new GitCommandError({
+              operation: "GitVcsDriver.workspaceAccess",
+              command: "workspace-access",
+              cwd: input.targets[0] ?? "",
+              detail: cause.message,
+              cause,
+            })
+          : cause,
+      ),
+    );
   const statusFetches = new Map<string, Fiber.Fiber<void, GitCommandError>>();
   const statusFetchProcesses = yield* Semaphore.make(4);
 
@@ -1272,71 +1292,80 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
   });
 
-  const fetchRemoteForStatus = Effect.fn("GitVcsDriver.fetchRemoteForStatus.wait")(function* (
-    gitCommonDir: string,
-    remoteName: string,
-  ) {
-    const fetchCwd =
-      path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
-    // `--no-auto-gc` (a synonym of `--no-auto-maintenance` that older Git also knows) keeps
-    // this poll from starting `git gc --auto`. When that gc fails, for example on a repository
-    // with missing objects, Git retries it on every fetch and leaves a full-size `tmp_pack_*`
-    // behind each time, so a background poll could fill the disk.
-    const args = [
-      "--git-dir",
-      gitCommonDir,
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--no-auto-gc",
-      "--",
-      remoteName,
-    ];
-    const key = `${gitCommonDir}\0${remoteName}`;
-    const failure = statusRemoteRefreshFailures.get(key);
-    if (failure && (yield* Clock.currentTimeMillis) < failure.retryAt) return;
-    const fiber = yield* Effect.uninterruptible(
-      Effect.gen(function* () {
-        const pending = statusFetches.get(key);
-        if (pending) return pending;
-        // Frequent poll deadlines and disconnected clients must not interrupt a
-        // healthy writer. A separate safety limit prevents a hung transport from
-        // occupying its worker slot indefinitely.
-        const started = yield* executeGit("GitVcsDriver.fetchRemoteForStatus", fetchCwd, args, {
-          env: STATUS_UPSTREAM_REFRESH_ENV,
-          fallbackErrorDetail: "Background Git fetch exited with a non-zero status.",
-          timeoutMs: Duration.toMillis(STATUS_UPSTREAM_FETCH_TIMEOUT),
-          forceKillAfterMs: 1_000,
-        }).pipe(
-          Effect.asVoid,
-          Effect.tap(() =>
-            Effect.sync(() => {
-              statusRemoteRefreshFailures.delete(key);
-            }),
-          ),
-          Effect.tapError(() => recordStatusRemoteRefreshFailure(key)),
-          Effect.tapCause((cause) => Effect.logWarning("Background Git fetch failed", cause)),
-          statusFetchProcesses.withPermits(1),
-          Effect.onExit(() =>
-            Effect.sync(() => {
-              statusFetches.delete(key);
-            }),
-          ),
-          Effect.forkIn(serviceScope, { startImmediately: false, uninterruptible: false }),
-        );
-        statusFetches.set(key, started);
-        return started;
-      }),
-    );
-    const result = yield* Fiber.join(fiber).pipe(
-      Effect.timeoutOption(STATUS_UPSTREAM_REFRESH_TIMEOUT),
-    );
-    if (Option.isNone(result)) {
-      yield* Effect.logDebug(
-        "Background Git fetch is still running; using the last fetched references.",
+  const fetchRemoteForStatus = Effect.fn("GitVcsDriver.fetchRemoteForStatus.wait")(
+    function* (input: {
+      readonly cwd: string;
+      readonly gitCommonDir: string;
+      readonly remoteName: string;
+    }) {
+      const { cwd, gitCommonDir, remoteName } = input;
+      const context = yield* WorkspaceOperation;
+      const fetchCwd =
+        path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
+      // `--no-auto-gc` (a synonym of `--no-auto-maintenance` that older Git also knows) keeps
+      // this poll from starting `git gc --auto`. When that gc fails, for example on a repository
+      // with missing objects, Git retries it on every fetch and leaves a full-size `tmp_pack_*`
+      // behind each time, so a background poll could fill the disk.
+      const args = [
+        "--git-dir",
+        gitCommonDir,
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-auto-gc",
+        "--",
+        remoteName,
+      ];
+      const key = `${gitCommonDir}\0${remoteName}\0${context?.generation ?? ""}`;
+      const failure = statusRemoteRefreshFailures.get(key);
+      if (failure && (yield* Clock.currentTimeMillis) < failure.retryAt) return;
+      const fiber = yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const pending = statusFetches.get(key);
+          if (pending) return pending;
+          // Frequent poll deadlines and disconnected clients must not interrupt a
+          // healthy writer. A separate safety limit prevents a hung transport from
+          // occupying its worker slot indefinitely.
+          const started = yield* executeGit("GitVcsDriver.fetchRemoteForStatus", fetchCwd, args, {
+            env: STATUS_UPSTREAM_REFRESH_ENV,
+            fallbackErrorDetail: "Background Git fetch exited with a non-zero status.",
+            timeoutMs: Duration.toMillis(STATUS_UPSTREAM_FETCH_TIMEOUT),
+            forceKillAfterMs: 1_000,
+          }).pipe(
+            Effect.asVoid,
+            Effect.tap(() =>
+              Effect.sync(() => {
+                statusRemoteRefreshFailures.delete(key);
+              }),
+            ),
+            Effect.tapError(() => recordStatusRemoteRefreshFailure(key)),
+            Effect.tapCause((cause) => Effect.logWarning("Background Git fetch failed", cause)),
+            statusFetchProcesses.withPermits(1),
+            (effect) =>
+              guard({ targets: [cwd, fetchCwd, gitCommonDir], effect }).pipe(
+                Effect.provideService(WorkspaceOperation, context),
+              ),
+            Effect.onExit(() =>
+              Effect.sync(() => {
+                statusFetches.delete(key);
+              }),
+            ),
+            Effect.forkIn(serviceScope, { startImmediately: false, uninterruptible: false }),
+          );
+          statusFetches.set(key, started);
+          return started;
+        }),
       );
-    }
-  });
+      const result = yield* Fiber.join(fiber).pipe(
+        Effect.timeoutOption(STATUS_UPSTREAM_REFRESH_TIMEOUT),
+      );
+      if (Option.isNone(result)) {
+        yield* Effect.logDebug(
+          "Background Git fetch is still running; using the last fetched references.",
+        );
+      }
+    },
+  );
 
   const resolveRepositoryPathsUncached = Effect.fn("resolveRepositoryPathsUncached")(function* (
     cwd: string,
@@ -1464,10 +1493,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     },
   );
   const normalizeRepositoryPathsCacheKey = (cwd: string) => path.normalize(path.resolve(cwd));
-  const resolveRepositoryPaths = (cwd: string, refresh = false) => {
+  const resolveRepositoryPaths = Effect.fn("GitVcsDriver.resolveRepositoryPaths")(function* (
+    cwd: string,
+    refresh = false,
+  ) {
+    if ((yield* WorkspaceOperation)?.generation != null)
+      return yield* resolveRepositoryPathsUncached(cwd);
     const cacheKey = normalizeRepositoryPathsCacheKey(cwd);
-    return Cache.get(refresh ? repositoryPathsRefreshCache : repositoryPathsCache, cacheKey);
-  };
+    return yield* Cache.get(refresh ? repositoryPathsRefreshCache : repositoryPathsCache, cacheKey);
+  });
 
   const defaultBranchCache = yield* Cache.makeWith(
     (gitCommonDir: string) =>
@@ -1544,7 +1578,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const statusRemoteRefreshFailures = new Map<string, { count: number; retryAt: number }>();
   const statusRemoteRefreshFailureKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
-    `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
+    `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}\0${cacheKey.workspaceGeneration ?? ""}`;
   const recordStatusRemoteRefreshFailure = Effect.fn(
     "GitVcsDriver.recordStatusRemoteRefreshFailure",
   )(function* (key: string) {
@@ -1565,9 +1599,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const refreshStatusRemoteCacheEntry = Effect.fn("refreshStatusRemoteCacheEntry")(function* (
     cacheKey: StatusRemoteRefreshCacheKey,
   ) {
-    return yield* fetchRemoteForStatus(cacheKey.gitCommonDir, cacheKey.remoteName).pipe(
-      Effect.as(true as const),
-    );
+    return yield* fetchRemoteForStatus({
+      cwd: cacheKey.cwd,
+      gitCommonDir: cacheKey.gitCommonDir,
+      remoteName: cacheKey.remoteName,
+    }).pipe(Effect.as(true as const));
   });
 
   const statusRemoteRefreshCache = yield* Cache.makeWith(refreshStatusRemoteCacheEntry, {
@@ -1590,6 +1626,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     yield* Cache.get(
       statusRemoteRefreshCache,
       new StatusRemoteRefreshCacheKey({
+        cwd,
+        workspaceGeneration: (yield* WorkspaceOperation)?.generation ?? null,
         gitCommonDir,
         remoteName: upstream.remoteName,
       }),
@@ -3229,70 +3267,71 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return result.stdout;
   });
 
-  const readWorkingTreeReviewFile = Effect.fn("readWorkingTreeReviewFile")(function* (
-    input: ReviewDiffFileContentsInput,
-    repositoryRoot: string,
-  ) {
-    const fileError = (stage: string, detail: string, cause?: unknown) =>
-      new GitCommandError({
-        operation: `GitVcsDriver.getReviewDiffFileContents.workingTree.${stage}`,
-        command: stage,
-        cwd: input.cwd,
-        detail,
-        ...(cause === undefined ? {} : { cause }),
-      });
-    const requestedPath = path.resolve(repositoryRoot, input.newPath);
-    if (!isPathWithinRoot(repositoryRoot, requestedPath)) {
-      return yield* fileError(
-        "path.resolve",
-        `Diff file '${input.newPath}' resolves outside the review workspace.`,
-      );
-    }
+  const readWorkingTreeReviewFile = Effect.fn("readWorkingTreeReviewFile")(
+    function* (input: ReviewDiffFileContentsInput, repositoryRoot: string) {
+      const fileError = (stage: string, detail: string, cause?: unknown) =>
+        new GitCommandError({
+          operation: `GitVcsDriver.getReviewDiffFileContents.workingTree.${stage}`,
+          command: stage,
+          cwd: input.cwd,
+          detail,
+          ...(cause === undefined ? {} : { cause }),
+        });
+      const requestedPath = path.resolve(repositoryRoot, input.newPath);
+      if (!isPathWithinRoot(repositoryRoot, requestedPath)) {
+        return yield* fileError(
+          "path.resolve",
+          `Diff file '${input.newPath}' resolves outside the review workspace.`,
+        );
+      }
 
-    const [realRepositoryRoot, realTarget] = yield* Effect.all([
-      fileSystem.realPath(repositoryRoot),
-      fileSystem.realPath(requestedPath),
-    ]).pipe(
-      Effect.mapError((cause) =>
-        fileError("fs.realPath", `Could not resolve diff file '${input.newPath}'.`, cause),
-      ),
-    );
-    if (!isPathWithinRoot(realRepositoryRoot, realTarget)) {
-      return yield* fileError(
-        "fs.realPath",
-        `Diff file '${input.newPath}' resolves outside the review workspace.`,
-      );
-    }
-
-    const info = yield* fileSystem
-      .stat(realTarget)
-      .pipe(
+      const [realRepositoryRoot, realTarget] = yield* Effect.all([
+        fileSystem.realPath(repositoryRoot),
+        fileSystem.realPath(requestedPath),
+      ]).pipe(
         Effect.mapError((cause) =>
-          fileError("fs.stat", `Could not inspect diff file '${input.newPath}'.`, cause),
+          fileError("fs.realPath", `Could not resolve diff file '${input.newPath}'.`, cause),
         ),
       );
-    if (info.type !== "File") {
-      return yield* fileError("fs.stat", `Diff path '${input.newPath}' is not a file.`);
-    }
-    if (info.size > BigInt(REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES)) {
-      return yield* fileError(
-        "fs.stat",
-        `Diff file '${input.newPath}' exceeds the 1 MB expansion limit.`,
-      );
-    }
+      if (!isPathWithinRoot(realRepositoryRoot, realTarget)) {
+        return yield* fileError(
+          "fs.realPath",
+          `Diff file '${input.newPath}' resolves outside the review workspace.`,
+        );
+      }
 
-    const bytes = yield* fileSystem
-      .readFile(realTarget)
-      .pipe(
-        Effect.mapError((cause) =>
-          fileError("fs.readFile", `Could not read diff file '${input.newPath}'.`, cause),
-        ),
-      );
-    if (bytes.includes(0)) {
-      return yield* fileError("fs.readFile", `Cannot expand binary file '${input.newPath}'.`);
-    }
-    return new TextDecoder("utf-8").decode(bytes);
-  });
+      const info = yield* fileSystem
+        .stat(realTarget)
+        .pipe(
+          Effect.mapError((cause) =>
+            fileError("fs.stat", `Could not inspect diff file '${input.newPath}'.`, cause),
+          ),
+        );
+      if (info.type !== "File") {
+        return yield* fileError("fs.stat", `Diff path '${input.newPath}' is not a file.`);
+      }
+      if (info.size > BigInt(REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES)) {
+        return yield* fileError(
+          "fs.stat",
+          `Diff file '${input.newPath}' exceeds the 1 MB expansion limit.`,
+        );
+      }
+
+      const bytes = yield* fileSystem
+        .readFile(realTarget)
+        .pipe(
+          Effect.mapError((cause) =>
+            fileError("fs.readFile", `Could not read diff file '${input.newPath}'.`, cause),
+          ),
+        );
+      if (bytes.includes(0)) {
+        return yield* fileError("fs.readFile", `Cannot expand binary file '${input.newPath}'.`);
+      }
+      return new TextDecoder("utf-8").decode(bytes);
+    },
+    (effect, input, repositoryRoot) =>
+      guard({ targets: [repositoryRoot, path.resolve(repositoryRoot, input.newPath)], effect }),
+  );
 
   const getReviewDiffFileContents = Effect.fn("getReviewDiffFileContents")(function* (
     input: ReviewDiffFileContentsInput,
@@ -3445,7 +3484,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ([, worktreePath]) =>
         worktreePath === normalizedGitCommonDir
           ? Effect.succeed(false)
-          : fileSystem.stat(worktreePath).pipe(
+          : guard({ targets: [worktreePath], effect: fileSystem.stat(worktreePath) }).pipe(
               Effect.as(true),
               Effect.orElseSucceed(() => false),
             ),
@@ -3571,6 +3610,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     gitCommonDir: string,
     refresh: boolean,
   ) {
+    if ((yield* WorkspaceOperation)?.generation != null)
+      return yield* readGitRefsSnapshot(gitCommonDir);
     while (true) {
       const generation = currentListRefsGeneration(gitCommonDir);
       const currentEpoch = listRefsEpochByCommonDir.get(gitCommonDir);
@@ -3594,7 +3635,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     cwd: string,
   ) {
     const repositoryPathsCacheKey = normalizeRepositoryPathsCacheKey(cwd);
-    const repositoryPaths = yield* Cache.get(repositoryPathsCache, repositoryPathsCacheKey);
+    const repositoryPaths = yield* resolveRepositoryPaths(cwd);
     if (repositoryPaths === null) return;
     const previousGeneration = currentListRefsGeneration(repositoryPaths.gitCommonDir);
     bumpListRefsGeneration(repositoryPaths.gitCommonDir);

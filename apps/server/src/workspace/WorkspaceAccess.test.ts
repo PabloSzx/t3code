@@ -32,6 +32,18 @@ it.live("admits active and native I/O but refuses missing, foreign and stale ide
       effect: f.fs.readFileString(f.path.join(f.slot, "file")),
     });
     expect(yield* read.pipe(Effect.provideService(WorkspaceOperation, f.context))).toBe("parent\n");
+    const targetRead = f.access.useThread({
+      threadId: f.context.threadId,
+      cwd: f.slot,
+      targets: [],
+      effect: f.fs.readFileString(f.path.join(f.slot, "file")),
+    });
+    expect(
+      yield* targetRead.pipe(
+        Effect.provideService(WorkspaceOperation, { ...f.context, generation: "0".repeat(32) }),
+        Effect.result,
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "stale-binding" } });
     for (const context of [
       undefined,
       { ...f.context, threadId: ThreadId.make("foreign-thread") },
@@ -69,6 +81,20 @@ it.live("admits active and native I/O but refuses missing, foreign and stale ide
         Effect.flip,
       ),
     ).toMatchObject({ reason: "stale-binding" });
+    yield* f.leases.commitThread({
+      threadId: f.context.threadId,
+      path: null,
+      deleted: false,
+      sequence: 2,
+    });
+    expect(
+      yield* f.leases.operationGeneration({ path: f.cwd, threadId: f.context.threadId }),
+    ).toBeNull();
+    expect(
+      yield* nativeRead.pipe(
+        Effect.provideService(WorkspaceOperation, { ...f.context, generation: null }),
+      ),
+    ).toBe("parent\n");
   }).pipe(Effect.provide(testLayer)),
 );
 

@@ -15,6 +15,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
 import { CheckpointRefUnavailableError, CheckpointTurnRangeUnavailableError } from "./Errors.ts";
 
 const threadId = ThreadId.make("thread:checkpoint-diff-v2");
@@ -65,8 +66,39 @@ function layerFor(input: {
       ),
     ),
     Layer.provideMerge(NodeCrypto.layer),
+    Layer.provideMerge(NodeServices.layer),
   );
 }
+
+it.live(
+  "makes retained history explicitly unavailable instead of reading the recycled scope occupant",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const projection = makeProjection();
+      const query = yield* CheckpointDiffQuery.CheckpointDiffQuery.pipe(
+        Effect.provide(
+          layerFor({
+            projection: Effect.succeed({
+              ...projection,
+              checkpointScopes: projection.checkpointScopes.map((scope) => ({
+                ...scope,
+                cwd: f.slot,
+              })),
+            }),
+          }),
+        ),
+      );
+      const input = { threadId: f.context.threadId, fromTurnCount: 0, toTurnCount: 2 };
+      assert.equal((yield* query.getTurnDiff(input)).diff, "diff");
+      yield* f.recycle;
+      const result = yield* query.getTurnDiff(input).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure")
+        assert.equal(result.failure._tag, "CheckpointWorkspaceUnavailableError");
+      assert.equal((yield* query.getTurnDiff({ ...input, fromTurnCount: 2 })).diff, "");
+    }).pipe(Effect.provide(treehouseLayer)),
+);
 
 it.effect("excludes ready checkpoints from rolled-back runs", () => {
   const projection = makeProjection();

@@ -19,6 +19,8 @@ import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
+import { isTreehouseLeaseError } from "../workspace/treehouseLeases.ts";
 
 export class ReviewService extends Context.Service<
   ReviewService,
@@ -40,6 +42,20 @@ export const make = Effect.gen(function* () {
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  const guard = <A, E, R>(effect: Effect.Effect<A, E, R>, input: { readonly cwd: string }) =>
+    access.use({ targets: [input.cwd], effect }).pipe(
+      Effect.mapError((cause) =>
+        isTreehouseLeaseError(cause)
+          ? new VcsRepositoryDetectionError({
+              operation: "ReviewService.workspaceAccess",
+              cwd: input.cwd,
+              detail: cause.message,
+              cause,
+            })
+          : cause,
+      ),
+    );
 
   const canonicalizePath = (value: string) => {
     const resolvedPath = path.resolve(value);
@@ -112,7 +128,7 @@ export const make = Effect.gen(function* () {
     }
 
     return yield* getDriverDiffPreview(input);
-  });
+  }, guard);
 
   const getDiffFileContents: ReviewService["Service"]["getDiffFileContents"] = Effect.fn(
     "ReviewService.getDiffFileContents",
@@ -129,7 +145,7 @@ export const make = Effect.gen(function* () {
     }
 
     return yield* git.getReviewDiffFileContents(input);
-  });
+  }, guard);
 
   return ReviewService.of({
     getDiffPreview,

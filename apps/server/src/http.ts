@@ -166,12 +166,14 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     readonly mimeType?: string;
     readonly file?: OpenMediaFile;
     readonly renderIntent?: "mcp-app";
+    readonly workspaceBound?: boolean;
   },
   rangeHeader?: string,
   ifRangeHeader?: string,
   method: "GET" | "HEAD" = "GET",
 ) {
   const headers = assetResponseHeaders(asset.path, asset);
+  if (asset.workspaceBound) headers["Cache-Control"] = "private, no-store";
   if (
     asset.renderIntent === "mcp-app" &&
     !asset.download &&
@@ -420,7 +422,10 @@ export const layerAssetRoute = HttpRouter.add(
     if (asset.kind === "bytes") {
       return HttpServerResponse.uint8Array(asset.bytes, {
         contentType: asset.mimeType,
-        headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
+        headers: {
+          "cache-control": asset.workspaceBound ? "private, no-store" : "private, max-age=3600",
+          "x-content-type-options": "nosniff",
+        },
       });
     }
     if (asset.kind === "source-control-media") {

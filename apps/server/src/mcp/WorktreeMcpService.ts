@@ -22,6 +22,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 import type { McpInvocationScope, McpThreadInvocationScope } from "./McpInvocationContext.ts";
 
 export class WorktreeMcpService extends Context.Service<
@@ -62,6 +63,7 @@ const make = Effect.gen(function* () {
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
 
   // Serialize handoffs per thread to avoid creating two worktrees and orphaning one.
   const handoffThreadsInFlight = new Set<string>();
@@ -334,8 +336,13 @@ const make = Effect.gen(function* () {
 
         const continuation = yield* recheckAndBind.pipe(Effect.andThen(queueContinuation));
 
-        yield* vcsStatusBroadcaster
-          .refreshStatus(worktreePath)
+        yield* access
+          .useThread({
+            threadId: scope.thread.threadId,
+            cwd: worktreePath,
+            targets: [],
+            effect: vcsStatusBroadcaster.refreshStatus(worktreePath),
+          })
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach);
 
         let setupScript: WorktreeMcpSetupScriptStatus = { status: "skipped" };
@@ -425,21 +432,18 @@ const make = Effect.gen(function* () {
         projectWorkspaceRoot: project.workspaceRoot,
         defaultStartFromOrigin,
       };
-      return result;
+      return yield* access
+        .useThread({
+          threadId: scope.thread.threadId,
+          cwd: projection.thread.worktreePath ?? project.workspaceRoot,
+          targets: [],
+          effect: Effect.succeed(result),
+        })
+        .pipe(asOperationFailed("Workspace unavailable"));
     },
   );
 
   return WorktreeMcpService.of({ handoff, status });
 });
 
-export const layer: Layer.Layer<
-  WorktreeMcpService,
-  never,
-  | Crypto.Crypto
-  | ThreadManagementService.ThreadManagementService
-  | ProjectService.ProjectService
-  | ServerSettings.ServerSettingsService
-  | GitWorkflowService.GitWorkflowService
-  | ProjectSetupScriptRunner.ProjectSetupScriptRunner
-  | VcsStatusBroadcaster.VcsStatusBroadcaster
-> = Layer.effect(WorktreeMcpService, make);
+export const layer = Layer.effect(WorktreeMcpService, make);

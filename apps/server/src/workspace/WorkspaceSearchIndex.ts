@@ -26,6 +26,7 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
+import { WorkspaceOperation } from "@t3tools/contracts";
 
 // fff-node's native library stays external; single-executables require disk packages instead of importing them.
 const requireForFff = NodeModule.createRequire(import.meta.url);
@@ -291,11 +292,14 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
   cwd: string,
   variant: WorkspaceSearchIndexVariant,
 ) {
+  const context = yield* WorkspaceOperation;
   const result = yield* Effect.try({
     try: () =>
       FileFinder.create({
         basePath: cwd,
         disableMmapCache: true,
+        disableWatch: context?.generation != null,
+        followSymlinks: false,
         // Content indexing costs CPU/memory; path-only consumers use the lightweight index.
         disableContentIndexing: variant !== "content",
         aiMode: false,
@@ -350,6 +354,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       catch: (cause) => new WorkspaceSearchIndexDestroyFailed({ cwd, cause }),
     }).pipe(Effect.orDie),
   );
+  const context = yield* WorkspaceOperation;
   let initialScanTimedOut = false;
   yield* waitForIndexReady(
     cwd,
@@ -363,7 +368,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   ).pipe(
     Effect.catchTags({
       WorkspaceSearchIndexScanTimedOut: (error) =>
-        variant === "paths"
+        variant === "paths" && context?.generation == null
           ? Effect.sync(() => {
               initialScanTimedOut = true;
             })

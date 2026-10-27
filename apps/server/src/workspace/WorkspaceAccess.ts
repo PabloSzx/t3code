@@ -49,6 +49,10 @@ export interface WorkspaceUseOptions<A, E, R> {
   readonly targets: readonly string[];
   readonly effect: Effect.Effect<A, E, R>;
 }
+export interface WorkspaceThreadUseOptions<A, E, R> extends WorkspaceUseOptions<A, E, R> {
+  readonly threadId: ThreadId;
+  readonly cwd: string;
+}
 export class WorkspaceAccess extends Context.Service<
   WorkspaceAccess,
   {
@@ -58,6 +62,9 @@ export class WorkspaceAccess extends Context.Service<
     readonly activate: (input: {
       readonly threadId: ThreadId;
     }) => Effect.Effect<ActiveWorkspace, WorkspaceAccessError, ActivationDependencies>;
+    readonly useThread: <A, E, R>(
+      input: WorkspaceThreadUseOptions<A, E, R>,
+    ) => Effect.Effect<A, E | TreehouseLeases.TreehouseLeaseError, R>;
     readonly use: <A, E, R>(
       input: WorkspaceUseOptions<A, E, R>,
     ) => Effect.Effect<A, E | TreehouseLeases.TreehouseLeaseError, R>;
@@ -202,6 +209,24 @@ const make = Effect.gen(function* () {
       );
     },
   );
-  return WorkspaceAccess.of({ availability, activate, use });
+  const useThread: WorkspaceAccess["Service"]["useThread"] = Effect.fn("WorkspaceAccess.useThread")(
+    function* (input) {
+      const captured = yield* WorkspaceOperation;
+      const context =
+        captured?.threadId === input.threadId
+          ? captured
+          : {
+              threadId: input.threadId,
+              generation: yield* leases.operationGeneration({
+                path: input.cwd,
+                threadId: input.threadId,
+              }),
+            };
+      return yield* use({ targets: [input.cwd, ...input.targets], effect: input.effect }).pipe(
+        Effect.provideService(WorkspaceOperation, context),
+      );
+    },
+  );
+  return WorkspaceAccess.of({ availability, activate, use, useThread });
 });
 export const layer = Layer.effect(WorkspaceAccess, make).pipe(Layer.provide(TreehouseLeases.layer));

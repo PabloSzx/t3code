@@ -49,6 +49,19 @@ export class CheckpointWorkspacePathMissingError extends Schema.TaggedError<Chec
   }
 }
 
+export class CheckpointWorkspaceUnavailableError extends Schema.TaggedError<CheckpointWorkspaceUnavailableError>()(
+  "CheckpointWorkspaceUnavailableError",
+  {
+    operation: CheckpointDiffOperation,
+    threadId: ThreadId,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return "Checkpoint history is unavailable while its saved workspace identity cannot be verified. Reading history does not resume a workspace.";
+  }
+}
+
 export class CheckpointTurnRangeUnavailableError extends Schema.TaggedError<CheckpointTurnRangeUnavailableError>()(
   "CheckpointTurnRangeUnavailableError",
   {
@@ -85,5 +98,6 @@ export type CheckpointServiceError =
   | CheckpointDiffResultInvalidError
   | CheckpointThreadNotFoundError
   | CheckpointWorkspacePathMissingError
+  | CheckpointWorkspaceUnavailableError
   | CheckpointTurnRangeUnavailableError
   | CheckpointRefUnavailableError;

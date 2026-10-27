@@ -8,7 +8,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
 import type { VcsDriverKind, VcsError, VcsRepositoryIdentity } from "@t3tools/contracts";
-import { VcsUnsupportedOperationError } from "@t3tools/contracts";
+import { VcsUnsupportedOperationError, WorkspaceOperation } from "@t3tools/contracts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import * as VcsProjectConfig from "./VcsProjectConfig.ts";
 import * as VcsDriver from "./VcsDriver.ts";
@@ -163,6 +163,8 @@ export const make = Effect.gen(function* () {
   const detect: VcsDriverRegistry["Service"]["detect"] = Effect.fn("VcsDriverRegistry.detect")(
     function* (input) {
       const requestedKind = yield* projectConfig.resolveKind(input);
+      if ((yield* WorkspaceOperation)?.generation != null)
+        return yield* detectResolvedKind({ cwd: input.cwd, requestedKind });
       const key = detectionCacheKey({ cwd: input.cwd, requestedKind });
       const cached = yield* Cache.get(detectionCache, key);
       if (cached === null) return null;

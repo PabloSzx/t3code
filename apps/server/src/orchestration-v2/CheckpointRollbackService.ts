@@ -146,6 +146,12 @@ export const layer: Layer.Layer<
       readonly restoreFiles?: boolean;
     }) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
+      if (context.thread.worktreePath !== null)
+        yield* leases.assertThread({
+          path: context.thread.worktreePath,
+          threadId: input.threadId,
+          requireBinding: false,
+        });
       const { providerThread, checkpoint, scope, targetAttempt, runsToRollback, staleCheckpoints } =
         context;
       if (
@@ -362,12 +368,6 @@ export const layer: Layer.Layer<
         function* (input) {
           // Storage cleanup removes worktrees under the same lease.
           const thread = yield* projections.getThread(input.threadId);
-          if (thread.worktreePath !== null)
-            yield* leases.assertThread({
-              path: thread.worktreePath,
-              threadId: input.threadId,
-              requireBinding: false,
-            });
           yield* thread.worktreePath === null
             ? execute(input)
             : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));

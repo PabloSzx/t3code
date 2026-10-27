@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
@@ -69,6 +70,18 @@ const metadataError = (input: { path: string; cause: unknown }) =>
     : new TreehouseLeaseError({ ...input, reason: "metadata" });
 
 // Only read Treehouse's atomic snapshot; never write to its pool or run status scans.
+const isAbsentPath = (error: PlatformError.PlatformError) => {
+  const reason = error.reason;
+  return (
+    reason._tag === "NotFound" ||
+    (reason._tag === "BadResource" &&
+      typeof reason.cause === "object" &&
+      reason.cause !== null &&
+      "code" in reason.cause &&
+      reason.cause.code === "ENOTDIR")
+  );
+};
+
 export const treehousePoolForPath = Effect.fn("TreehouseLeases.poolForPath")(
   function* (target: string) {
     const fs = yield* FileSystem.FileSystem;
@@ -76,12 +89,9 @@ export const treehousePoolForPath = Effect.fn("TreehouseLeases.poolForPath")(
     let current = path.resolve(target);
     const suffix: string[] = [];
     while (true) {
-      const real = yield* fs.realPath(current).pipe(
-        Effect.catchIf(
-          (error) => error.reason._tag === "NotFound",
-          () => Effect.succeed(null),
-        ),
-      );
+      const real = yield* fs
+        .realPath(current)
+        .pipe(Effect.catchIf(isAbsentPath, () => Effect.succeed(null)));
       if (real !== null) {
         current = path.join(real, ...suffix);
         break;
@@ -94,10 +104,7 @@ export const treehousePoolForPath = Effect.fn("TreehouseLeases.poolForPath")(
     while (true) {
       const present = yield* fs.stat(path.join(current, "treehouse-state.json")).pipe(
         Effect.as(true),
-        Effect.catchIf(
-          (error) => error.reason._tag === "NotFound",
-          () => Effect.succeed(false),
-        ),
+        Effect.catchIf(isAbsentPath, () => Effect.succeed(false)),
       );
       if (present) return current;
       const parent = path.dirname(current);
@@ -227,14 +234,13 @@ const make = Effect.gen(function* () {
       ),
     );
   });
-  const read = Effect.fn("TreehouseLeases.read")(
+  const inspect = Effect.fn("TreehouseLeases.inspect")(
     function* (target: string) {
       const index = yield* readIndex();
       const pool =
         (yield* treehousePoolForPath(target)) ??
         index.find((entry) => matches({ root: entry.path, target: path.resolve(target) }))?.pool;
       if (pool == null) return null;
-      const root = yield* location();
       const state = yield* fs
         .readFileString(path.join(pool, "treehouse-state.json"))
         .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(PoolState))));
@@ -252,6 +258,18 @@ const make = Effect.gen(function* () {
         !slot.lease_holder
       )
         return yield* new TreehouseLeaseError({ path: target, reason: "unknown-lease" });
+      return { ...slot, lease_id: slot.lease_id, lease_holder: slot.lease_holder };
+    },
+    Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.provideService(Path.Path, path),
+    (effect, target) =>
+      effect.pipe(Effect.mapError((cause) => metadataError({ path: target, cause }))),
+  );
+  const read = Effect.fn("TreehouseLeases.read")(
+    function* (target: string) {
+      const slot = yield* inspect(target);
+      if (slot === null) return null;
+      const root = yield* location();
       const id = yield* decodeLeaseId(slot.lease_id);
       const recordPath = path.join(root, "leases", `${id}.json`);
       const record = yield* fs
@@ -287,8 +305,10 @@ const make = Effect.gen(function* () {
   const assertThread = Effect.fn("TreehouseLeases.assertThread")(
     function* (input: { path: string; threadId: string; requireBinding?: boolean }) {
       const binding = yield* readBinding(input.threadId);
-      if (input.requireBinding === false && binding === null && !(yield* knownPath(input.path)))
-        return;
+      if (input.requireBinding === false && binding === null && !(yield* knownPath(input.path))) {
+        const slot = yield* inspect(input.path);
+        if (slot === null || !slot.lease_holder.startsWith("t3-code:")) return;
+      }
       const owned = yield* read(input.path);
       if (owned === null) {
         if (binding !== null && matches({ root: binding.path, target: path.resolve(input.path) }))

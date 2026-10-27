@@ -325,6 +325,39 @@ describe("Treehouse worktrees", () => {
       assert.isFalse(yield* f.fs.exists(f.slot));
     }).pipe(provide),
   );
+  it.live("allows manually leased roots but refuses T3-owned slots from another home", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+      const foreignHome = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+        Effect.provide(TreehouseLeases.layer),
+        Effect.provideService(ServerConfig.ServerConfig, {
+          stateDir: f.path.join(f.root, "other-home"),
+        } as ServerConfig.ServerConfig["Service"]),
+      );
+      assert.isTrue(
+        Result.isFailure(
+          yield* foreignHome
+            .assertThread({ path: f.slot, threadId: "manual-thread", requireBinding: false })
+            .pipe(Effect.result),
+        ),
+      );
+      const owned = yield* f.leases.read(f.slot);
+      if (owned === null) return yield* Effect.die("missing fixture lease");
+      const statePath = f.path.join(f.root, "pool", "treehouse-state.json");
+      const snapshot = yield* f.fs.readFileString(statePath);
+      yield* f.fs.writeFileString(
+        statePath,
+        snapshot.replace(owned.record.lease.lease_holder, "operator:manual"),
+      );
+      yield* foreignHome.assertThread({
+        path: f.slot,
+        threadId: "manual-thread",
+        requireBinding: false,
+      });
+    }).pipe(provide),
+  );
+
   it.live("binds committed threads and releases deleted references through the event sink", () =>
     Effect.gen(function* () {
       const f = yield* fixture();

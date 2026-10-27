@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   TreehouseLease,
   TreehouseLeaseError,
@@ -212,26 +213,29 @@ const make = Effect.gen(function* () {
     remove: Effect.fn("TreehouseWorktrees.remove")(
       function* (input) {
         if ((yield* leases.read(input.path)) === null) return false;
-        return yield* leases.withLock({
-          path: input.path,
-          effect: Effect.gen(function* () {
-            const owned = yield* leases.read(input.path);
-            if (owned === null) return false;
-            yield* leases.assertReturnable(owned);
-            yield* run({
-              cwd: input.cwd,
-              command: owned.record.binary,
-              args: [
-                "return",
-                owned.record.lease.path,
-                "--if-lease-id",
-                owned.record.lease.lease_id,
-              ],
-            });
-            yield* leases.markReturned(owned);
-            return true;
+        return yield* withWorkspaceLease(
+          path.resolve(input.path),
+          leases.withLock({
+            path: input.path,
+            effect: Effect.gen(function* () {
+              const owned = yield* leases.read(input.path);
+              if (owned === null) return false;
+              yield* leases.assertReturnable(owned);
+              yield* run({
+                cwd: input.cwd,
+                command: owned.record.binary,
+                args: [
+                  "return",
+                  owned.record.lease.path,
+                  "--if-lease-id",
+                  owned.record.lease.lease_id,
+                ],
+              });
+              yield* leases.markReturned(owned);
+              return true;
+            }),
           }),
-        });
+        );
       },
       (effect, input) =>
         effect.pipe(

@@ -302,6 +302,12 @@ export const layer: Layer.Layer<
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      if (projection.thread.worktreePath !== null)
+        yield* leases.assertThread({
+          path: projection.thread.worktreePath,
+          threadId: input.threadId,
+          requireBinding: false,
+        });
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
@@ -1426,12 +1432,6 @@ export const layer: Layer.Layer<
           // Storage cleanup removes worktrees under the same lease. Only startup
           // holds it; the provider turn runs after it is released.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
-          if (thread.worktreePath !== null)
-            yield* leases.assertThread({
-              path: thread.worktreePath,
-              threadId: input.threadId,
-              requireBinding: false,
-            });
           const providerTurn = yield* thread.worktreePath === null
             ? start(input)
             : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));

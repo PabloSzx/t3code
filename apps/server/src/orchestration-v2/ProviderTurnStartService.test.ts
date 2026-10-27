@@ -49,6 +49,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -62,12 +63,12 @@ const normalize = (target: string) => {
   }
   return `/${parts.join("/")}`;
 };
-const layerWorktreeLocation = (worktreesDir = managedWorktreesDir) =>
+const layerWorktreeLocation = (input: { worktreesDir?: string; stateDir?: string } = {}) =>
   Layer.mergeAll(
     Path.layer,
     Layer.mock(ServerConfig.ServerConfig)({
-      worktreesDir,
-      stateDir: "/synthetic-state",
+      worktreesDir: input.worktreesDir ?? managedWorktreesDir,
+      stateDir: input.stateDir ?? "/synthetic-state",
     } as ServerConfig.ServerConfig["Service"]),
     ServerSettings.layerTest(),
   );
@@ -268,6 +269,7 @@ function makeLocalCommandHarness(input: {
   readonly text: string;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
+  readonly stateDir?: string;
   readonly workspaceRoot?: string;
   readonly gitWorkflow?: GitWorkflow.GitWorkflowService["Service"];
   readonly fileSystem?: FileSystem.FileSystem;
@@ -677,6 +679,7 @@ function makeLocalCommandHarness(input: {
     ({ thread }: Parameters<RuntimePolicy.RuntimePolicyV2Shape["resolve"]>[0]) =>
       Effect.succeed({ cwd: thread.worktreePath ?? "/tmp/native-account-command" } as never),
   );
+  const pruneWorktrees = vi.fn(() => Effect.void);
   const createWorktree = vi.fn<GitWorkflow.GitWorkflowService["Service"]["createWorktree"]>(() =>
     Effect.succeed({} as never),
   );
@@ -701,13 +704,13 @@ function makeLocalCommandHarness(input: {
         }),
         Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
         IdAllocator.layer,
-        layerWorktreeLocation(input.worktreesDir),
+        layerWorktreeLocation(input),
         input.fileSystem === undefined
           ? FileSystem.layerNoop({ exists: () => Effect.succeed(true) })
           : Layer.succeed(FileSystem.FileSystem, input.fileSystem),
         input.gitWorkflow === undefined
           ? Layer.mock(GitWorkflow.GitWorkflowService)({
-              pruneWorktrees: () => Effect.void,
+              pruneWorktrees,
               listLocalBranchNames: () => Effect.succeed(["feature/restore"]),
               createWorktree,
             })
@@ -766,6 +769,7 @@ function makeLocalCommandHarness(input: {
       projection = next;
     },
     resolveRuntimePolicy,
+    pruneWorktrees,
     createWorktree,
     open,
     writeIfRunCurrent,
@@ -948,6 +952,74 @@ effectIt.effect(
         },
       ]);
       expect(JSON.stringify(harness.events)).not.toContain("private git diagnostic");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect.each(["missing", "recycled"])(
+  "refuses native recovery for a %s Treehouse checkout",
+  (state) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs
+        .makeTempDirectoryScoped({ prefix: "t3-treehouse-recovery-" })
+        .pipe(Effect.flatMap(fs.realPath));
+      const worktreesDir = path.join(root, "pool");
+      const stateDir = path.join(root, "userdata");
+      const worktreePath = path.join(worktreesDir, "slot");
+      yield* fs.makeDirectory(worktreePath, { recursive: true });
+      const lease = {
+        path: worktreePath,
+        lease_id: "a".repeat(32),
+        lease_holder: "t3-code:test",
+        leased_at: "2026-01-01T00:00:00Z",
+      };
+      const writeSnapshot = (leaseId: string) =>
+        fs.writeFileString(
+          path.join(worktreesDir, "treehouse-state.json"),
+          JSON.stringify({
+            version: 4,
+            worktrees: [
+              {
+                path: worktreePath,
+                leased: true,
+                lease_id: leaseId,
+                lease_holder: lease.lease_holder,
+              },
+            ],
+          }),
+        );
+      yield* writeSnapshot(lease.lease_id);
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreesDir,
+        worktreePath,
+        stateDir,
+        fileSystem: fs,
+      });
+      const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+        Effect.provide(TreehouseLeases.layer),
+        Effect.provideService(ServerConfig.ServerConfig, {
+          stateDir,
+        } as ServerConfig.ServerConfig["Service"]),
+      );
+      yield* leases.register({ lease, binary: "treehouse", pool: worktreesDir });
+      yield* leases.bindThread({
+        path: worktreePath,
+        threadId: harness.projection().thread.id,
+        sequence: 1,
+      });
+      if (state === "missing") yield* fs.remove(worktreePath, { recursive: true });
+      else yield* writeSnapshot("b".repeat(32));
+      const result = yield* harness.start.pipe(Effect.result);
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "ProviderTurnStartError" },
+      });
+      expect(harness.pruneWorktrees).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

@@ -9,6 +9,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import {
+  fixture as treehouseFixture,
+  testLayer as treehouseTestLayer,
+} from "../vcs/TreehouseWorktrees.testkit.ts";
+import * as TreehouseWorktrees from "../vcs/TreehouseWorktrees.ts";
+import { ThreadId, WorkspaceOperation } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -52,6 +59,131 @@ const layerTest = Layer.empty.pipe(
   ),
   Layer.provideMerge(NodeServices.layer),
 );
+
+const layerPooledFiles = layerProject.pipe(
+  Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+  Layer.provideMerge(treehouseTestLayer),
+);
+
+const releasedFileWorkspace = Effect.fn("TestWorkspaceFiles.releasedWorkspace")(function* () {
+  const f = yield* treehouseFixture();
+  const files = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+  yield* f.driver.createWorktree({
+    cwd: f.cwd,
+    refName: f.parentSha,
+    newRefName: "file-owner-a",
+    path: null,
+  });
+  yield* f.leases.bindThread({ path: f.slot, threadId: "file-owner-a", sequence: 1 });
+  const generation = yield* f.leases.operationGeneration({
+    path: f.slot,
+    threadId: "file-owner-a",
+  });
+  const context = { threadId: ThreadId.make("file-owner-a"), generation };
+  const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+    Effect.provide(TreehouseWorktrees.layer),
+  );
+  expect(
+    yield* treehouse.returnIdle({
+      cwd: f.cwd,
+      path: f.slot,
+      branch: "file-owner-a",
+      headSha: f.parentSha,
+      threadIds: [context.threadId],
+      recheck: Effect.succeed(null),
+    }),
+  ).toBeNull();
+  return { f, files, context, treehouse };
+});
+
+describe("recycled workspace file access", () => {
+  it.live.each([
+    "read",
+    "absolute read",
+    "alias read",
+    "legacy alias parent read",
+    "metadata",
+    "queued save",
+    "main-root fallback",
+  ] as const)("refuses %s from A after the same directory belongs to B", (operation) =>
+    Effect.gen(function* () {
+      const { f, files, context } = yield* releasedFileWorkspace();
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "file-owner-b",
+        path: null,
+      });
+      yield* f.fs.writeFileString(f.path.join(f.slot, "file"), "foreign B\n");
+      const alias = f.path.join(f.root, "alias");
+      if (operation === "legacy alias parent read") {
+        yield* f.fs.makeDirectory(f.path.join(f.slot, "child"));
+        yield* f.fs.symlink(f.path.join(f.slot, "child"), alias);
+      } else yield* f.fs.symlink(f.slot, alias);
+      const effect: Effect.Effect<
+        unknown,
+        | WorkspaceFileSystem.WorkspaceFileSystemError
+        | KnownWorkspaces.UnknownWorkspaceError
+        | WorkspacePaths.WorkspacePathOutsideRootError
+      > =
+        operation === "queued save"
+          ? files.writeFile({ cwd: f.slot, relativePath: "file", contents: "stale A\n" })
+          : operation === "metadata"
+            ? files.getMetadata({ paths: [f.path.join(f.cwd, "file"), f.path.join(alias, "file")] })
+            : files.readFile({
+                cwd: operation === "read" ? f.slot : f.cwd,
+                relativePath:
+                  operation === "read" || operation === "main-root fallback"
+                    ? "file"
+                    : operation === "legacy alias parent read"
+                      ? `${alias}/../file`
+                      : f.path.join(operation === "alias read" ? alias : f.slot, "file"),
+              });
+      const result = yield* effect.pipe(
+        Effect.provideService(
+          WorkspaceOperation,
+          operation === "legacy alias parent read" ? undefined : context,
+        ),
+        Effect.result,
+      );
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result))
+        expect(result.failure).toMatchObject({ _tag: "TreehouseLeaseError" });
+      expect(yield* f.fs.readFileString(f.path.join(f.slot, "file"))).toBe("foreign B\n");
+    }).pipe(Effect.provide(layerPooledFiles)),
+  );
+  it.live(
+    "does not replay a queued write into the same family after a new generation resumes",
+    () =>
+      Effect.gen(function* () {
+        const { f, files, context, treehouse } = yield* releasedFileWorkspace();
+        const resumed = yield* treehouse.resume({
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "file-owner-a",
+          threadId: context.threadId,
+          preparationScope: yield* Effect.scope,
+        });
+        expect(resumed).toBe(f.slot);
+        yield* f.leases.bindThread({ path: f.slot, threadId: context.threadId, sequence: 2 });
+        const generation = yield* f.leases.operationGeneration({
+          path: f.slot,
+          threadId: context.threadId,
+        });
+        expect(generation).not.toBe(context.generation);
+        expect(
+          yield* files
+            .writeFile({ cwd: f.slot, relativePath: "file", contents: "stale A\n" })
+            .pipe(Effect.provideService(WorkspaceOperation, context), Effect.flip),
+        ).toMatchObject({ _tag: "TreehouseLeaseError", reason: "stale-binding" });
+        expect(
+          (yield* files
+            .readFile({ cwd: f.slot, relativePath: "file" })
+            .pipe(Effect.provideService(WorkspaceOperation, { ...context, generation }))).contents,
+        ).toBe("parent\n");
+      }).pipe(Effect.provide(layerPooledFiles)),
+  );
+});
 
 const makeTempDir = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;

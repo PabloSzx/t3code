@@ -6,6 +6,9 @@ import {
   type ClientGuardedRpcTag,
   ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
+  WorkspaceOperation,
+  WorkspaceOperationContext,
+  WORKSPACE_OPERATION_HEADER,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -188,6 +191,22 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   yield* guard.authorize(supervisor.target.environmentId, method, input);
 });
 
+const encodeWorkspaceOperation = Schema.encodeSync(
+  Schema.fromJsonString(WorkspaceOperationContext),
+);
+const operationOptions = Effect.gen(function* () {
+  const context = yield* WorkspaceOperation;
+  return {
+    headers:
+      context === undefined
+        ? {}
+        : {
+            [WORKSPACE_OPERATION_HEADER]: encodeWorkspaceOperation(context),
+          },
+  };
+});
+type OperationOptions = Effect.Success<typeof operationOptions>;
+
 export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
@@ -201,13 +220,15 @@ export const requestGuarded = Effect.fn("EnvironmentRpc.request")(function* <
   const observer = yield* EnvironmentRpcRequestObserver;
   const method = session.client[tag] as (
     input: EnvironmentRpcInput<TTag>,
+    options: OperationOptions,
   ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     environmentLabel: supervisor.target.label,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  const options = yield* operationOptions;
+  return yield* method(input, options).pipe(Effect.ensuring(completeObservation));
 });
 
 export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
@@ -223,12 +244,15 @@ export function runStreamGuarded<TTag extends EnvironmentStreamCommandRpcTag>(
   return Stream.unwrap(
     authorizeRequest(tag, input).pipe(
       Effect.andThen(currentSession()),
-      Effect.map((session) => {
-        const method = session.client[tag] as (
-          input: EnvironmentRpcInput<TTag>,
-        ) => Stream.Stream<EnvironmentRpcStreamValue<TTag>, EnvironmentRpcStreamFailure<TTag>>;
-        return method(input);
-      }),
+      Effect.flatMap((session) =>
+        Effect.map(operationOptions, (options) => {
+          const method = session.client[tag] as (
+            input: EnvironmentRpcInput<TTag>,
+            options: OperationOptions,
+          ) => Stream.Stream<EnvironmentRpcStreamValue<TTag>, EnvironmentRpcStreamFailure<TTag>>;
+          return method(input, options);
+        }),
+      ),
     ),
   ).pipe(
     Stream.withSpan("EnvironmentRpc.runStream", {
@@ -265,6 +289,7 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
     Effect.gen(function* () {
       const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
       const observer = yield* EnvironmentRpcSubscriptionObserver;
+      const operation = yield* operationOptions;
       const sessionChanges = SubscriptionRef.changes(supervisor.session);
       const sessions =
         options?.resubscribe === undefined
@@ -286,6 +311,7 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                   : session.client[tag]
               ) as (
                 input: EnvironmentRpcInput<TTag>,
+                options: OperationOptions,
               ) => Stream.Stream<
                 EnvironmentRpcStreamValue<TTag>,
                 EnvironmentRpcStreamFailure<TTag>
@@ -301,7 +327,7 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         method: tag,
                         input,
                       });
-                      const stream = mapStream(session, method(input)).pipe(
+                      const stream = mapStream(session, method(input, operation)).pipe(
                         Stream.onFirst(() =>
                           Effect.sync(() => {
                             expectedFailureRetries = 0;

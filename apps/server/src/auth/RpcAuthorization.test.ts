@@ -14,6 +14,9 @@ import {
   AuthTerminalOperateScope,
   WS_METHODS,
   WsRpcGroup,
+  WorkspaceOperation,
+  WORKSPACE_OPERATION_HEADER,
+  type WorkspaceOperationContext,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -94,6 +97,58 @@ describe("RPC scope middleware", () => {
       (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
         !(tested as ReadonlyArray<string>).includes(tag),
     ),
+  );
+
+  it.effect("isolates request workspace headers without treating them as permission grants", () =>
+    Effect.gen(function* () {
+      const seen: Array<WorkspaceOperationContext | undefined> = [];
+      const handlers = Layer.mergeAll(
+        group.toLayerHandler(WS_METHODS.serverProbe, () =>
+          Effect.gen(function* () {
+            seen.push(yield* WorkspaceOperation);
+            return {};
+          }),
+        ),
+        group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () => Effect.never),
+      );
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+      );
+      const contexts = [
+        { threadId: ThreadId.make("context-a"), generation: "a".repeat(32) },
+        { threadId: ThreadId.make("context-b"), generation: "b".repeat(32) },
+      ];
+      yield* Effect.forEach(
+        contexts,
+        (context) =>
+          client[WS_METHODS.serverProbe](
+            {},
+            {
+              headers: { [WORKSPACE_OPERATION_HEADER]: JSON.stringify(context) },
+            },
+          ),
+        { concurrency: "unbounded" },
+      );
+      expect(seen).toEqual(expect.arrayContaining(contexts));
+      yield* client[WS_METHODS.serverProbe](
+        {},
+        { headers: { [WORKSPACE_OPERATION_HEADER]: "invalid" } },
+      );
+      yield* client[WS_METHODS.serverProbe]({});
+      expect(seen.slice(2)).toEqual([undefined, undefined]);
+      const denied = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([]))),
+      );
+      expect(
+        yield* denied[WS_METHODS.serverProbe](
+          {},
+          {
+            headers: { [WORKSPACE_OPERATION_HEADER]: JSON.stringify(contexts[0]) },
+          },
+        ).pipe(Effect.flip),
+      ).toMatchObject({ _tag: "EnvironmentAuthorizationError" });
+      expect(seen).toHaveLength(4);
+    }).pipe(Effect.scoped),
   );
 
   it.effect.each([

@@ -3,6 +3,9 @@ import {
   type RelayClientInstallProgressEvent,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
+  ThreadId,
+  WorkspaceOperation,
+  WORKSPACE_OPERATION_HEADER,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
@@ -26,7 +29,7 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { runStream, subscribe, subscribeDynamicWithSession } from "./client.ts";
+import { request, runStream, subscribe, subscribeDynamicWithSession } from "./client.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -79,6 +82,76 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
 });
 
 describe("environment RPC", () => {
+  it.effect.each(["unary", "stream command", "subscription"] as const)(
+    "carries separate captured workspace generations through %s dispatch",
+    (kind) =>
+      Effect.gen(function* () {
+        const headers: Array<string | undefined> = [];
+        const observe = (options?: { readonly headers?: Readonly<Record<string, string>> }) => {
+          headers.push(options?.headers?.[WORKSPACE_OPERATION_HEADER]);
+        };
+        const client = {
+          [WS_METHODS.serverProbe]: (
+            _input: unknown,
+            options: { headers: Record<string, string> },
+          ) => {
+            observe(options);
+            return Effect.succeed({});
+          },
+          [WS_METHODS.cloudInstallRelayClient]: (
+            _input: unknown,
+            options: { headers: Record<string, string> },
+          ) => {
+            observe(options);
+            return Stream.make(INSTALL_CHECKING);
+          },
+          [WS_METHODS.subscribeServerLifecycle]: (
+            _input: unknown,
+            options: { headers: Record<string, string> },
+          ) => {
+            observe(options);
+            return Stream.make({
+              version: 1,
+              sequence: 1,
+              type: "legacyThreadMigration",
+              payload: { status: "complete", totalThreadCount: 0 },
+            } satisfies ServerLifecycleStreamEvent);
+          },
+        } as unknown as WsRpcProtocolClient;
+        const { activeSession, supervisor } = yield* makeHarness();
+        yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+        const operation = Effect.gen(function* () {
+          if (kind === "unary") yield* request(WS_METHODS.serverProbe, {});
+          else if (kind === "stream command")
+            yield* runStream(WS_METHODS.cloudInstallRelayClient, {}).pipe(Stream.runCollect);
+          else
+            yield* subscribe(WS_METHODS.subscribeServerLifecycle, {}).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+            );
+        });
+        const contexts = [
+          { threadId: ThreadId.make("tab-a"), generation: "a".repeat(32) },
+          { threadId: ThreadId.make("tab-b"), generation: "b".repeat(32) },
+        ];
+        yield* Effect.forEach(
+          contexts,
+          (context) =>
+            operation.pipe(
+              Effect.provideService(WorkspaceOperation, context),
+              Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+            ),
+          { concurrency: "unbounded" },
+        );
+        expect(
+          headers.map((header) => (header === undefined ? undefined : JSON.parse(header))),
+        ).toEqual(expect.arrayContaining(contexts));
+        yield* operation.pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        );
+        expect(headers[2]).toBeUndefined();
+      }),
+  );
   it.effect("binds finite streaming commands to one active session", () =>
     Effect.gen(function* () {
       const firstEvents = yield* Queue.unbounded<RelayClientInstallProgressEvent>();

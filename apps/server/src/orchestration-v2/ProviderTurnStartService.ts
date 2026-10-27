@@ -13,6 +13,7 @@ import {
   parseGoalCommand,
   RunId,
   ThreadId,
+  WorkspaceOperation,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -27,7 +28,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
-import * as TreehouseWorktrees from "../vcs/TreehouseWorktrees.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -148,9 +149,10 @@ export const layer: Layer.Layer<
     const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
       Effect.provide(TreehouseLeases.layer),
     );
-    const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
-      Effect.provide(TreehouseWorktrees.layer),
+    const workspaceAccess = yield* WorkspaceAccess.WorkspaceAccess.pipe(
+      Effect.provide(WorkspaceAccess.layer),
     );
+    const settings = yield* ServerSettings.ServerSettingsService;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -1433,54 +1435,22 @@ export const layer: Layer.Layer<
     return ProviderTurnStartServiceV2.of({
       start: Effect.fn("ProviderTurnStartService.start")(
         function* (input) {
-          // Storage cleanup removes worktrees under the same lease. Only startup
-          // holds it; the provider turn runs after it is released.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
           const providerTurn = yield* Effect.scoped(
             Effect.gen(function* () {
               if (thread.worktreePath === null) return yield* start(input);
-              const previousPath = thread.worktreePath;
-              const resumed = yield* withWorkspaceLease(
-                path.resolve(previousPath),
-                Effect.gen(function* () {
-                  const released = yield* leases.releasedThread({
-                    path: previousPath,
-                    threadId: input.threadId,
-                  });
-                  if (released === null) return null;
-                  if (thread.branch === null)
-                    return yield* new TreehouseLeases.TreehouseLeaseError({
-                      path: previousPath,
-                      reason: "stale-binding",
-                    });
-                  const project = yield* projects.getById(thread.projectId);
-                  if (Option.isNone(project))
-                    return yield* new TreehouseLeases.TreehouseLeaseError({
-                      path: previousPath,
-                      reason: "missing",
-                    });
-                  const resumed = yield* treehouse.resume({
-                    cwd: project.value.workspaceRoot,
-                    path: previousPath,
-                    branch: thread.branch,
-                    threadId: input.threadId,
-                    preparationScope: yield* Effect.scope,
-                  });
-                  if (resumed === null) return null;
-                  yield* eventSink.rebindWorktree({
-                    threadId: input.threadId,
-                    previousPath,
-                    familyThreadIds:
-                      released.record.release?.threadIds.map((id) => ThreadId.make(id)) ?? [],
-                    path: resumed,
-                    branch: thread.branch,
-                    eventId: yield* idAllocator.allocate.event({ threadId: input.threadId }),
-                    occurredAt: yield* DateTime.now,
-                  });
-                  return resumed;
-                }),
+              const workspace = yield* workspaceAccess
+                .activate({ threadId: input.threadId })
+                .pipe(
+                  Effect.provideService(EventSink.EventSinkV2, eventSink),
+                  Effect.provideService(IdAllocator.IdAllocatorV2, idAllocator),
+                  Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
+                  Effect.provideService(ProjectService.ProjectService, projects),
+                  Effect.provideService(ServerSettings.ServerSettingsService, settings),
+                );
+              return yield* withWorkspaceLease(path.resolve(workspace.cwd), start(input)).pipe(
+                Effect.provideService(WorkspaceOperation, workspace.context),
               );
-              return yield* withWorkspaceLease(path.resolve(resumed ?? previousPath), start(input));
             }),
           );
           if (providerTurn !== undefined) yield* providerTurn;

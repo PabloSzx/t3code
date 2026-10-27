@@ -72,6 +72,7 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  WorkspaceUnavailableError,
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
@@ -516,7 +517,10 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
 
 function projectFileFailureContext(
   error:
-    | WorkspaceFileSystem.WorkspaceFileSystemError
+    | Exclude<
+        WorkspaceFileSystem.WorkspaceFileSystemError,
+        { readonly _tag: "TreehouseLeaseError" }
+      >
     | WorkspacePaths.WorkspacePathOutsideRootError
     | KnownWorkspaces.UnknownWorkspaceError,
 ): {
@@ -2815,25 +2819,33 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.projectsReadFile]: (input) =>
           workspaceFileSystem.readFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectReadFileError({
-                  ...input,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "TreehouseLeaseError"
+                ? new WorkspaceUnavailableError({
+                    reason: cause.reason === "update-required" ? "update-required" : "unavailable",
+                    cause,
+                  })
+                : new ProjectReadFileError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>
           workspaceFileSystem.writeFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectWriteFileError({
-                  cwd: input.cwd,
-                  relativePath: input.relativePath,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "TreehouseLeaseError"
+                ? new WorkspaceUnavailableError({
+                    reason: cause.reason === "update-required" ? "update-required" : "unavailable",
+                    cause,
+                  })
+                : new ProjectWriteFileError({
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
@@ -2851,7 +2863,16 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
-        [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
+        [WS_METHODS.filesystemGetMetadata]: (input) =>
+          workspaceFileSystem.getMetadata(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceUnavailableError({
+                  reason: cause.reason === "update-required" ? "update-required" : "unavailable",
+                  cause,
+                }),
+            ),
+          ),
         [WS_METHODS.filesystemBrowse]: (input) =>
           workspaceEntries.browse(input).pipe(
             Effect.mapError(

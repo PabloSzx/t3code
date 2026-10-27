@@ -1,4 +1,4 @@
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import {
@@ -28,6 +28,8 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Exit from "effect/Exit";
@@ -813,6 +815,9 @@ describe("Treehouse worktrees", () => {
         threadId: "manual-thread",
         requireBinding: false,
       });
+      assert.isNull(
+        yield* foreignHome.operationGeneration({ path: f.slot, threadId: "manual-thread" }),
+      );
     }).pipe(provide),
   );
 
@@ -853,6 +858,56 @@ describe("Treehouse worktrees", () => {
         "unrelated-occupant",
       );
     }).pipe(Effect.scoped, Effect.provide(historyLayer)),
+  );
+
+  it.live(
+    "keeps availability passive and shares one activation across concurrent explicit actions",
+    () =>
+      Effect.gen(function* () {
+        const family = yield* returnedFamily();
+        const { f, thread, projections, now } = family;
+        const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(
+          Effect.provide(WorkspaceAccess.layer),
+        );
+        const projectLookup = Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeedSome({
+              id: thread.projectId,
+              title: "Test",
+              workspaceRoot: f.cwd,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: DateTime.formatIso(now),
+              updatedAt: DateTime.formatIso(now),
+              deletedAt: null,
+            }),
+        });
+        const before = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+        expect(
+          yield* access.availability({ threadId: thread.id }).pipe(Effect.provide(projectLookup)),
+        ).toEqual({ state: "released", cwd: null });
+        expect(yield* f.fs.readFileString(f.path.join(f.root, "calls"))).toBe(before);
+        yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: f.parentSha,
+          newRefName: "unrelated-occupant",
+          path: null,
+        });
+        yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+        const [first, second] = yield* Effect.all(
+          [access.activate({ threadId: thread.id }), access.activate({ threadId: thread.id })],
+          { concurrency: "unbounded" },
+        ).pipe(Effect.provide(Layer.merge(projectLookup, IdAllocator.layer)));
+        expect(first).toEqual(second);
+        expect(first.cwd).not.toBe(f.slot);
+        expect((yield* projections.getThread(thread.id)).worktreePath).toBe(first.cwd);
+        const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+        expect(calls.split("\n").filter((line) => line.startsWith("get "))).toHaveLength(3);
+        const owned = yield* f.leases.read(first.cwd);
+        expect(yield* f.leases.assertReturnable(owned!).pipe(Effect.flip)).toMatchObject({
+          reason: "in-use",
+        });
+      }).pipe(Effect.scoped, Effect.provide(historyLayer)),
   );
 
   it.live(

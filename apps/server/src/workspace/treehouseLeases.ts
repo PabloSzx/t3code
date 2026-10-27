@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
+import type { WorkspaceOperationContext } from "@t3tools/contracts";
 
 const LeaseId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/));
 export const TreehouseLease = Schema.Struct({
@@ -45,7 +46,7 @@ const Binding = Schema.Struct({
 const Use = Schema.Struct({
   path: Schema.String,
   leaseId: LeaseId,
-  kind: Schema.Literals(["provider", "terminal", "preparation"]),
+  kind: Schema.Literals(["provider", "terminal", "preparation", "operation"]),
 });
 const PoolState = Schema.Struct({
   version: Schema.Number,
@@ -65,7 +66,14 @@ export class TreehouseLeaseError extends Schema.TaggedError<TreehouseLeaseError>
   "TreehouseLeaseError",
   {
     path: Schema.String,
-    reason: Schema.Literals(["metadata", "unknown-lease", "stale-binding", "in-use", "missing"]),
+    reason: Schema.Literals([
+      "metadata",
+      "unknown-lease",
+      "stale-binding",
+      "in-use",
+      "missing",
+      "update-required",
+    ]),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -138,6 +146,10 @@ export interface TreehouseReleasedThreadOptions {
   readonly path: string;
   readonly threadId: string;
 }
+export interface TreehouseOperationOptions {
+  readonly targets: readonly string[];
+  readonly context?: WorkspaceOperationContext;
+}
 export class TreehouseLeaseStore extends Context.Service<
   TreehouseLeaseStore,
   {
@@ -176,6 +188,12 @@ export class TreehouseLeaseStore extends Context.Service<
       threadId: string;
       kind: "provider" | "terminal";
     }) => Effect.Effect<Effect.Effect<void>, TreehouseLeaseError>;
+    readonly operationGeneration: (
+      input: TreehouseReleasedThreadOptions,
+    ) => Effect.Effect<string | null, TreehouseLeaseError>;
+    readonly pinOperation: (
+      input: TreehouseOperationOptions,
+    ) => Effect.Effect<Effect.Effect<void>, TreehouseLeaseError>;
     readonly assertReturnable: (owned: Owned) => Effect.Effect<void, TreehouseLeaseError>;
     readonly releasedThread: (
       input: TreehouseReleasedThreadOptions,
@@ -445,8 +463,135 @@ const make = Effect.gen(function* () {
         return yield* new TreehouseLeaseError({ path: owned.record.lease.path, reason: "in-use" });
     }
   });
+  const operationTarget = Effect.fn("TreehouseLeases.operationTarget")(function* (target: string) {
+    const absolute = path.isAbsolute(target) && path.sep !== "\\" ? target : path.resolve(target);
+    const root = path.parse(absolute).root;
+    // Callback realpath collapses raw '..' before following links; I/O follows the links first.
+    const segments = absolute.slice(root.length).split(path.sep);
+    let ancestor = root;
+    let links = 0;
+    while (segments.length > 0) {
+      const segment = segments.shift()!;
+      if (segment === "" || segment === ".") continue;
+      if (segment === "..") {
+        ancestor = path.dirname(ancestor);
+        continue;
+      }
+      const candidate = path.join(ancestor, segment);
+      const link = yield* fs.readLink(candidate).pipe(Effect.option);
+      if (Option.isNone(link)) {
+        ancestor = candidate;
+        continue;
+      }
+      if (++links > 40) return yield* new TreehouseLeaseError({ path: target, reason: "missing" });
+      const linkRoot = path.parse(link.value).root;
+      if (linkRoot !== "") ancestor = linkRoot;
+      segments.unshift(...link.value.slice(linkRoot.length).split(path.sep));
+    }
+    const suffix: string[] = [];
+    while (true) {
+      const real = yield* fs
+        .realPath(ancestor)
+        .pipe(Effect.catchIf(isAbsentPath, () => Effect.succeed(null)));
+      if (real !== null) return path.join(real, ...suffix);
+      const link = yield* fs.readLink(ancestor).pipe(Effect.option);
+      if (Option.isSome(link)) {
+        if (++links > 40)
+          return yield* new TreehouseLeaseError({ path: target, reason: "missing" });
+        ancestor = path.resolve(path.dirname(ancestor), link.value);
+        continue;
+      }
+      if (path.dirname(ancestor) === ancestor) return path.join(ancestor, ...suffix);
+      suffix.unshift(path.basename(ancestor));
+      ancestor = path.dirname(ancestor);
+    }
+  });
+  const pooledTarget = Effect.fn("TreehouseLeases.pooledTarget")(function* (target: string) {
+    const canonical = yield* operationTarget(target);
+    const known = (yield* knownPath(target)) || (yield* knownPath(canonical));
+    const slot = yield* inspect(canonical);
+    if (!known && (slot === null || !slot.lease_holder.startsWith("t3-code:"))) return null;
+    const owned = yield* read(canonical);
+    if (owned === null) return yield* new TreehouseLeaseError({ path: target, reason: "missing" });
+    return owned;
+  });
+  const operationGeneration = Effect.fn("TreehouseLeases.operationGeneration")(
+    function* (input: TreehouseReleasedThreadOptions) {
+      const owned = yield* pooledTarget(input.path);
+      yield* assertThread({
+        path: owned?.record.lease.path ?? input.path,
+        threadId: input.threadId,
+        requireBinding: owned !== null,
+      });
+      return owned?.record.lease.lease_id ?? null;
+    },
+    (effect, input) =>
+      effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
+  );
+  const pinOperation: TreehouseLeaseStore["Service"]["pinOperation"] = Effect.fn(
+    "TreehouseLeases.pinOperation",
+  )(
+    function* (input) {
+      const targets = [...new Set(input.targets)];
+      const pooled = yield* Effect.forEach(targets, pooledTarget);
+      if (pooled.every((owned) => owned === null) && input.context?.generation == null) {
+        const binding =
+          input.context === undefined ? null : yield* readBinding(input.context.threadId);
+        if (binding?.active)
+          return yield* new TreehouseLeaseError({
+            path: targets[0] ?? binding.path,
+            reason: "stale-binding",
+          });
+        return Effect.void;
+      }
+      return yield* withLock({
+        path: targets[0] ?? input.context?.threadId ?? "workspace",
+        effect: Effect.gen(function* () {
+          const context = input.context;
+          if (context === undefined)
+            return yield* new TreehouseLeaseError({
+              path: targets[0] ?? "workspace",
+              reason: "update-required",
+            });
+          const binding = yield* readBinding(context.threadId);
+          if (context.generation !== null) {
+            if (binding === null || binding.leaseId !== context.generation || !binding.active)
+              return yield* new TreehouseLeaseError({
+                path: targets[0] ?? "workspace",
+                reason: "stale-binding",
+              });
+            yield* assertThread({ path: binding.path, threadId: context.threadId });
+          }
+          const ownedById = new Map<string, Owned>();
+          for (const target of targets) {
+            const owned = yield* pooledTarget(target);
+            if (owned === null) continue;
+            if (context.generation !== owned.record.lease.lease_id)
+              return yield* new TreehouseLeaseError({ path: target, reason: "stale-binding" });
+            yield* assertThread({ path: owned.record.lease.path, threadId: context.threadId });
+            ownedById.set(owned.record.lease.lease_id, owned);
+          }
+          const releases: Effect.Effect<void>[] = [];
+          return yield* Effect.gen(function* () {
+            for (const owned of ownedById.values())
+              releases.push(yield* pinOwnedUse({ owned, kind: "operation" }));
+            return Effect.forEach(releases, (release) => release, { discard: true });
+          }).pipe(
+            Effect.onError(() => Effect.forEach(releases, (release) => release, { discard: true })),
+            Effect.uninterruptible,
+          );
+        }),
+      });
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) => metadataError({ path: input.targets[0] ?? "workspace", cause })),
+      ),
+  );
   return TreehouseLeaseStore.of({
     read,
+    operationGeneration,
+    pinOperation,
     knownPath,
     withLock,
     assertThread,

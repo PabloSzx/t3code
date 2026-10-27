@@ -29,10 +29,14 @@ import {
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  WorkspaceOperation,
+  WorkspaceOperationContext,
+  WORKSPACE_OPERATION_HEADER,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -279,17 +283,25 @@ const requiredScopesForRpcCall = (
  * RPC, that is when the stream completes. Every RPC passes through here, so it
  * is the one place to observe requests without wrapping each handler.
  */
+const decodeWorkspaceOperation = Schema.decodeUnknownOption(
+  Schema.fromJsonString(WorkspaceOperationContext),
+);
+
 export const layer = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
 ) =>
-  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
+  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload, headers }) => {
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
     const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
     if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
+    const context = Option.getOrUndefined(
+      decodeWorkspaceOperation(headers[WORKSPACE_OPERATION_HEADER]),
+    );
+    const scoped = Effect.provideService(WorkspaceOperation, context)(effect);
     return onAuthorized === undefined
-      ? effect
-      : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));
+      ? scoped
+      : Effect.tap(scoped, () => onAuthorized(rpc._tag, payload));
   });
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */

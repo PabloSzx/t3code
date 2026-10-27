@@ -3686,7 +3686,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
     // Resolve sub/.. before taking the basename.
     const repoName = path.basename(path.resolve(input.cwd));
-    const treehousePath = yield* treehouse.create(input);
+    const treehousePath = yield* treehouse.create(input, {
+      preparationScope: options?.preparationScope ?? (yield* Effect.scope),
+    });
     let worktreePath = treehousePath ?? input.path;
     if (worktreePath == null) {
       const parentDir = resolveWorktreesDirectory(
@@ -3841,7 +3843,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         refName: targetBranch,
       },
     };
-  });
+  }, Effect.scoped);
 
   const fetchRefIntoBranch: GitVcsDriver.GitVcsDriver["Service"]["fetchRefIntoBranch"] = Effect.fn(
     "GitVcsDriver.fetchRefIntoBranch",

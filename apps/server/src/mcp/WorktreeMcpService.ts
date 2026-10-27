@@ -228,13 +228,16 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const worktree = yield* restore(
           gitWorkflow
-            .createWorktree({
-              cwd: projectCwd,
-              refName: worktreeBaseRef,
-              newRefName: input.branch,
-              baseRefName,
-              path: null,
-            })
+            .createWorktree(
+              {
+                cwd: projectCwd,
+                refName: worktreeBaseRef,
+                newRefName: input.branch,
+                baseRefName,
+                path: null,
+              },
+              { preparationScope: yield* Effect.scope },
+            )
             .pipe(asOperationFailed("Unable to create the worktree")),
         );
         const worktreePath = worktree.worktree.path;
@@ -378,7 +381,7 @@ const make = Effect.gen(function* () {
         return result;
       }),
     );
-  });
+  }, Effect.scoped);
 
   const handoff: WorktreeMcpService["Service"]["handoff"] = Effect.fn("WorktreeMcpService.handoff")(
     function* (callerScope, input) {

@@ -33,6 +33,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "./Manager.ts";
+import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
@@ -323,6 +324,45 @@ const createManager = (
     }),
   );
 
+const createTreehouseWorkspace = Effect.fn("TerminalTest.createTreehouseWorkspace")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs
+    .makeTempDirectoryScoped({ prefix: "terminal-treehouse-" })
+    .pipe(Effect.flatMap(fs.realPath));
+  const pool = path.join(root, "pool");
+  const slot = path.join(pool, "1", "repo");
+  const other = path.join(pool, "2", "repo");
+  const subdir = path.join(slot, "src");
+  yield* fs.makeDirectory(subdir, { recursive: true });
+  yield* fs.makeDirectory(other, { recursive: true });
+  const lease = {
+    path: slot,
+    lease_id: "a".repeat(32),
+    lease_holder: "t3-code:terminal",
+    leased_at: "2026-01-01T00:00:00Z",
+  };
+  const otherLease = {
+    ...lease,
+    path: other,
+    lease_id: "b".repeat(32),
+    lease_holder: "t3-code:other",
+  };
+  yield* fs.writeFileString(
+    path.join(pool, "treehouse-state.json"),
+    JSON.stringify({
+      version: 4,
+      worktrees: [lease, otherLease].map((entry) => ({ ...entry, leased: true })),
+    }),
+  );
+  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+    Effect.provide(TreehouseLeases.layer),
+  );
+  yield* leases.register({ lease, binary: "treehouse", pool });
+  yield* leases.bindThread({ path: slot, threadId: "thread-1", sequence: 1 });
+  return { fs, path, pool, slot, other, otherLease, subdir, leases };
+});
+
 const layerWithHostPlatform = (platform: NodeJS.Platform) =>
   Layer.succeed(HostProcess.Platform, platform);
 
@@ -415,6 +455,80 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect.each(["open", "restart", "attach", "resume"] as const)(
+    "rejects an unverified or conflicting actual cwd on %s despite a valid display worktree",
+    (entry) =>
+      Effect.gen(function* () {
+        const f = yield* createTreehouseWorkspace();
+        const { manager, ptyAdapter } = yield* createManager();
+        const input = restartInput({ cwd: f.other, worktreePath: f.slot });
+        const launch = () =>
+          entry === "open"
+            ? manager.open(input).pipe(Effect.asVoid)
+            : entry === "restart"
+              ? manager.restart(input).pipe(Effect.asVoid)
+              : manager
+                  .attachStream({ ...input, resume: entry === "resume" }, () => Effect.void)
+                  .pipe(Effect.asVoid);
+        const foreign = yield* launch().pipe(Effect.result);
+        assert.equal(foreign._tag, "Failure", "unverified spawn cwd must fail before spawning");
+        yield* f.leases.register({ lease: f.otherLease, binary: "treehouse", pool: f.pool });
+        const conflicting = yield* launch().pipe(Effect.result);
+        assert.equal(conflicting._tag, "Failure", "a different owned lease must also fail");
+        assert.equal(ptyAdapter.spawnInputs.length, 0);
+      }).pipe(
+        Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "terminal-ownership-" })),
+      ),
+  );
+
+  it.effect(
+    "pins the actual subdirectory cwd until PTY exit, even after closing and detaching",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* createTreehouseWorkspace();
+        const released = yield* Deferred.make<void>();
+        const config = yield* ServerConfig.ServerConfig;
+        const uses = f.path.join(config.stateDir, "treehouse-leases", "uses");
+        const fs = {
+          ...f.fs,
+          remove: (target: string, options?: Parameters<typeof f.fs.remove>[1]) =>
+            f.fs
+              .remove(target, options)
+              .pipe(
+                Effect.tap(() =>
+                  target.startsWith(`${uses}${f.path.sep}`)
+                    ? Deferred.succeed(released, undefined)
+                    : Effect.void,
+                ),
+              ),
+        };
+        const { manager, ptyAdapter } = yield* createManager().pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+        );
+        const opened = yield* manager.open(openInput({ cwd: f.subdir, worktreePath: f.slot }));
+        assert.equal(opened.status, "running");
+        assert.equal(ptyAdapter.spawnInputs[0]?.cwd, f.subdir);
+        const owned = yield* f.leases.read(f.slot);
+        assert.isNotNull(owned);
+        yield* f.leases.commitThread({
+          path: null,
+          threadId: "thread-1",
+          deleted: false,
+          sequence: 2,
+        });
+        yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+        assert.equal(
+          (yield* f.leases.assertReturnable(owned!).pipe(Effect.result))._tag,
+          "Failure",
+        );
+        ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: null });
+        yield* Deferred.await(released);
+        yield* f.leases.assertReturnable(owned!);
+      }).pipe(
+        Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "terminal-ownership-" })),
+      ),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

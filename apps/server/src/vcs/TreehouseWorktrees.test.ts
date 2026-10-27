@@ -3,9 +3,13 @@ import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import {
+  ContextTransferId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
+  RunId,
   ThreadId,
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
@@ -13,6 +17,7 @@ import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadForkService from "../orchestration-v2/ThreadForkService.ts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -20,6 +25,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
@@ -179,6 +186,55 @@ describe("Treehouse worktrees", () => {
         const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
         assert.include(calls, `return ${f.slot} --if-lease-id ${"a".repeat(32)}`);
         assert.notInclude(calls, "--force");
+        assert.isTrue(Result.isFailure(yield* f.leases.read(f.slot).pipe(Effect.result)));
+      }).pipe(provide),
+  );
+  it.live.each(["standalone", "thread handoff"] as const)(
+    "protects preparation until completion of %s creation",
+    (handoff) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const scope = yield* Scope.make();
+        yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+        const claimed = yield* Deferred.make<void>();
+        const finish = yield* Deferred.make<void>();
+        const creation = yield* f.driver
+          .createWorktree(
+            { cwd: f.cwd, refName: f.parentSha, path: null },
+            {
+              ...(handoff === "thread handoff" ? { preparationScope: scope } : {}),
+              progress: {
+                onWorktreeClaimed: () =>
+                  Deferred.succeed(claimed, undefined).pipe(Effect.andThen(Deferred.await(finish))),
+              },
+            },
+          )
+          .pipe(Effect.forkChild());
+        yield* Deferred.await(claimed);
+        const duringPreparation = yield* f.driver
+          .removeWorktree({ cwd: f.cwd, path: f.slot })
+          .pipe(Effect.result);
+        yield* Deferred.succeed(finish, undefined);
+        yield* Fiber.join(creation);
+        assert.isTrue(Result.isFailure(duringPreparation), "preparation must block return");
+        if (handoff === "thread handoff") {
+          assert.isTrue(
+            Result.isFailure(
+              yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
+            ),
+            "binding handoff must block return",
+          );
+          yield* f.leases.bindThread({ path: f.slot, threadId: "launch-thread", sequence: 1 });
+          yield* Scope.close(scope, Exit.void);
+          yield* f.leases.assertThread({ path: f.slot, threadId: "launch-thread" });
+          yield* f.leases.commitThread({
+            path: null,
+            threadId: "launch-thread",
+            deleted: false,
+            sequence: 2,
+          });
+        }
+        yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot });
         assert.isTrue(Result.isFailure(yield* f.leases.read(f.slot).pipe(Effect.result)));
       }).pipe(provide),
   );
@@ -427,6 +483,125 @@ describe("Treehouse worktrees", () => {
               Layer.provideMerge(Sqlite.layerMemory),
             ),
           ),
+          Layer.provideMerge(testLayer),
+        ),
+      ),
+    ),
+  );
+
+  it.live("rejects an inherited fork of a recycled lease without blocking a fresh thread", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+      const sink = yield* EventSink.EventSinkV2;
+      const fork = yield* ThreadForkService.ThreadForkServiceV2;
+      const now = yield* DateTime.now;
+      const parentId = ThreadId.make("fork-parent");
+      const parent: OrchestrationV2AppThread = {
+        id: parentId,
+        projectId: ProjectId.make("fork-project"),
+        title: "parent",
+        createdBy: "user",
+        creationSource: "web",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "old-branch",
+        worktreePath: f.slot,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+      const writeThread = (thread: OrchestrationV2AppThread) =>
+        sink.write({
+          events: [
+            {
+              id: EventId.make(`create-${thread.id}`),
+              type: "thread.created",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: thread,
+            },
+          ],
+        });
+      yield* writeThread(parent);
+      const runId = RunId.make("fork-run");
+      const plan = (targetThreadId: ThreadId) =>
+        fork.plan({
+          sourceProjection: { thread: parent },
+          sourceRun: {
+            id: runId,
+            threadId: parentId,
+            ordinal: 1,
+            providerInstanceId: parent.providerInstanceId,
+            modelSelection: parent.modelSelection,
+            providerThreadId: ProviderThreadId.make("fork-provider"),
+            userMessageId: MessageId.make("fork-message"),
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "completed",
+            queuePosition: null,
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+          sourceProviderThread: undefined,
+          canonicalSourcePoint: { threadId: parentId, runId },
+          transferId: ContextTransferId.make(`transfer-${targetThreadId}`),
+          targetThreadId,
+          createdBy: "user",
+          creationSource: "web",
+          createdAt: now,
+        });
+      const valid = yield* plan(ThreadId.make("valid-fork"));
+      yield* writeThread(valid.targetThread);
+      yield* f.leases.assertThread({ path: f.slot, threadId: valid.targetThread.id });
+      const owned = yield* f.leases.read(f.slot);
+      assert.isNotNull(owned);
+      const recycled = { ...owned!.record.lease, lease_id: "b".repeat(32) };
+      const pool = f.path.join(f.root, "pool");
+      yield* f.fs.writeFileString(
+        f.path.join(pool, "treehouse-state.json"),
+        JSON.stringify({ version: 4, worktrees: [{ ...recycled, leased: true }] }),
+      );
+      yield* f.leases.register({ lease: recycled, binary: owned!.record.binary, pool });
+      const stale = yield* plan(ThreadId.make("stale-fork"));
+      const result = yield* writeThread(stale.targetThread).pipe(Effect.result);
+      assert.isTrue(Result.isFailure(result), "fork must not adopt the recycled lease");
+      assert.isTrue(
+        Result.isFailure(
+          yield* f.leases
+            .assertThread({ path: f.slot, threadId: stale.targetThread.id })
+            .pipe(Effect.result),
+        ),
+      );
+      const fresh = {
+        ...parent,
+        id: ThreadId.make("fresh-thread"),
+        createdBy: "agent" as const,
+        branch: "new-branch",
+      };
+      yield* writeThread(fresh);
+      yield* f.leases.assertThread({ path: f.slot, threadId: fresh.id });
+    }).pipe(
+      Effect.provide(
+        EventSink.layer.pipe(
+          Layer.provide(
+            Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+              Layer.provideMerge(Sqlite.layerMemory),
+            ),
+          ),
+          Layer.provideMerge(ThreadForkService.layer),
           Layer.provideMerge(testLayer),
         ),
       ),

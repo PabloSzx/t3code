@@ -392,6 +392,11 @@ const layerBase: Layer.Layer<
                   path: event.payload.worktreePath,
                   threadId: event.payload.id,
                   sequence: stored.sequence,
+                  ...(event.type === "thread.created" &&
+                  event.payload.lineage.relationshipToParent === "fork" &&
+                  event.payload.forkedFrom?.type === "run"
+                    ? { sourceThreadId: event.payload.forkedFrom.threadId }
+                    : {}),
                 });
               }
               yield* projectionStore.apply(event);

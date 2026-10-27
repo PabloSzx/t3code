@@ -433,6 +433,7 @@ const make = Effect.gen(function* () {
               path: null,
             },
             {
+              preparationScope: yield* Effect.scope,
               progress: {
                 onWorktreeClaimed: (path) =>
                   Effect.sync(() => {
@@ -700,7 +701,7 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-  });
+  }, Effect.scoped);
 
   const failPreparedRun = (
     input: Pick<PreparationInput, "commandId">,

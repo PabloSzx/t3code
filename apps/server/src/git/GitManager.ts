@@ -755,13 +755,14 @@ export const make = Effect.gen(function* () {
     const result = yield* gitCore.createWorktree(input, {
       worktreesDirectory,
       ...options,
+      preparationScope: options?.preparationScope ?? (yield* Effect.scope),
       submodules,
     });
     if (input.newRefName && input.baseRefName) {
       yield* shareBranchBase(input.cwd, input.newRefName);
     }
     return result;
-  });
+  }, Effect.scoped);
 
   const readRepositoryInstructions = Effect.fn("GitManager.readRepositoryInstructions")(
     function* (cwd: string, fileName: string) {
@@ -2960,6 +2961,7 @@ export const make = Effect.gen(function* () {
         },
         {
           worktreesDirectory: yield* readWorktreesDirectory,
+          preparationScope: yield* Effect.scope,
           submodules: yield* projectSettingsFor(input).pipe(
             Effect.map(({ settings }) => settings.worktreeSubmodules),
             Effect.orElseSucceed(() => null),
@@ -2975,7 +2977,7 @@ export const make = Effect.gen(function* () {
         worktreePath: worktree.worktree.path,
         isOnPullRequestHead: true,
       };
-    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+    }).pipe(Effect.scoped, Effect.ensuring(invalidateStatus(input.cwd)));
   }, asUserAction);
 
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (

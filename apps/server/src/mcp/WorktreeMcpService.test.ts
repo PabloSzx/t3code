@@ -513,9 +513,10 @@ describe("t3_worktree_handoff", () => {
         baseRef: "dev",
         startFromOrigin: true,
       });
-      expect(harness.createWorktree).toHaveBeenCalledWith(
-        expect.objectContaining({ refName: "dev", baseRefName: "dev" }),
-      );
+      expect(harness.createWorktree.mock.calls[0]?.[0]).toMatchObject({
+        refName: "dev",
+        baseRefName: "dev",
+      });
       expect(result.startedFromOrigin).toBe(false);
     });
   });
@@ -613,7 +614,7 @@ describe("t3_worktree_handoff", () => {
         path: "/home/user/.ssh/checkout",
       });
       const result = yield* runHandoff(harness, input);
-      expect(harness.createWorktree).toHaveBeenCalledWith(expect.objectContaining({ path: null }));
+      expect(harness.createWorktree.mock.calls[0]?.[0]).toMatchObject({ path: null });
       expect(result.worktreePath).toBe("/worktrees/project/feature/elsewhere");
     });
   });

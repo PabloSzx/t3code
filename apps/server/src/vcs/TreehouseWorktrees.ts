@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
@@ -22,6 +23,7 @@ export class TreehouseWorktrees extends Context.Service<
   {
     readonly create: (
       input: VcsCreateWorktreeInput,
+      options: { preparationScope: Scope.Scope },
     ) => Effect.Effect<string | null, GitCommandError>;
     readonly remove: (input: {
       cwd: string;
@@ -102,7 +104,7 @@ const make = Effect.gen(function* () {
 
   return TreehouseWorktrees.of({
     create: Effect.fn("TreehouseWorktrees.create")(
-      function* (input) {
+      function* (input, options) {
         // Explicit paths are recovery requests, not permission to recreate a missing pooled checkout.
         if (
           input.path !== null &&
@@ -159,7 +161,12 @@ const make = Effect.gen(function* () {
           path: lease.path,
           effect: Effect.gen(function* () {
             const canonical = yield* fs.realPath(lease.path);
-            yield* leases.register({ lease: { ...lease, path: canonical }, binary, pool });
+            yield* leases.register({
+              lease: { ...lease, path: canonical },
+              binary,
+              pool,
+              preparationScope: options.preparationScope,
+            });
             yield* leases.read(canonical);
             // Validate repository identity before switching any checkout returned by the external allocator.
             const common = yield* run({

@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import type * as Scope from "effect/Scope";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
@@ -117,7 +118,7 @@ export interface ExecuteGitProgress {
 }
 
 export interface CreateWorktreeProgress {
-  /** Git refuses existing paths; claimed paths belong to this call and can be removed on cancel. */
+  /** Native paths can be removed on cancel; pooled paths stay protected through preparationScope. */
   readonly onWorktreeClaimed?: (path: string) => Effect.Effect<void, never>;
   readonly onCheckoutProgress?: (input: {
     percent: number;
@@ -136,6 +137,8 @@ export interface CreateWorktreeProgress {
 }
 
 export interface CreateWorktreeOptions {
+  /** Hold pooled preparation protection through the caller's durable workspace binding. */
+  readonly preparationScope?: Scope.Scope;
   readonly progress?: CreateWorktreeProgress;
   /** Null or omitted defers to the checkout's t3.json. */
   readonly submodules?: WorktreeSubmodules | null;

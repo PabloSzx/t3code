@@ -2345,7 +2345,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             }
             releaseLeaseUse = yield* leases
               .pinUse({
-                path: input.worktreePath ?? input.cwd,
+                path: input.cwd,
                 threadId: session.threadId,
                 kind: "terminal",
               })
@@ -2715,13 +2715,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const assertTreehouseWorkspace = Effect.fn("terminal.assertTreehouseWorkspace")(
     function* (input: { cwd: string; worktreePath?: string | null | undefined; threadId: string }) {
-      yield* leases
-        .assertThread({
-          path: input.worktreePath ?? input.cwd,
-          threadId: input.threadId,
-          requireBinding: input.worktreePath != null,
-        })
-        .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
+      const paths =
+        input.worktreePath != null && input.worktreePath !== input.cwd
+          ? [input.worktreePath, input.cwd]
+          : [input.cwd];
+      for (const target of paths) {
+        yield* leases
+          .assertThread({
+            path: target,
+            threadId: input.threadId,
+            requireBinding: target === input.worktreePath,
+          })
+          .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
+      }
     },
   );
 
@@ -2863,10 +2869,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const openLocked = (input: TerminalOpenInput) =>
-    withWorkspaceLease(
-      path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input),
-    );
+    withWorkspaceLease(path.resolve(input.cwd), openWithWorkspaceLease(input));
 
   const open: TerminalManager["Service"]["open"] = (input) =>
     withThreadLock(
@@ -3306,7 +3309,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       resolveLaunchInputEnvironment(input).pipe(
         Effect.flatMap((resolved) =>
           withWorkspaceLease(
-            path.resolve(resolved.worktreePath ?? resolved.cwd),
+            path.resolve(resolved.cwd),
             assertTreehouseWorkspace(resolved).pipe(Effect.andThen(restartResolved(resolved))),
           ),
         ),

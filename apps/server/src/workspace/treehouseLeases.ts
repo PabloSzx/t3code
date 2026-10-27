@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
 
@@ -33,7 +34,7 @@ const Binding = Schema.Struct({
 const Use = Schema.Struct({
   path: Schema.String,
   leaseId: LeaseId,
-  kind: Schema.Literals(["provider", "terminal"]),
+  kind: Schema.Literals(["provider", "terminal", "preparation"]),
 });
 const PoolState = Schema.Struct({
   version: Schema.Number,
@@ -126,6 +127,7 @@ export class TreehouseLeaseStore extends Context.Service<
       lease: typeof TreehouseLease.Type;
       binary: string;
       pool: string;
+      preparationScope?: Scope.Scope;
     }) => Effect.Effect<void, TreehouseLeaseError>;
     readonly markReturned: (owned: Owned) => Effect.Effect<void, TreehouseLeaseError>;
     readonly withLock: <A, E, R>(input: {
@@ -136,6 +138,7 @@ export class TreehouseLeaseStore extends Context.Service<
       path: string;
       threadId: string;
       sequence: number;
+      sourceThreadId?: string;
     }) => Effect.Effect<void, TreehouseLeaseError>;
     readonly commitThread: (input: {
       path: string | null;
@@ -326,6 +329,24 @@ const make = Effect.gen(function* () {
     (effect, input) =>
       effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
   );
+  const pinOwnedUse = Effect.fn("TreehouseLeases.pinOwnedUse")(function* (input: {
+    owned: Owned;
+    kind: (typeof Use.Type)["kind"];
+  }) {
+    const root = yield* location();
+    const uses = path.join(root, "uses");
+    yield* fs.makeDirectory(uses, { recursive: true });
+    const pin = yield* fs.makeTempDirectory({ directory: uses, prefix: "use-" });
+    yield* writeJson({
+      target: path.join(pin, "use.json"),
+      value: {
+        path: input.owned.record.lease.path,
+        leaseId: input.owned.record.lease.lease_id,
+        kind: input.kind,
+      },
+    });
+    return fs.remove(pin, { recursive: true }).pipe(Effect.ignoreCause({ log: true }));
+  });
   return TreehouseLeaseStore.of({
     read,
     knownPath,
@@ -344,6 +365,19 @@ const make = Effect.gen(function* () {
           target: recordPath,
           value: { lease: input.lease, binary: input.binary, returned: false },
         });
+        if (input.preparationScope !== undefined) {
+          // Allocation holds the lifecycle lock until this pin takes over.
+          yield* Effect.acquireRelease(
+            pinOwnedUse({
+              owned: {
+                recordPath,
+                record: { lease: input.lease, binary: input.binary, returned: false },
+              },
+              kind: "preparation",
+            }),
+            (release) => release,
+          ).pipe(Effect.provideService(Scope.Scope, input.preparationScope), Effect.asVoid);
+        }
         const index = yield* readIndex();
         if (!index.some((entry) => entry.path === input.lease.path))
           yield* writeJson({
@@ -370,6 +404,9 @@ const make = Effect.gen(function* () {
         yield* withLock({
           path: input.path,
           effect: Effect.gen(function* () {
+            if (input.sourceThreadId !== undefined) {
+              yield* assertThread({ path: input.path, threadId: input.sourceThreadId });
+            }
             const owned = yield* read(input.path);
             if (owned === null) return;
             const root = yield* location();
@@ -435,19 +472,7 @@ const make = Effect.gen(function* () {
             yield* assertThread({ ...input, requireBinding: false });
             const owned = yield* read(input.path);
             if (owned === null) return Effect.void;
-            const root = yield* location();
-            const uses = path.join(root, "uses");
-            yield* fs.makeDirectory(uses, { recursive: true });
-            const pin = yield* fs.makeTempDirectory({ directory: uses, prefix: "use-" });
-            yield* writeJson({
-              target: path.join(pin, "use.json"),
-              value: {
-                path: owned.record.lease.path,
-                leaseId: owned.record.lease.lease_id,
-                kind: input.kind,
-              },
-            });
-            return fs.remove(pin, { recursive: true }).pipe(Effect.ignoreCause({ log: true }));
+            return yield* pinOwnedUse({ owned, kind: input.kind });
           }),
         });
       },

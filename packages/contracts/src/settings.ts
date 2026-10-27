@@ -1062,6 +1062,7 @@ export function shouldRecommendDatabaseCompaction(status: DatabaseStorageStatus)
 export const StorageCleanupReportEntry = Schema.Struct({
   kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
+  returned: Schema.optional(Schema.Boolean),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
   projectPath: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1078,6 +1079,7 @@ export const StorageCleanupReport = Schema.Struct({
   entries: Schema.Array(StorageCleanupReportEntry),
   counts: Schema.Struct({ removed: Schema.Number, kept: Schema.Number, failed: Schema.Number }),
   omittedCount: Schema.Number,
+  returnedCount: Schema.optional(Schema.Number),
   bytesFreed: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(0))),
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;

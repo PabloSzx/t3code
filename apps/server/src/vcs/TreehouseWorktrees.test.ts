@@ -1,4 +1,3 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -28,119 +27,12 @@ import * as Result from "effect/Result";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
-import * as ServerSettings from "../serverSettings.ts";
-import * as ProcessRunner from "../processRunner.ts";
+import { fixture, testLayer } from "./TreehouseWorktrees.testkit.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
+import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
 
-// Only the external allocator is a fixture. Revision selection and removal use real T3 + Git.
-const allocator = `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
-const root = dirname(fileURLToPath(import.meta.url));
-const repo = join(root, "repo");
-const pool = join(root, "pool");
-const slot = join(pool, "1", "repo");
-const stateFile = join(pool, "treehouse-state.json");
-const args = process.argv.slice(2);
-readFileSync(0);
-appendFileSync(join(root, "calls"), args.join(" ") + "\\n");
-function git(cwd, args) {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
-}
-if (args[0] === "get") {
-  if (!args.includes("--no-fetch") || !args.includes("--lease") || !args.includes("--json") || args.includes("--base")) process.exit(2);
-  if (existsSync(join(root, "fail-get"))) process.exit(3);
-  mkdirSync(join(pool, "1"), { recursive: true });
-  if (!existsSync(slot)) git(repo, ["worktree", "add", "--detach", slot, "main"]);
-  else git(slot, ["switch", "--detach", "main"]);
-  const holder = args[args.indexOf("--lease-holder") + 1];
-  const lease = { path: slot, lease_id: randomBytes(16).toString("hex"), lease_holder: holder, leased_at: "2026-01-01T00:00:00Z", base_branch: "" };
-  writeFileSync(stateFile, JSON.stringify({ version: 4, worktrees: [{ ...lease, leased: true }] }));
-  console.log(JSON.stringify(lease));
-} else if (args[0] === "return") {
-  const state = JSON.parse(readFileSync(stateFile, "utf8"));
-  if (args.includes("--force") || args[2] !== "--if-lease-id" || args[3] !== state.worktrees[0].lease_id) process.exit(4);
-  if (existsSync(join(root, "fail-return"))) process.exit(5);
-  state.worktrees[0].leased = false;
-  writeFileSync(stateFile, JSON.stringify(state));
-} else process.exit(6);
-`;
-const fixture = Effect.fn("TreehouseTest.fixture")(function* (
-  options: { treehouseEnabled?: boolean } = {},
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const runner = yield* ProcessRunner.ProcessRunner;
-  const root = yield* fs
-    .makeTempDirectoryScoped({ prefix: "t3-treehouse-" })
-    .pipe(Effect.flatMap(fs.realPath));
-  const cwd = path.join(root, "repo");
-  yield* fs.makeDirectory(cwd);
-  const binary = path.join(root, "allocator.mjs");
-  yield* fs.writeFileString(binary, `#!${process.execPath}\n${allocator}`, { mode: 0o755 });
-  const git = Effect.fn("TreehouseTest.git")(function* (input: { cwd?: string; args: string[] }) {
-    const result = yield* runner.run({
-      command: "git",
-      args: input.args,
-      cwd: input.cwd ?? cwd,
-      stdin: "",
-    });
-    assert.strictEqual(result.code, 0, result.stderr);
-    return result.stdout.trim();
-  });
-  yield* git({ args: ["init", "-b", "main"] });
-  yield* git({ args: ["config", "user.name", "Test"] });
-  yield* git({ args: ["config", "user.email", "test@example.invalid"] });
-  yield* fs.writeFileString(path.join(cwd, "file"), "main\n");
-  yield* git({ args: ["add", "file"] });
-  yield* git({ args: ["commit", "-m", "main"] });
-  const baseSha = yield* git({ args: ["rev-parse", "HEAD"] });
-  yield* git({ args: ["checkout", "-b", "parent"] });
-  yield* fs.writeFileString(path.join(cwd, "file"), "parent\n");
-  yield* git({ args: ["commit", "-am", "parent"] });
-  const parentSha = yield* git({ args: ["rev-parse", "HEAD"] });
-  yield* git({ args: ["update-ref", "refs/remotes/origin/main", parentSha] });
-  const settings = yield* ServerSettings.ServerSettingsService;
-  if (options.treehouseEnabled !== false) {
-    yield* settings.updateSettings({
-      treehouseWorktreesEnabled: true,
-      treehouseBinaryPath: binary,
-    });
-  }
-  const driver = yield* makeGitVcsDriverCore();
-  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
-    Effect.provide(TreehouseLeases.layer),
-  );
-  const config = yield* ServerConfig.ServerConfig;
-  return {
-    root,
-    cwd,
-    fs,
-    path,
-    git,
-    driver,
-    leases,
-    settings,
-    binary,
-    baseSha,
-    parentSha,
-    registry: path.join(config.stateDir, "treehouse-leases"),
-    slot: path.join(root, "pool", "1", "repo"),
-  };
-});
-const testLayer = ProcessRunner.layer.pipe(
-  Layer.provideMerge(ServerSettings.layerTest()),
-  Layer.provideMerge(
-    ServerConfig.layerTest(process.cwd(), { prefix: "treehouse-config-" }).pipe(
-      Layer.provideMerge(NodeServices.layer),
-    ),
-  ),
-);
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(testLayer));
 
 describe("Treehouse worktrees", () => {
@@ -319,6 +211,297 @@ describe("Treehouse worktrees", () => {
         assert.isTrue(Result.isFailure(yield* f.leases.read(f.slot).pipe(Effect.result)));
       }).pipe(provide),
   );
+  it.live.each(["same slot", "different slot"] as const)(
+    "resumes a returned family on a new identity (%s) without adopting a recycled lease",
+    (location) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+          Effect.provide(TreehouseWorktrees.layer),
+        );
+        yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: f.parentSha,
+          newRefName: "feature",
+          path: null,
+        });
+        const original = yield* f.leases.read(f.slot);
+        for (const threadId of ["parent-thread", "child-thread"])
+          yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 1 });
+        assert.isNull(
+          yield* treehouse.returnIdle({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "feature",
+            headSha: f.parentSha,
+            threadIds: ["parent-thread", "child-thread"],
+            recheck: Effect.succeed(null),
+          }),
+        );
+        if (location === "different slot") {
+          yield* f.driver.createWorktree({
+            cwd: f.cwd,
+            refName: f.parentSha,
+            newRefName: "unrelated",
+            path: null,
+          });
+          yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+        }
+        yield* f.settings.updateSettings({
+          treehouseWorktreesEnabled: false,
+          treehouseBinaryPath: "/invalid-t3-test/binary",
+        });
+        const target = location === "same slot" ? f.slot : f.path.join(f.root, "pool", "2", "repo");
+        const resume = (threadId: string) =>
+          treehouse.resume({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "feature",
+            threadId,
+            preparationScope: yieldScope,
+          });
+        const yieldScope = yield* Effect.scope;
+        assert.strictEqual(yield* resume("parent-thread"), target);
+        const newLease = yield* f.leases.read(target);
+        assert.notEqual(newLease!.record.lease.lease_id, original!.record.lease.lease_id);
+        yield* f.leases.bindThread({ path: target, threadId: "parent-thread", sequence: 2 });
+        assert.strictEqual(yield* resume("child-thread"), target);
+        yield* f.leases.bindThread({ path: target, threadId: "child-thread", sequence: 3 });
+        yield* f.leases.assertThread({ path: target, threadId: "child-thread" });
+        assert.strictEqual(
+          yield* f.git({ cwd: target, args: ["branch", "--show-current"] }),
+          "feature",
+        );
+        assert.strictEqual(yield* f.git({ cwd: target, args: ["rev-parse", "HEAD"] }), f.parentSha);
+        if (location === "different slot") {
+          assert.strictEqual(
+            yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
+            "unrelated",
+          );
+          assert.isTrue(
+            Result.isFailure(
+              yield* f.leases
+                .assertThread({ path: f.slot, threadId: "child-thread" })
+                .pipe(Effect.result),
+            ),
+          );
+        }
+      }).pipe(provide),
+  );
+
+  it.live.each([
+    "provider",
+    "terminal",
+    "preparation",
+    "another thread",
+    "untracked",
+    "ignored",
+    "tracked",
+    "branch",
+    "repository",
+  ] as const)("retains an idle lease protected by %s", (protection) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const scope = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+      yield* f.driver.createWorktree(
+        { cwd: f.cwd, refName: f.parentSha, newRefName: "feature", path: null },
+        protection === "preparation" ? { preparationScope: scope } : undefined,
+      );
+      yield* f.leases.bindThread({ path: f.slot, threadId: "owner", sequence: 1 });
+      if (protection === "provider" || protection === "terminal") {
+        const release = yield* f.leases.pinUse({
+          path: f.slot,
+          threadId: "owner",
+          kind: protection,
+        });
+        yield* Effect.addFinalizer(() => release);
+      }
+      if (protection === "another thread")
+        yield* f.leases.bindThread({ path: f.slot, threadId: "other", sequence: 2 });
+      if (protection === "tracked")
+        yield* f.fs.writeFileString(f.path.join(f.slot, "file"), "keep edits\n");
+      if (protection === "untracked")
+        yield* f.fs.writeFileString(f.path.join(f.slot, "notes"), "keep notes\n");
+      if (protection === "ignored") {
+        yield* f.fs.writeFileString(
+          f.path.join(f.cwd, ".git", "info", "exclude"),
+          "ignored-file\n",
+        );
+        yield* f.fs.writeFileString(f.path.join(f.slot, "ignored-file"), "keep ignored\n");
+      }
+      if (protection === "branch")
+        yield* f.git({ cwd: f.slot, args: ["switch", "-c", "user-branch"] });
+      const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+        Effect.provide(TreehouseWorktrees.layer),
+      );
+      const result = yield* treehouse
+        .returnIdle({
+          cwd: protection === "repository" ? f.slot : f.cwd,
+          path: f.slot,
+          branch: "feature",
+          headSha: f.parentSha,
+          threadIds: ["owner"],
+          recheck: Effect.succeed(null),
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(result) || result.success !== null);
+      assert.isNotNull(yield* f.leases.read(f.slot));
+      assert.notInclude(yield* f.fs.readFileString(f.path.join(f.root, "calls")), "return ");
+      if (protection === "preparation") {
+        yield* Scope.close(scope, Exit.void);
+        assert.isNull(
+          yield* treehouse.returnIdle({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "feature",
+            headSha: f.parentSha,
+            threadIds: ["owner"],
+            recheck: Effect.succeed(null),
+          }),
+        );
+      }
+    }).pipe(provide),
+  );
+
+  it.live.each(["external return", "durable marking"] as const)(
+    "blocks retry and resume after an uncertain %s",
+    (failure) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: f.parentSha,
+          newRefName: "feature",
+          path: null,
+        });
+        yield* f.leases.bindThread({ path: f.slot, threadId: "owner", sequence: 1 });
+        if (failure === "external return")
+          yield* f.fs.writeFileString(f.path.join(f.root, "fail-return"), "");
+        const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+          Effect.provide(TreehouseWorktrees.layer),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            rename: (from, to) =>
+              Effect.gen(function* () {
+                if (
+                  failure === "durable marking" &&
+                  to.startsWith(f.path.join(f.registry, "leases")) &&
+                  (yield* f.fs.readFileString(from)).includes('"returned":true')
+                )
+                  return yield* PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "rename",
+                    pathOrDescriptor: to,
+                  });
+                yield* f.fs.rename(from, to);
+              }),
+          }),
+        );
+        const request = {
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "feature",
+          headSha: f.parentSha,
+          threadIds: ["owner"],
+          recheck: Effect.succeed(null),
+        };
+        assert.isTrue(Result.isFailure(yield* treehouse.returnIdle(request).pipe(Effect.result)));
+        assert.isTrue(Result.isFailure(yield* treehouse.returnIdle(request).pipe(Effect.result)));
+        assert.isTrue(
+          Result.isFailure(
+            yield* treehouse
+              .resume({
+                cwd: f.cwd,
+                path: f.slot,
+                branch: "feature",
+                threadId: "owner",
+                preparationScope: yield* Effect.scope,
+              })
+              .pipe(Effect.result),
+          ),
+        );
+        const evidence = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
+        assert.isFalse(evidence!.record.returned);
+        const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+        assert.strictEqual(
+          calls.split("\n").filter((line) => line.startsWith("return ")).length,
+          1,
+        );
+        assert.strictEqual(calls.split("\n").filter((line) => line.startsWith("get ")).length, 1);
+      }).pipe(provide),
+  );
+
+  it.live.each(["allocation failure", "interruption"] as const)(
+    "does not allocate twice after resume %s",
+    (failure) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: f.parentSha,
+          newRefName: "feature",
+          path: null,
+        });
+        yield* f.leases.bindThread({ path: f.slot, threadId: "owner", sequence: 1 });
+        const original = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+          Effect.provide(TreehouseWorktrees.layer),
+        );
+        yield* original.returnIdle({
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "feature",
+          headSha: f.parentSha,
+          threadIds: ["owner"],
+          recheck: Effect.succeed(null),
+        });
+        if (failure === "allocation failure")
+          yield* f.fs.writeFileString(f.path.join(f.root, "fail-get"), "");
+        const persisted = yield* Deferred.make<void>();
+        const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+          Effect.provide(TreehouseWorktrees.layer),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            rename: (from, to) =>
+              Effect.gen(function* () {
+                const pause =
+                  failure === "interruption" &&
+                  to.startsWith(f.path.join(f.registry, "leases")) &&
+                  (yield* f.fs.readFileString(from)).includes('"resuming":true');
+                yield* f.fs.rename(from, to);
+                if (pause) {
+                  yield* Deferred.succeed(persisted, undefined);
+                  return yield* Effect.never;
+                }
+              }),
+          }),
+        );
+        const request = {
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "feature",
+          threadId: "owner",
+          preparationScope: yield* Effect.scope,
+        };
+        if (failure === "interruption") {
+          const operation = yield* treehouse.resume(request).pipe(Effect.forkChild());
+          yield* Deferred.await(persisted);
+          yield* Fiber.interrupt(operation);
+        } else
+          assert.isTrue(Result.isFailure(yield* treehouse.resume(request).pipe(Effect.result)));
+        assert.isTrue(Result.isFailure(yield* original.resume(request).pipe(Effect.result)));
+        const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+        assert.strictEqual(
+          calls.split("\n").filter((line) => line.startsWith("get ")).length,
+          failure === "interruption" ? 1 : 2,
+        );
+        const evidence = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
+        assert.isTrue(evidence!.record.release!.resuming);
+        assert.isUndefined(evidence!.record.release!.replacement);
+      }).pipe(provide),
+  );
+
   it.live("retains failed allocations without native fallback", () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -509,79 +692,140 @@ describe("Treehouse worktrees", () => {
     }).pipe(provide),
   );
 
-  it.live("binds committed threads and releases deleted references through the event sink", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
-      const sink = yield* EventSink.EventSinkV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("treehouse-thread");
-      const thread: OrchestrationV2AppThread = {
-        id: threadId,
-        projectId: ProjectId.make("treehouse-project"),
-        title: "Treehouse",
-        createdBy: "user",
-        creationSource: "web",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: f.slot,
-        branchPullRequest: null,
-        activeOrderKey: null,
-        activeProviderThreadId: null,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-        forkedFrom: null,
-        createdAt: now,
-        updatedAt: now,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        lastVisitedAt: null,
-        deletedAt: null,
-      };
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("treehouse-created"),
-            type: "thread.created",
-            threadId,
-            occurredAt: now,
-            payload: thread,
-          },
-        ],
-      });
-      yield* f.leases.assertThread({ path: f.slot, threadId });
-      assert.isTrue(
-        Result.isFailure(
-          yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
-        ),
-      );
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("treehouse-deleted"),
-            type: "thread.deleted",
-            threadId,
-            occurredAt: now,
-            payload: { ...thread, deletedAt: now },
-          },
-        ],
-      });
-      yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot });
-    }).pipe(
-      Effect.provide(
-        EventSink.layer.pipe(
-          Layer.provide(
-            Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
-              Layer.provideMerge(Sqlite.layerMemory),
-            ),
+  it.live(
+    "keeps conversation history through idle return, durable rebind, and later deletion",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        yield* f.git({ cwd: f.slot, args: ["switch", "-c", "conversation-branch"] });
+        const threadId = ThreadId.make("treehouse-thread");
+        const thread: OrchestrationV2AppThread = {
+          id: threadId,
+          projectId: ProjectId.make("treehouse-project"),
+          title: "Treehouse",
+          createdBy: "user",
+          creationSource: "web",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "conversation-branch",
+          worktreePath: f.slot,
+          branchPullRequest: null,
+          activeOrderKey: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("treehouse-created"),
+              type: "thread.created",
+              threadId,
+              occurredAt: now,
+              payload: thread,
+            },
+            {
+              id: EventId.make("history-message"),
+              type: "message.updated",
+              threadId,
+              occurredAt: now,
+              payload: {
+                id: MessageId.make("history-message"),
+                threadId,
+                runId: null,
+                nodeId: null,
+                role: "user",
+                text: "Keep this conversation",
+                attachments: [],
+                streaming: false,
+                createdBy: "user",
+                creationSource: "web",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        yield* f.leases.assertThread({ path: f.slot, threadId });
+        assert.isTrue(
+          Result.isFailure(
+            yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot }).pipe(Effect.result),
           ),
-          Layer.provideMerge(testLayer),
+        );
+        const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+          Effect.provide(TreehouseWorktrees.layer),
+        );
+        assert.isNull(
+          yield* treehouse.returnIdle({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "conversation-branch",
+            headSha: f.parentSha,
+            threadIds: [threadId],
+            recheck: Effect.succeed(null),
+          }),
+        );
+        const scope = yield* Scope.make();
+        yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+        const resumed = yield* treehouse.resume({
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "conversation-branch",
+          threadId,
+          preparationScope: scope,
+        });
+        assert.strictEqual(resumed, f.slot);
+        yield* sink.rebindWorktree({
+          threadId,
+          previousPath: f.slot,
+          path: resumed!,
+          branch: "conversation-branch",
+          eventId: EventId.make("treehouse-rebound"),
+          occurredAt: now,
+        });
+        yield* Scope.close(scope, Exit.void);
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const retained = yield* projections.getThreadRecords(threadId, ["messages"]);
+        assert.strictEqual(retained.thread.deletedAt, null);
+        assert.strictEqual(retained.thread.branch, "conversation-branch");
+        assert.strictEqual(retained.messages[0]?.text, "Keep this conversation");
+        yield* f.leases.assertThread({ path: resumed!, threadId });
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("treehouse-deleted"),
+              type: "thread.deleted",
+              threadId,
+              occurredAt: now,
+              payload: { ...thread, deletedAt: now },
+            },
+          ],
+        });
+        yield* f.driver.removeWorktree({ cwd: f.cwd, path: f.slot });
+      }).pipe(
+        Effect.provide(
+          EventSink.layer.pipe(
+            Layer.provideMerge(
+              Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+                Layer.provideMerge(Sqlite.layerMemory),
+              ),
+            ),
+            Layer.provideMerge(testLayer),
+          ),
         ),
       ),
-    ),
   );
 
   it.live("rejects an inherited fork of a recycled lease without blocking a fresh thread", () =>

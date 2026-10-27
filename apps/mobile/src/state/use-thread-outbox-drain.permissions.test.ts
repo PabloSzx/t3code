@@ -1,6 +1,7 @@
 import {
   AuthOrchestrationOperateScope,
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   MessageId,
   ProjectId,
@@ -34,6 +35,7 @@ const state = vi.hoisted(() => ({
     session: null,
   },
   config: {
+    settings: undefined as unknown as typeof DEFAULT_SERVER_SETTINGS,
     providers: [{ instanceId: "codex", driver: "codex" }],
     environment: { capabilities: {} },
   },
@@ -84,7 +86,7 @@ vi.mock("./threads", async () => {
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
 vi.mock("./git", () => ({ gitEnvironment: { preparePullRequestThread: state.checkout } }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
-vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "abcd" }));
+vi.mock("../lib/uuid", () => ({ uuidv4: () => "uuid", randomHex: () => "deadbeef" }));
 vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepare }));
 vi.mock("./use-remote-environment-registry", () => ({
   setPendingConnectionError: vi.fn(),
@@ -172,6 +174,7 @@ function runDrain() {
 }
 
 beforeEach(() => {
+  state.config.settings = DEFAULT_SERVER_SETTINGS;
   state.grantedEnvironments = new Set(["primary"]);
   state.draftText = "Keep this draft separate";
   appAtomRegistry.set(state.manager.queuedMessagesByThreadKeyAtom, {});
@@ -194,6 +197,32 @@ beforeEach(() => {
 });
 
 describe("queued PR checkout", () => {
+  it("sends a generated placeholder with the target environment's static prefix", async () => {
+    state.config.settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      branchNamingMode: "static",
+      branchNamePrefix: "pablosaez/",
+    };
+    state.grantedEnvironments.add("secondary");
+    await state.manager.enqueue(
+      message({
+        threadId: ThreadId.make("new-worktree"),
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        creation: {
+          projectId: ProjectId.make("project"),
+          projectCwd: "/repo",
+          workspaceMode: "worktree",
+          branch: "main",
+          worktreePath: null,
+        },
+      }),
+    );
+    await runDrain();
+    expect(state.start.mock.calls[0]?.[0].input.bootstrap.prepareWorktree.branch).toBe(
+      "pablosaez/t3-deadbeef",
+    );
+    expect(remaining()).toEqual([]);
+  });
   const queuedPullRequest = () =>
     message({
       threadId: ThreadId.make("new-pr-thread"),

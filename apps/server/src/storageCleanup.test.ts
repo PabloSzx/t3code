@@ -269,6 +269,8 @@ const cleanupFixture = (
     let editBeforeRemoval = false;
     let openSessionCwd: string | null = null;
     let sessionLive = true;
+    let pendingEffects = false;
+    let pullRequest: GitManager.GitBranchPullRequest | null = null;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
@@ -343,37 +345,40 @@ const cleanupFixture = (
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(SqlClient.SqlClient, ((strings: TemplateStringsArray) =>
         Effect.sync(() =>
-          openSessionCwd !== null && strings.join("").includes("projection_provider_sessions")
-            ? [
-                {
-                  payload_json: JSON.stringify({
-                    id: "session-1",
-                    driver: "codex",
-                    providerInstanceId: "codex",
-                    status: "ready",
-                    cwd: openSessionCwd,
-                    model: null,
-                    capabilities: CodexProviderCapabilitiesV2,
-                    createdAt: "2026-06-01T12:00:00.000Z",
-                    updatedAt: "2026-06-01T12:00:00.000Z",
-                    lastError: null,
-                  }),
-                },
-              ]
-            : strings.join("").includes("deleted_at IS NOT NULL")
-              ? deletedThreads.map((thread) => ({
-                  payload_json: JSON.stringify(thread),
-                  workspaceRoot: repo,
-                }))
-              : strings.join("").includes('AS "worktreePath"')
-                ? [
-                    ...threads.flatMap((thread) => thread.worktreePath ?? []),
-                    ...storedWorktreePaths,
-                  ].map((worktreePath) => ({ worktreePath }))
-                : [],
+          pendingEffects && strings.join("").includes("effect_outbox")
+            ? [{ present: 1 }]
+            : openSessionCwd !== null && strings.join("").includes("projection_provider_sessions")
+              ? [
+                  {
+                    payload_json: JSON.stringify({
+                      id: "session-1",
+                      driver: "codex",
+                      providerInstanceId: "codex",
+                      status: "ready",
+                      cwd: openSessionCwd,
+                      model: null,
+                      capabilities: CodexProviderCapabilitiesV2,
+                      createdAt: "2026-06-01T12:00:00.000Z",
+                      updatedAt: "2026-06-01T12:00:00.000Z",
+                      lastError: null,
+                    }),
+                  },
+                ]
+              : strings.join("").includes("deleted_at IS NOT NULL")
+                ? deletedThreads.map((thread) => ({
+                    payload_json: JSON.stringify(thread),
+                    workspaceRoot: repo,
+                  }))
+                : strings.join("").includes('AS "worktreePath"')
+                  ? [
+                      ...threads.flatMap((thread) => thread.worktreePath ?? []),
+                      ...storedWorktreePaths,
+                    ].map((worktreePath) => ({ worktreePath }))
+                  : [],
         )) as unknown as SqlClient.SqlClient),
       Effect.provideService(GitManager.GitManager, {
         invalidateStatus: () => Effect.void,
+        branchPullRequest: () => Effect.sync(() => pullRequest),
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(TerminalManager.TerminalManager, {
         subscribeMetadata: () => Effect.succeed(() => {}),
@@ -431,6 +436,12 @@ const cleanupFixture = (
       setProjectRoots: (roots: string[]) => {
         projectRoots = roots;
       },
+      setPendingEffects: () => {
+        pendingEffects = true;
+      },
+      setPullRequest: (next: GitManager.GitBranchPullRequest | null) => {
+        pullRequest = next;
+      },
       setSessionLive: (live: boolean) => {
         sessionLive = live;
       },
@@ -444,6 +455,33 @@ const cleanupFixture = (
         return Deferred.succeed(activated, undefined);
       },
     };
+  });
+const pooledCleanupFixture = (settings?: StorageCleanupSettings) =>
+  Effect.gen(function* () {
+    const f = yield* cleanupFixture(settings);
+    const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+      Effect.provide(TreehouseLeases.layer),
+    );
+    const binary = `${f.repo}/allocator.mjs`;
+    const statePath = `${f.config.worktreesDir}/treehouse-state.json`;
+    const lease = {
+      path: f.worktree,
+      lease_id: "a".repeat(32),
+      lease_holder: "t3-code:cleanup",
+      leased_at: "2026-01-01T00:00:00Z",
+    };
+    yield* f.fs.writeFileString(
+      statePath,
+      JSON.stringify({ version: 4, worktrees: [{ ...lease, leased: true }] }),
+    );
+    yield* f.fs.writeFileString(
+      binary,
+      `#!${process.execPath}\nimport { readFileSync, writeFileSync } from 'node:fs';\nconst state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));\nif (process.argv[2] !== 'return' || process.argv[3] !== ${JSON.stringify(f.worktree)} || process.argv[4] !== '--if-lease-id' || process.argv[5] !== state.worktrees[0].lease_id || process.argv.includes('--force')) process.exit(2);\nstate.worktrees[0].leased = false;\nwriteFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));\n`,
+      { mode: 0o755 },
+    );
+    yield* leases.register({ lease, binary, pool: f.config.worktreesDir });
+    yield* leases.bindThread({ path: f.worktree, threadId: "thread-1", sequence: 1 });
+    return { ...f, leases };
   });
 const pausedMeasurementFixture = (storageCleanup?: StorageCleanupSettings) =>
   Effect.gen(function* () {
@@ -1258,8 +1296,163 @@ describe("orphan worktree reports", () => {
 });
 
 describe("storage cleanup reports and local file policies", () => {
+  it.live(
+    "returns an eligible owned pool lease without removing history, branch, or pool bytes",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* pooledCleanupFixture();
+        const { leases } = f;
+        const report = yield* f.service.runNow;
+        expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
+          reason: expect.stringMatching(/^Returned Treehouse slot: inactive for \d+ days$/),
+          bytes: null,
+          returned: true,
+        });
+        expect(report.bytesFreed).toBe(0);
+        expect(report.returnedCount).toBe(1);
+        expect(
+          (yield* f.command(f.repo, ["rev-parse", "refs/heads/feature"])).stdout.trim(),
+        ).not.toBe("");
+        expect(yield* f.fs.exists(f.worktree)).toBe(true);
+        expect(
+          (yield* leases
+            .assertThread({ path: f.worktree, threadId: "thread-1" })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect((yield* f.service.runNow).entries.some((entry) => entry.outcome === "failed")).toBe(
+          false,
+        );
+      }).pipe(runCleanupTest),
+  );
+
+  it.live.each([
+    "disabled",
+    "retention",
+    "settled",
+    "unchanged",
+    "merged",
+    "deleted",
+    "unsettled child",
+    "active archived child",
+  ] as const)("honors existing pooled cleanup eligibility (%s)", (policy) =>
+    Effect.gen(function* () {
+      const f = yield* pooledCleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: policy === "retention" ? 10000 : null,
+        worktreeOnDelete: policy === "deleted",
+        worktreeSettledAfterDays:
+          policy === "settled" || policy === "unsettled child" || policy === "active archived child"
+            ? 1
+            : null,
+        worktreeUnchanged: policy === "unchanged",
+        worktreeOnMerge: policy === "merged",
+      });
+      const parent = shell({
+        branch: "feature",
+        worktreePath: f.worktree,
+        settledAt: at(-3 * DAY_MS),
+      });
+      if (policy === "deleted") {
+        f.setThreads([]);
+        f.setDeletedThreads([{ ...parent, deletedAt: at(-DAY_MS) }]);
+        yield* f.leases.commitThread({
+          path: f.worktree,
+          threadId: parent.id,
+          deleted: true,
+          sequence: 2,
+        });
+      } else if (policy === "unsettled child" || policy === "active archived child") {
+        const child = shell({
+          id: ThreadId.make("child"),
+          branch: "feature",
+          worktreePath: f.worktree,
+          lineage: {
+            rootThreadId: parent.id,
+            parentThreadId: parent.id,
+            relationshipToParent: "subagent",
+          },
+          settledAt: policy === "unsettled child" ? null : at(-3 * DAY_MS),
+          status: policy === "active archived child" ? "running" : "idle",
+          archivedAt: at(-DAY_MS),
+        });
+        f.setThreads([parent, child]);
+        yield* f.leases.bindThread({ path: f.worktree, threadId: child.id, sequence: 2 });
+      } else f.setThreads([parent]);
+      if (policy === "unchanged" || policy === "merged") {
+        yield* f.command(f.repo, ["remote", "add", "origin", f.repo]);
+        yield* f.command(f.repo, [
+          "symbolic-ref",
+          "refs/remotes/origin/HEAD",
+          "refs/remotes/origin/main",
+        ]);
+        if (policy === "merged")
+          f.setPullRequest({
+            state: "merged",
+            headRef: "feature",
+            baseRef: "main",
+            headSha: (yield* f.command(f.worktree, ["rev-parse", "HEAD"])).stdout.trim(),
+          } as GitManager.GitBranchPullRequest);
+      }
+      const report = yield* f.service.runNow;
+      const shouldReturn = ["settled", "unchanged", "merged", "deleted"].includes(policy);
+      expect(report.returnedCount).toBe(shouldReturn ? 1 : 0);
+      expect(yield* f.fs.exists(f.worktree)).toBe(true);
+    }).pipe(runCleanupTest),
+  );
+
+  it.live.each(["settings", "activity", "family", "pending effects"] as const)(
+    "rechecks pooled %s under the lifecycle lock",
+    (change) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let armed = false;
+        const f = yield* pooledCleanupFixture().pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            makeDirectory: (target, options) =>
+              Effect.gen(function* () {
+                if (armed && target.endsWith("lifecycle.lock")) {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                yield* fs.makeDirectory(target, options);
+              }),
+          }),
+        );
+        armed = true;
+        const sweep = yield* f.service.runNow.pipe(Effect.forkChild());
+        yield* Deferred.await(entered);
+        if (change === "settings") f.disable();
+        else if (change === "pending effects") f.setPendingEffects();
+        else if (change === "activity")
+          f.setThreads([shell({ branch: "feature", worktreePath: f.worktree, status: "running" })]);
+        else
+          f.setThreads([
+            shell({ branch: "feature", worktreePath: f.worktree }),
+            shell({
+              id: ThreadId.make("new-child"),
+              branch: "feature",
+              worktreePath: f.worktree,
+              status: "running",
+              lineage: {
+                rootThreadId: ThreadId.make("thread-1"),
+                parentThreadId: ThreadId.make("thread-1"),
+                relationshipToParent: "subagent",
+              },
+            }),
+          ]);
+        yield* Deferred.succeed(release, undefined);
+        const report = yield* Fiber.join(sweep);
+        expect(report.returnedCount).toBe(0);
+        expect(report.entries[0]?.outcome).toBe("kept");
+        expect(yield* f.leases.read(f.worktree)).not.toBeNull();
+      }).pipe(runCleanupTest),
+  );
+
   it.effect.each(["snapshot", "registry"])(
-    "never cleans a pooled slot identified by %s inside the storage folder",
+    "never cleans an unverified pooled slot identified by %s inside the storage folder",
     (identity) =>
       Effect.gen(function* () {
         const f = yield* cleanupFixture();

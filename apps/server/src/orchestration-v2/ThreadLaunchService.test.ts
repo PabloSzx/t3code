@@ -277,6 +277,76 @@ function makeHarness(options: HarnessOptions = {}) {
   };
 }
 
+it.effect.each([undefined, "pablosaez/t3-deadbeef", "t3/deadbeef"])(
+  "uses the static prefix and renames only a newly allocated placeholder (%s)",
+  (requestedBranch) => {
+    const harness = makeHarness({
+      serverSettings: { branchNamingMode: "static", branchNamePrefix: "pablosaez/" },
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const result = yield* launches.launch(
+        launchInput({
+          command: "prefixed-placeholder",
+          thread: "prefixed-placeholder",
+          message: "Build it",
+          workspace: {
+            type: "worktree",
+            baseRef: "main",
+            ...(requestedBranch === undefined ? {} : { branch: requestedBranch }),
+          },
+        }),
+      );
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      yield* threads.streamStoredEventsFrom({ threadId: result.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "thread.metadata-updated" &&
+            stored.event.payload.branch === "generated-branch",
+        ),
+        Stream.runHead,
+      );
+      const projection = yield* threads.getThreadProjection(result.threadId);
+      const allocated = harness.createWorktree.mock.calls[0]?.[0].newRefName ?? "";
+      if (requestedBranch === undefined) assert.match(allocated, /^pablosaez\//);
+      else assert.equal(allocated, requestedBranch);
+      assert.equal(projection.thread.branch, "generated-branch");
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect.each(["t3/deadbeef", "pablosaez/t3-deadbeef"])(
+  "does not rename the explicitly selected branch %s",
+  (branch) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: `explicit-${branch}`,
+          thread: `explicit-${branch}`,
+          message: "Keep my branch",
+          workspace: {
+            type: "existing_worktree",
+            worktreePath: "/repo-worktrees/selected",
+            branch,
+          },
+        }),
+      );
+      yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "run.updated" && stored.event.payload.status === "starting",
+        ),
+        Stream.runHead,
+      );
+      assert.equal(harness.renameBranch.mock.calls.length, 0);
+      assert.equal((yield* threads.getThreadProjection(launched.threadId)).thread.branch, branch);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 function launchInput(input: {
   readonly command: string;
   readonly thread: string;

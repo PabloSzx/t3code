@@ -49,6 +49,7 @@ import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { removeLinkedWorktree } from "./vcs/worktreeRemoval.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as TreehouseLeases from "./workspace/treehouseLeases.ts";
+import * as TreehouseWorktrees from "./vcs/TreehouseWorktrees.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { isNetworkPath } from "@t3tools/shared/path";
@@ -220,6 +221,9 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const treehouseLeases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
     Effect.provide(TreehouseLeases.layer),
+  );
+  const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+    Effect.provide(TreehouseWorktrees.layer),
   );
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
   const orphanSizes = new Map<string, number | null>();
@@ -785,11 +789,25 @@ const make = Effect.gen(function* () {
       };
       const keep = (reason: string) => entries.push({ ...entry, reason: sentence(reason) });
       yield* Effect.gen(function* () {
-        if (
+        const pooled =
           (yield* treehouseLeases.knownPath(worktreePath)) ||
-          (yield* TreehouseLeases.treehousePoolForPath(worktreePath)) !== null
-        )
-          return keep("Treehouse automatic reclamation is disabled");
+          (yield* TreehouseLeases.treehousePoolForPath(worktreePath)) !== null;
+        if (pooled) {
+          const released = yield* treehouseLeases.releasedThread({
+            path: worktreePath,
+            threadId: thread.id,
+          });
+          if (released !== null)
+            return keep(
+              released.record.returned
+                ? "Treehouse slot already returned; conversation and branch retained"
+                : "Treehouse return needs operator verification",
+            );
+          const owned = yield* treehouseLeases
+            .read(worktreePath)
+            .pipe(Effect.orElseSucceed(() => null));
+          if (owned === null) return keep("Treehouse lease could not be verified");
+        }
         if (!(yield* fs.exists(worktreePath))) return;
         if (deleted && !settings.worktreeOnDelete) return keep("no rules apply");
         if (members.length > 1 && worktreeOwner(members) === undefined)
@@ -808,7 +826,7 @@ const make = Effect.gen(function* () {
         const realParent = yield* fs.realPath(path.dirname(worktreePath));
         if (realPath !== path.join(realParent, path.basename(worktreePath)))
           return keep("worktree is a symbolic link");
-        if (!roots.some((root) => inside(root, realPath)))
+        if (!pooled && !roots.some((root) => inside(root, realPath)))
           return keep("outside the managed worktree folder");
         if (yield* containsProjectRoot(worktreePath, [project, ...snapshot.projects]))
           return keep("contains a project checkout");
@@ -840,7 +858,14 @@ const make = Effect.gen(function* () {
         const settled =
           settledFor !== null &&
           settings.worktreeSettledAfterDays !== null &&
-          settledFor >= settings.worktreeSettledAfterDays * DAY_MS;
+          settledFor >= settings.worktreeSettledAfterDays * DAY_MS &&
+          (!pooled ||
+            group.every(
+              (member) =>
+                member.settledAt !== null &&
+                now - Math.max(DateTime.toEpochMillis(member.settledAt), activityAt) >=
+                  settings.worktreeSettledAfterDays! * DAY_MS,
+            ));
         let eligible = deleted || old || settled;
         let removalReason = deleted
           ? "thread was deleted"
@@ -970,6 +995,15 @@ const make = Effect.gen(function* () {
             })
           )
             return "thread activity or shared worktree changed since check";
+          if (pooled) {
+            for (const shell of latestGroup) {
+              const pending =
+                yield* sql`SELECT 1 FROM orchestration_v2_effect_outbox WHERE thread_id = ${shell.id} AND status NOT IN ('succeeded', 'cancelled') LIMIT 1`.pipe(
+                  NodeSqliteClient.readOnly,
+                );
+              if (pending.length > 0) return "thread effects are still pending";
+            }
+          }
           // Sessions can outlive their run and can be shared across app threads.
           const sessionRows = yield* sql<{ payload_json: string }>`
             SELECT payload_json FROM orchestration_v2_projection_provider_sessions
@@ -991,6 +1025,52 @@ const make = Effect.gen(function* () {
         });
         const blocked = yield* blockedSinceCheck();
         if (blocked !== null) return keep(blocked);
+        if (pooled) {
+          const blocked = yield* treehouse.returnIdle({
+            cwd: project.workspaceRoot,
+            path: worktreePath,
+            branch: thread.branch,
+            headSha: head.commitSha,
+            threadIds: members.map((member) => member.id),
+            recheck: Effect.gen(function* () {
+              const blocked = yield* blockedSinceCheck();
+              if (blocked !== null) return blocked;
+              const current = resolveWorktreeCleanup(
+                yield* settingsService.getSettings,
+                thread.projectId,
+              );
+              if (
+                Object.keys(settings).some(
+                  (key) =>
+                    settings[key as keyof typeof settings] !==
+                    current[key as keyof typeof settings],
+                )
+              )
+                return "settings changed since check";
+              return null;
+            }).pipe(
+              NodeSqliteClient.readOnly,
+              Effect.mapError(
+                (cause) =>
+                  new GitCommandError({
+                    operation: "StorageCleanup.recheckTreehouse",
+                    command: "treehouse return",
+                    cwd: project.workspaceRoot,
+                    detail: "Could not recheck Treehouse cleanup safety.",
+                    cause,
+                  }),
+              ),
+            ),
+          });
+          if (blocked !== null) return keep(blocked);
+          entries.push({
+            ...entry,
+            reason: `Returned Treehouse slot: ${removalReason}`,
+            returned: true,
+          });
+          yield* gitManager.invalidateStatus(project.workspaceRoot);
+          return;
+        }
         const bytes = yield* measureWorktree(worktreePath);
         const blockedWhileMeasuring = yield* blockedSinceCheck();
         if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
@@ -1037,7 +1117,13 @@ const make = Effect.gen(function* () {
         // Preserve branch/path so ProviderTurnStartService can recreate the checkout on resume.
         yield* Effect.logInfo("storage cleanup removed worktree", { threadId: thread.id });
       }).pipe(
-        (effect) => withWorkspaceLease(worktreePath, effect),
+        (effect) =>
+          Effect.gen(function* () {
+            const pooled =
+              (yield* treehouseLeases.knownPath(worktreePath)) ||
+              (yield* TreehouseLeases.treehousePoolForPath(worktreePath)) !== null;
+            return yield* pooled ? effect : withWorkspaceLease(worktreePath, effect);
+          }),
         Effect.catch((error) =>
           Effect.gen(function* () {
             entries.push({
@@ -1173,7 +1259,7 @@ const make = Effect.gen(function* () {
     const counts = { removed: 0, kept: 0, failed: 0 };
     let bytesFreed = 0;
     for (const entry of entries) {
-      counts[entry.outcome]++;
+      if (!entry.returned) counts[entry.outcome]++;
       if (entry.outcome !== "kept") bytesFreed += entry.bytes ?? 0;
     }
     const priority = (entry: StorageCleanupReportEntry) =>
@@ -1192,6 +1278,7 @@ const make = Effect.gen(function* () {
       counts,
       bytesFreed,
       omittedCount: Math.max(0, entries.length - REPORT_ENTRY_LIMIT),
+      returnedCount: entries.filter((entry) => entry.returned).length,
     };
     yield* SubscriptionRef.set(reportRef, latestReport);
     return latestReport;

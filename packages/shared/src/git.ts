@@ -14,7 +14,7 @@ const TEMP_WORKTREE_HEX_TOKEN = "[0-9a-f]{8}";
 const TEMP_WORKTREE_UUID_V4_TOKEN =
   "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
-  `^(?:${WORKTREE_BRANCH_PREFIX}[-/]${TEMP_WORKTREE_HEX_TOKEN}|t3code(?:[-/]${TEMP_WORKTREE_HEX_TOKEN}|\\/${TEMP_WORKTREE_UUID_V4_TOKEN}))$`,
+  `^(?:${WORKTREE_BRANCH_PREFIX}[-/]${TEMP_WORKTREE_HEX_TOKEN}|t3code(?:[-/]${TEMP_WORKTREE_HEX_TOKEN}|\\/${TEMP_WORKTREE_UUID_V4_TOKEN})|(?:[a-z0-9_-]+/)+t3-${TEMP_WORKTREE_HEX_TOKEN})$`,
 );
 
 export function sanitizeBranchFragment(raw: string): string {
@@ -98,14 +98,22 @@ export function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
   return branchName.slice(firstSeparatorIndex + 1);
 }
 
-export function buildTemporaryWorktreeBranchName(
-  randomHex: (byteLength: number) => string,
-): string {
+export interface TemporaryWorktreeBranchOptions {
+  readonly randomHex: (byteLength: number) => string;
+  readonly naming?: BranchNamingOptions;
+}
+
+export function buildTemporaryWorktreeBranchName({
+  randomHex,
+  naming,
+}: TemporaryWorktreeBranchOptions): string {
   const token = randomHex(4)
     .toLowerCase()
     .replace(/[^0-9a-f]/g, "")
     .slice(0, 8);
-  return `${WORKTREE_BRANCH_PREFIX}/${token}`;
+  return naming?.mode === "static" && naming.prefix.trim() !== ""
+    ? formatGeneratedBranchName(`t3-${token}`, naming)
+    : `${WORKTREE_BRANCH_PREFIX}/${token}`;
 }
 
 /** Flatten temporary t3/<hex> refs because an existing t3 branch blocks nested refs. */

@@ -50,6 +50,14 @@ import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
+import * as TreehouseWorktrees from "../vcs/TreehouseWorktrees.ts";
+import {
+  fixture as treehouseFixture,
+  testLayer as treehouseTestLayer,
+} from "../vcs/TreehouseWorktrees.testkit.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import * as EventStore from "./EventStore.ts";
+import { EventId } from "@t3tools/contracts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -273,6 +281,7 @@ function makeLocalCommandHarness(input: {
   readonly workspaceRoot?: string;
   readonly gitWorkflow?: GitWorkflow.GitWorkflowService["Service"];
   readonly fileSystem?: FileSystem.FileSystem;
+  readonly rebindWorktree?: EventSink.EventSinkV2["Service"]["rebindWorktree"];
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
   readonly logoutFailure?: string;
@@ -702,7 +711,10 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: () => Effect.die("history read must fail first"),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          ...(input.rebindWorktree === undefined ? {} : { rebindWorktree: input.rebindWorktree }),
+        }),
         IdAllocator.layer,
         layerWorktreeLocation(input),
         input.fileSystem === undefined
@@ -953,6 +965,150 @@ effectIt.effect(
       ]);
       expect(JSON.stringify(harness.events)).not.toContain("private git diagnostic");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+effectIt.live(
+  "starts a returned conversation in its rebound lease, not its recycled old path",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* treehouseFixture();
+      const config = yield* ServerConfig.ServerConfig;
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+        Effect.provide(TreehouseWorktrees.layer),
+      );
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "feature/restore",
+        path: null,
+      });
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        workspaceRoot: f.cwd,
+        worktreePath: f.slot,
+        worktreesDir: f.path.join(f.root, "pool"),
+        stateDir: config.stateDir,
+        fileSystem: f.fs,
+        failReadsAfterRunning: true,
+        rebindWorktree: (input) =>
+          sink.rebindWorktree(input).pipe(
+            Effect.andThen(projections.getThread(input.threadId).pipe(Effect.orDie)),
+            Effect.tap((thread) =>
+              Effect.sync(() => harness.setProjection({ ...harness.projection(), thread })),
+            ),
+            Effect.asVoid,
+          ),
+      });
+      const threadId = harness.projection().thread.id;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("resume-created"),
+            type: "thread.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: threadId,
+              projectId: harness.projection().thread.projectId,
+              title: "Retained conversation",
+              createdBy: "user",
+              creationSource: "web",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: "feature/restore",
+              worktreePath: f.slot,
+              activeProviderThreadId: null,
+              lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              lastVisitedAt: null,
+              deletedAt: null,
+            },
+          },
+        ],
+      });
+      const childId = ThreadId.make("resume-child");
+      const parent = yield* projections.getThread(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("resume-child-created"),
+            type: "thread.created",
+            threadId: childId,
+            occurredAt: now,
+            payload: {
+              ...parent,
+              id: childId,
+              title: "Archived child",
+              archivedAt: now,
+              lineage: {
+                rootThreadId: threadId,
+                parentThreadId: threadId,
+                relationshipToParent: "subagent",
+              },
+            },
+          },
+        ],
+      });
+      expect(
+        yield* treehouse.returnIdle({
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "feature/restore",
+          headSha: f.parentSha,
+          threadIds: [threadId, childId],
+          recheck: Effect.succeed(null),
+        }),
+      ).toBeNull();
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "unrelated",
+        path: null,
+      });
+      yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+      yield* harness.start;
+      const replacement = f.path.join(f.root, "pool", "2", "repo");
+      expect(harness.projection().thread.worktreePath).toBe(replacement);
+      expect(harness.open).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimePolicy: expect.objectContaining({ cwd: replacement }) }),
+      );
+      expect(harness.startRootRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          appThread: expect.objectContaining({ worktreePath: replacement }),
+          runtimePolicy: expect.objectContaining({ cwd: replacement }),
+        }),
+      );
+      expect(yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] })).toBe("unrelated");
+      expect(yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] })).toBe(
+        "feature/restore",
+      );
+      yield* f.leases.assertThread({ path: replacement, threadId });
+      const child = yield* projections.getThread(childId);
+      expect(child.worktreePath).toBe(replacement);
+      expect(child.archivedAt).toEqual(now);
+      yield* f.leases.assertThread({ path: replacement, threadId: childId });
+    }).pipe(
+      Effect.provide(
+        EventSink.layer.pipe(
+          Layer.provideMerge(
+            Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+              Layer.provideMerge(Sqlite.layerMemory),
+            ),
+          ),
+          Layer.provideMerge(treehouseTestLayer),
+        ),
+      ),
+    ),
 );
 
 effectIt.effect.each(["missing", "recycled"])(

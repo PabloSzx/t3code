@@ -18,6 +18,7 @@ import {
   type MessageId,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -1012,6 +1013,10 @@ export function useThreadOutboxDrain(): void {
           startFromOrigin: false,
         };
       }
+      const branchNaming = resolveProjectSettings(
+        currentConfig.settings,
+        creation.projectId,
+      ).settings;
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: buildProjectThreadStartTurnInput({
@@ -1039,7 +1044,14 @@ export function useThreadOutboxDrain(): void {
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,
           startFromOrigin: workspace.startFromOrigin ?? false,
-          worktreeBranchName: buildTemporaryWorktreeBranchName(randomHex),
+          worktreeBranchName: buildTemporaryWorktreeBranchName({
+            randomHex,
+            naming: {
+              mode: branchNaming.branchNamingMode,
+              prefix: branchNaming.branchNamePrefix,
+              instructions: branchNaming.branchNameInstructions,
+            },
+          }),
         }),
       });
       if (AsyncResult.isFailure(deliveryResult) && !hasAccess()) return true;

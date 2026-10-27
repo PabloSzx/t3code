@@ -363,10 +363,23 @@ const make = Effect.gen(function* () {
       );
 
       const requestedBranch = input.workspaceStrategy.branch;
+      const generatedPlaceholder =
+        input.workspaceStrategy.type === "worktree" && requestedBranch === undefined;
       let branch: string | null;
-      if (input.workspaceStrategy.type === "worktree" && requestedBranch === undefined) {
+      if (generatedPlaceholder) {
         const uuid = yield* randomUuidV4;
-        branch = buildTemporaryWorktreeBranchName(() => uuid.replaceAll("-", ""));
+        const settings = resolveProjectSettings(
+          yield* serverSettings.getSettings,
+          input.projectId,
+        ).settings;
+        branch = buildTemporaryWorktreeBranchName({
+          randomHex: () => uuid.replaceAll("-", ""),
+          naming: {
+            mode: settings.branchNamingMode,
+            prefix: settings.branchNamePrefix,
+            instructions: settings.branchNameInstructions,
+          },
+        });
       } else {
         branch = requestedBranch ?? null;
       }
@@ -412,7 +425,7 @@ const make = Effect.gen(function* () {
         if (shouldFetch) yield* setupTracker.stageStatus(threadId, "fetch", "done");
         if (
           branch !== null &&
-          isTemporaryWorktreeBranch(branch) &&
+          /^t3\/[0-9a-f]{8}$/i.test(branch) &&
           (yield* git
             .hasCommit({
               cwd: project.workspaceRoot,
@@ -471,6 +484,7 @@ const make = Effect.gen(function* () {
         worktreePath !== null &&
         branch !== null &&
         initialMessage !== undefined &&
+        input.workspaceStrategy.type === "worktree" &&
         isTemporaryWorktreeBranch(branch)
       ) {
         const oldBranch = branch;

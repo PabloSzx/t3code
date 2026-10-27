@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EventId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
@@ -69,7 +70,19 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
+export interface RebindThreadWorktreeOptions {
+  readonly threadId: ThreadId;
+  readonly previousPath: string;
+  readonly familyThreadIds?: readonly ThreadId[];
+  readonly path: string;
+  readonly branch: string;
+  readonly eventId: OrchestrationV2DomainEvent["id"];
+  readonly occurredAt: DateTime.Utc;
+}
 export interface EventSinkV2Shape {
+  readonly rebindWorktree: (
+    input: RebindThreadWorktreeOptions,
+  ) => Effect.Effect<void, EventSinkV2Error>;
   readonly write: (input: {
     /** Return no events if another thread owns this native session at commit time. */
     readonly unlessNativeThreadOwned?: Pick<
@@ -503,6 +516,54 @@ const layerBase: Layer.Layer<
       return committed;
     });
 
+    const rebindWorktree = Effect.fn("EventSink.rebindWorktree")(
+      function* (input: RebindThreadWorktreeOptions) {
+        yield* commitThenPublish(
+          Effect.gen(function* () {
+            const events: OrchestrationV2DomainEvent[] = [];
+            for (const threadId of new Set([input.threadId, ...(input.familyThreadIds ?? [])])) {
+              const current = yield* projectionStore.getThread(threadId);
+              if (
+                current.deletedAt === null &&
+                current.branch === input.branch &&
+                current.worktreePath === input.path &&
+                input.path !== input.previousPath
+              ) {
+                yield* leases.assertThread({ path: input.path, threadId });
+                continue;
+              }
+              if (
+                current.deletedAt !== null ||
+                current.branch !== input.branch ||
+                current.worktreePath !== input.previousPath
+              ) {
+                if (threadId !== input.threadId) continue;
+                return yield* new TreehouseLeases.TreehouseLeaseError({
+                  path: input.previousPath,
+                  reason: "stale-binding",
+                });
+              }
+              events.push({
+                id:
+                  threadId === input.threadId
+                    ? input.eventId
+                    : EventId.make(`${input.eventId}:${threadId}`),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: input.occurredAt,
+                payload: { ...current, worktreePath: input.path, updatedAt: input.occurredAt },
+              });
+            }
+            const committed = yield* eventStore.append({ events });
+            const outcomes = yield* applyStoredEvents(committed);
+            return { committed, outcomes };
+          }),
+          ({ committed, outcomes }) => publishStoredEvents(committed, outcomes),
+        );
+      },
+      (effect) =>
+        effect.pipe(Effect.mapError((cause) => new EventSinkWriteError({ eventCount: 1, cause }))),
+    );
     const writeIfRunCurrentEffect = Effect.fn("orchestrationV2.EventSink.writeIfRunCurrent")(
       function* (input: Parameters<EventSinkV2Shape["writeIfRunCurrent"]>[0]) {
         yield* Effect.annotateCurrentSpan({
@@ -1033,6 +1094,7 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
+      rebindWorktree,
     } satisfies EventSinkV2Shape);
   }),
 ).pipe(Layer.provide(Layer.merge(NodeFileSystem.layer, NodePath.layer)));

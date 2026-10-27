@@ -19,10 +19,20 @@ export const TreehouseLease = Schema.Struct({
   leased_at: Schema.String,
   base_branch: Schema.optional(Schema.String),
 });
+const Release = Schema.Struct({
+  projectPath: Schema.String,
+  repository: Schema.String,
+  branch: Schema.String,
+  headSha: Schema.String,
+  threadIds: Schema.Array(Schema.String),
+  resuming: Schema.optional(Schema.Boolean),
+  replacement: Schema.optional(Schema.Struct({ path: Schema.String, leaseId: LeaseId })),
+});
 const Record = Schema.Struct({
   lease: TreehouseLease,
   binary: Schema.String,
   returned: Schema.Boolean,
+  release: Schema.optional(Release),
 });
 const Index = Schema.Array(Schema.Struct({ path: Schema.String, pool: Schema.String }));
 const Binding = Schema.Struct({
@@ -30,6 +40,7 @@ const Binding = Schema.Struct({
   leaseId: LeaseId,
   active: Schema.Boolean,
   sequence: Schema.Number,
+  resumedFrom: Schema.optional(Schema.Struct({ path: Schema.String, leaseId: LeaseId })),
 });
 const Use = Schema.Struct({
   path: Schema.String,
@@ -59,7 +70,7 @@ export class TreehouseLeaseError extends Schema.TaggedError<TreehouseLeaseError>
   },
 ) {
   override get message(): string {
-    return `Treehouse workspace ${this.path} is unavailable (${this.reason}). T3 keeps the lease rather than using or deleting an unverified slot.`;
+    return `Treehouse workspace ${this.path} is unavailable (${this.reason}). T3 retains its ownership records rather than using or deleting an unverified slot.`;
   }
 }
 const isLeaseError = Schema.is(TreehouseLeaseError);
@@ -117,7 +128,16 @@ export const treehousePoolForPath = Effect.fn("TreehouseLeases.poolForPath")(
     effect.pipe(Effect.mapError((cause) => metadataError({ path: target, cause }))),
 );
 
-type Owned = { recordPath: string; record: typeof Record.Type };
+export type OwnedTreehouseLease = { recordPath: string; record: typeof Record.Type };
+type Owned = OwnedTreehouseLease;
+export interface TreehouseCleanupReturnOptions {
+  readonly owned: Owned;
+  readonly release: typeof Release.Type;
+}
+export interface TreehouseReleasedThreadOptions {
+  readonly path: string;
+  readonly threadId: string;
+}
 export class TreehouseLeaseStore extends Context.Service<
   TreehouseLeaseStore,
   {
@@ -157,6 +177,17 @@ export class TreehouseLeaseStore extends Context.Service<
       kind: "provider" | "terminal";
     }) => Effect.Effect<Effect.Effect<void>, TreehouseLeaseError>;
     readonly assertReturnable: (owned: Owned) => Effect.Effect<void, TreehouseLeaseError>;
+    readonly releasedThread: (
+      input: TreehouseReleasedThreadOptions,
+    ) => Effect.Effect<Owned | null, TreehouseLeaseError>;
+    readonly beginCleanupReturn: (
+      input: TreehouseCleanupReturnOptions,
+    ) => Effect.Effect<Owned, TreehouseLeaseError>;
+    readonly beginResume: (owned: Owned) => Effect.Effect<Owned, TreehouseLeaseError>;
+    readonly setReplacement: (input: {
+      readonly owned: Owned;
+      readonly path: string;
+    }) => Effect.Effect<void, TreehouseLeaseError>;
   }
 >()("t3/workspace/treehouseLeases/TreehouseLeaseStore") {}
 
@@ -280,6 +311,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Record))));
       if (
         record.returned ||
+        record.release !== undefined ||
         record.lease.path !== path.resolve(slot.path) ||
         record.lease.lease_id !== id ||
         record.lease.lease_holder !== slot.lease_holder ||
@@ -305,6 +337,38 @@ const make = Effect.gen(function* () {
       ),
     );
   });
+  const readRecord = Effect.fn("TreehouseLeases.readRecord")(function* (id: string) {
+    const root = yield* location();
+    yield* decodeLeaseId(id);
+    const recordPath = path.join(root, "leases", `${id}.json`);
+    const record = yield* fs
+      .readFileString(recordPath)
+      .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Record))));
+    if (record.lease.lease_id !== id)
+      return yield* new TreehouseLeaseError({ path: recordPath, reason: "metadata" });
+    return { recordPath, record };
+  });
+  const releasedThread = Effect.fn("TreehouseLeases.releasedThread")(
+    function* (input: TreehouseReleasedThreadOptions) {
+      const binding = yield* readBinding(input.threadId);
+      if (binding === null) return null;
+      const identity =
+        binding.path === path.resolve(input.path)
+          ? { path: binding.path, leaseId: binding.leaseId }
+          : binding.resumedFrom;
+      if (identity === undefined || identity.path !== path.resolve(input.path)) return null;
+      const owned = yield* readRecord(identity.leaseId);
+      if (owned.record.release === undefined) return null;
+      if (
+        owned.record.lease.path !== identity.path ||
+        !owned.record.release.threadIds.includes(input.threadId)
+      )
+        return yield* new TreehouseLeaseError({ path: input.path, reason: "stale-binding" });
+      return owned;
+    },
+    (effect, input) =>
+      effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
+  );
   const assertThread = Effect.fn("TreehouseLeases.assertThread")(
     function* (input: { path: string; threadId: string; requireBinding?: boolean }) {
       const binding = yield* readBinding(input.threadId);
@@ -347,11 +411,125 @@ const make = Effect.gen(function* () {
     });
     return fs.remove(pin, { recursive: true }).pipe(Effect.ignoreCause({ log: true }));
   });
+  const assertUnused = Effect.fn("TreehouseLeases.assertUnused")(function* (input: {
+    owned: Owned;
+    allowedThreadIds: readonly string[];
+  }) {
+    const { owned } = input;
+    const root = yield* location();
+    const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed([]),
+      ),
+    );
+    const allowed = new Set(input.allowedThreadIds.map((id) => `${Base64Url.encode(id)}.json`));
+    for (const name of threads) {
+      const binding = yield* fs
+        .readFileString(path.join(root, "threads", name))
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
+      if (binding.active && binding.leaseId === owned.record.lease.lease_id && !allowed.has(name))
+        return yield* new TreehouseLeaseError({ path: owned.record.lease.path, reason: "in-use" });
+    }
+    const uses = yield* fs.readDirectory(path.join(root, "uses")).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed([]),
+      ),
+    );
+    for (const name of uses) {
+      const use = yield* fs
+        .readFileString(path.join(root, "uses", name, "use.json"))
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))));
+      if (use.leaseId === owned.record.lease.lease_id)
+        return yield* new TreehouseLeaseError({ path: owned.record.lease.path, reason: "in-use" });
+    }
+  });
   return TreehouseLeaseStore.of({
     read,
     knownPath,
     withLock,
     assertThread,
+    releasedThread,
+    beginResume: Effect.fn("TreehouseLeases.beginResume")(
+      function* (owned) {
+        const current = yield* readRecord(owned.record.lease.lease_id);
+        const release = current.record.release;
+        if (!current.record.returned || release === undefined || release.resuming)
+          return yield* new TreehouseLeaseError({
+            path: owned.record.lease.path,
+            reason: "in-use",
+          });
+        const updated = {
+          ...current,
+          record: { ...current.record, release: { ...release, resuming: true } },
+        };
+        yield* writeJson({ target: updated.recordPath, value: updated.record });
+        return updated;
+      },
+      (effect, owned) =>
+        effect.pipe(
+          Effect.mapError((cause) => metadataError({ path: owned.record.lease.path, cause })),
+        ),
+    ),
+    setReplacement: Effect.fn("TreehouseLeases.setReplacement")(
+      function* (input) {
+        const owned = yield* readRecord(input.owned.record.lease.lease_id);
+        const replacement = yield* read(input.path);
+        if (
+          !owned.record.returned ||
+          !owned.record.release?.resuming ||
+          owned.record.release.replacement !== undefined ||
+          replacement === null
+        )
+          return yield* new TreehouseLeaseError({ path: input.path, reason: "stale-binding" });
+        yield* writeJson({
+          target: owned.recordPath,
+          value: {
+            ...owned.record,
+            release: {
+              ...owned.record.release,
+              replacement: {
+                path: replacement.record.lease.path,
+                leaseId: replacement.record.lease.lease_id,
+              },
+            },
+          },
+        });
+      },
+      (effect, input) =>
+        effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
+    ),
+    beginCleanupReturn: Effect.fn("TreehouseLeases.beginCleanupReturn")(
+      function* (input) {
+        const owned = yield* read(input.owned.record.lease.path);
+        if (owned === null || owned.record.lease.lease_id !== input.owned.record.lease.lease_id)
+          return yield* new TreehouseLeaseError({
+            path: input.owned.record.lease.path,
+            reason: "unknown-lease",
+          });
+        yield* assertUnused({ owned, allowedThreadIds: input.release.threadIds });
+        for (const threadId of input.release.threadIds) {
+          const binding = yield* readBinding(threadId);
+          if (
+            binding === null ||
+            binding.path !== owned.record.lease.path ||
+            binding.leaseId !== owned.record.lease.lease_id
+          )
+            return yield* new TreehouseLeaseError({
+              path: owned.record.lease.path,
+              reason: "stale-binding",
+            });
+        }
+        const updated = { ...owned, record: { ...owned.record, release: input.release } };
+        yield* writeJson({ target: updated.recordPath, value: updated.record });
+        return updated;
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) => metadataError({ path: input.owned.record.lease.path, cause })),
+        ),
+    ),
     register: Effect.fn("TreehouseLeases.register")(
       function* (input) {
         const root = yield* location();
@@ -411,12 +589,28 @@ const make = Effect.gen(function* () {
             if (owned === null) return;
             const root = yield* location();
             const previous = yield* readBinding(input.threadId);
+            if (previous !== null && previous.sequence > input.sequence)
+              return yield* new TreehouseLeaseError({ path: input.path, reason: "stale-binding" });
+            let resumedFrom = previous?.resumedFrom;
             if (
               previous !== null &&
               (previous.path !== owned.record.lease.path ||
                 previous.leaseId !== owned.record.lease.lease_id)
-            )
-              return yield* new TreehouseLeaseError({ path: input.path, reason: "stale-binding" });
+            ) {
+              const released = yield* readRecord(previous.leaseId);
+              const release = released.record.release;
+              if (
+                !released.record.returned ||
+                release?.replacement?.leaseId !== owned.record.lease.lease_id ||
+                release.replacement.path !== owned.record.lease.path ||
+                !release.threadIds.includes(input.threadId)
+              )
+                return yield* new TreehouseLeaseError({
+                  path: input.path,
+                  reason: "stale-binding",
+                });
+              resumedFrom = { path: previous.path, leaseId: previous.leaseId };
+            }
             yield* writeJson({
               target: bindingPath({ root, threadId: input.threadId }),
               value: {
@@ -424,6 +618,7 @@ const make = Effect.gen(function* () {
                 leaseId: owned.record.lease.lease_id,
                 active: true,
                 sequence: input.sequence,
+                ...(resumedFrom === undefined ? {} : { resumedFrom }),
               },
             });
           }),
@@ -481,39 +676,7 @@ const make = Effect.gen(function* () {
     ),
     assertReturnable: Effect.fn("TreehouseLeases.assertReturnable")(
       function* (owned) {
-        const root = yield* location();
-        const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
-          Effect.catchIf(
-            (error) => error.reason._tag === "NotFound",
-            () => Effect.succeed([]),
-          ),
-        );
-        for (const name of threads) {
-          const binding = yield* fs
-            .readFileString(path.join(root, "threads", name))
-            .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
-          if (binding.active && binding.leaseId === owned.record.lease.lease_id)
-            return yield* new TreehouseLeaseError({
-              path: owned.record.lease.path,
-              reason: "in-use",
-            });
-        }
-        const uses = yield* fs.readDirectory(path.join(root, "uses")).pipe(
-          Effect.catchIf(
-            (error) => error.reason._tag === "NotFound",
-            () => Effect.succeed([]),
-          ),
-        );
-        for (const name of uses) {
-          const use = yield* fs
-            .readFileString(path.join(root, "uses", name, "use.json"))
-            .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))));
-          if (use.leaseId === owned.record.lease.lease_id)
-            return yield* new TreehouseLeaseError({
-              path: owned.record.lease.path,
-              reason: "in-use",
-            });
-        }
+        yield* assertUnused({ owned, allowedThreadIds: [] });
       },
       (effect, owned) =>
         effect.pipe(

@@ -26,7 +26,7 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
-import { WorkspaceOperation } from "@t3tools/contracts";
+import { WorkspaceOperation, type WorkspaceOperationContext } from "@t3tools/contracts";
 
 // fff-node's native library stays external; single-executables require disk packages instead of importing them.
 const requireForFff = NodeModule.createRequire(import.meta.url);
@@ -561,5 +561,32 @@ export class WorkspaceSearchIndexMap extends LayerMap.Service<WorkspaceSearchInd
   {
     lookup: layer,
     idleTimeToLive: WORKSPACE_INDEX_IDLE_TTL,
+  },
+) {}
+
+/** Lease-generation key; requests still pin that generation before an index is used. */
+export const pooledWorkspaceSearchIndexKey = (input: {
+  readonly cwd: string;
+  readonly variant: WorkspaceSearchIndexVariant;
+  readonly context: WorkspaceOperationContext;
+}) => `${input.context.threadId}\n${input.context.generation}\n${input.variant}\n${input.cwd}`;
+
+// Short idle lifetime: a recyclable checkout keeps no watcher long after its last pinned query.
+export class PooledWorkspaceSearchIndexMap extends LayerMap.Service<PooledWorkspaceSearchIndexMap>()(
+  "t3/workspace/PooledWorkspaceSearchIndexMap",
+  {
+    lookup: (key: string) => {
+      const [threadId, generation, variant, ...cwd] = key.split("\n");
+      return Layer.effect(
+        WorkspaceSearchIndex,
+        make(cwd.join("\n"), variant as WorkspaceSearchIndexVariant).pipe(
+          Effect.provideService(WorkspaceOperation, {
+            threadId: threadId as WorkspaceOperationContext["threadId"],
+            generation: generation!,
+          }),
+        ),
+      );
+    },
+    idleTimeToLive: "20 seconds",
   },
 ) {}

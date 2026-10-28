@@ -29,6 +29,8 @@ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import * as WorkspaceAccess from "./WorkspaceAccess.ts";
+import * as WorkspaceLifecycle from "./WorkspaceLifecycle.ts";
+import * as Stream from "effect/Stream";
 import { TreehouseLeaseError } from "./treehouseLeases.ts";
 import { WorkspaceOperation } from "@t3tools/contracts";
 import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
@@ -155,6 +157,24 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const workspaceSearchIndexes = yield* WorkspaceSearchIndex.WorkspaceSearchIndexMap;
+  const pooledIndexes = yield* WorkspaceSearchIndex.PooledWorkspaceSearchIndexMap;
+  const pooledKeys = new Set<string>();
+  const lifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
+  if (lifecycle._tag === "Some")
+    // A return or rebind retires every pooled index so none outlives its lease generation.
+    yield* lifecycle.value.changes.pipe(
+      Stream.runForEach(() =>
+        Effect.forEach(
+          [...pooledKeys],
+          (key) => {
+            pooledKeys.delete(key);
+            return pooledIndexes.invalidate(key);
+          },
+          { discard: true },
+        ),
+      ),
+      Effect.forkScoped,
+    );
   const vcsProcess = yield* VcsProcess.VcsProcess;
   const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
   const guardCwd = <A, E, R>(effect: Effect.Effect<A, E, R>, input: { readonly cwd: string }) =>
@@ -164,16 +184,11 @@ export const make = Effect.gen(function* () {
     readonly variant: WorkspaceSearchIndex.WorkspaceSearchIndexVariant;
     readonly effect: Effect.Effect<A, E, WorkspaceSearchIndex.WorkspaceSearchIndex>;
   }) {
-    if ((yield* WorkspaceOperation)?.generation != null) {
-      // Recyclable checkouts cannot own background watchers or incomplete scans beyond their pins.
-      return yield* Effect.scoped(
-        Effect.gen(function* () {
-          const index = yield* WorkspaceSearchIndex.make(input.cwd, input.variant);
-          return yield* input.effect.pipe(
-            Effect.provideService(WorkspaceSearchIndex.WorkspaceSearchIndex, index),
-          );
-        }),
-      );
+    const context = yield* WorkspaceOperation;
+    if (context?.generation != null) {
+      const key = WorkspaceSearchIndex.pooledWorkspaceSearchIndexKey({ ...input, context });
+      pooledKeys.add(key);
+      return yield* input.effect.pipe(Effect.provide(pooledIndexes.get(key)));
     }
     return yield* input.effect.pipe(
       Effect.provide(
@@ -475,5 +490,6 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(WorkspaceEntries, make).pipe(
   Layer.provide(WorkspaceSearchIndex.WorkspaceSearchIndexMap.layer),
+  Layer.provide(WorkspaceSearchIndex.PooledWorkspaceSearchIndexMap.layer),
   Layer.provide(VcsProcess.layer),
 );

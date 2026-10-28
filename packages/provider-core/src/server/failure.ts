@@ -17,9 +17,15 @@ import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterFailureReason } from "./ProviderAdapter.ts";
 import * as Schema from "effect/Schema";
 
+/** Failure code for a turn whose missed history did not fit; recovery compacts and resends it. */
+export const CONTEXT_HANDOFF_BUDGET_FAILURE_CODE = "context_handoff_budget";
+
 export class ContextHandoffBudgetError extends Schema.TaggedError<ContextHandoffBudgetError>()(
   "ContextHandoffBudgetError",
-  {},
+  {
+    /** True when the provider session can compact, so T3 compacts and resends the message. */
+    recoverable: Schema.optional(Schema.Boolean),
+  },
 ) {
   override get message() {
     return "Insufficient context allowance for the provider handoff. Compact the target conversation or use a larger-context model; the current request has not been truncated.";
@@ -65,6 +71,7 @@ const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
 function curatedCauseMessages(cause: unknown): {
   readonly known: string | undefined;
   readonly category: string | undefined;
+  readonly budgetExceeded?: true;
 } {
   const seen = new Set<unknown>();
   let category: (typeof PROVIDER_FAILURE_CATEGORIES)[string];
@@ -86,7 +93,13 @@ function curatedCauseMessages(cause: unknown): {
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
         case "ContextHandoffBudgetError":
-          return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
+          return {
+            known: new ContextHandoffBudgetError().message,
+            category: categoryMessage(),
+            ...((cause as Record<string, unknown>).recoverable === true
+              ? { budgetExceeded: true as const }
+              : {}),
+          };
         case "AcpModelSelectionError":
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
         case "ClaudeAppendSystemPromptFileError":
@@ -213,7 +226,10 @@ export function makeProviderFailure(input: {
   const rawMessage =
     input.message ?? curated.known ?? curated.category ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
   const message = boundedText(rawMessage, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
-  const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
+  const rawCode =
+    input.code ??
+    stringField(input.cause, "code") ??
+    (curated.budgetExceeded ? CONTEXT_HANDOFF_BUDGET_FAILURE_CODE : null);
   const code =
     rawCode === null ? null : boundedText(rawCode, MAX_PROVIDER_FAILURE_CODE_LENGTH) || null;
 

@@ -15,6 +15,7 @@ import {
   makeProviderFailure,
   makeProviderFailureTurnItem,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
+  CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
   ContextHandoffBudgetError,
 } from "./failure.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -74,12 +75,14 @@ it("preserves actionable handoff errors wrapped by turn startup", () => {
     threadId: ThreadId.make("thread:handoff-error"),
     providerThreadId: ProviderThreadId.make("provider-thread:handoff-error"),
     runId: RunId.make("run:handoff-error"),
-    cause: new ContextHandoffBudgetError(),
+    cause: new ContextHandoffBudgetError({ recoverable: true }),
   });
-  assert.equal(
-    makeProviderFailure({ cause: Cause.fail(cause) }).message,
-    new ContextHandoffBudgetError().message,
-  );
+  const failure = makeProviderFailure({ cause: Cause.fail(cause) });
+  assert.equal(failure.message, new ContextHandoffBudgetError().message);
+  // Recovery recognizes this failure by its code, not its text.
+  assert.equal(failure.code, CONTEXT_HANDOFF_BUDGET_FAILURE_CODE);
+  // A provider that cannot compact keeps the plain error, with nothing to recover.
+  assert.isNull(makeProviderFailure({ cause: new ContextHandoffBudgetError() }).code);
 });
 
 it("keeps unrecognized reasons and provider text out of category messages", () => {

@@ -25,6 +25,10 @@ import {
   historicalMessage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { projectContextHandoffForWire } from "./WireProjection.ts";
+import {
+  CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
+  makeProviderFailure,
+} from "@t3tools/provider-core/server/failure";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -638,6 +642,25 @@ describe("handoff delivery", () => {
       }).pipe(Effect.result);
       assert.equal(result._tag, "Failure");
       assert.equal(calls, 0);
+    }),
+  );
+
+  it.effect("marks an over-budget failure recoverable only when the session can compact", () =>
+    Effect.gen(function* () {
+      const attempt = (canCompact: boolean) =>
+        deliverContextHandoffs({
+          handoffs: [handoff],
+          providerThread,
+          budget: 0,
+          canCompact,
+          alreadyDeliveredItemIds: new Set(),
+          persist: () => Effect.void,
+        }).pipe(Effect.flip);
+      assert.equal(
+        makeProviderFailure({ cause: yield* attempt(true) }).code,
+        CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
+      );
+      assert.isNull(makeProviderFailure({ cause: yield* attempt(false) }).code);
     }),
   );
 });

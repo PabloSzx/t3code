@@ -1279,6 +1279,7 @@ export const layer: Layer.Layer<
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
             deferInline: compact || goalCommand,
+            canCompact: session.compactThread !== undefined,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {
               return handoffBudget({

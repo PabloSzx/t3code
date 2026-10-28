@@ -19,6 +19,8 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly budget: number | Effect.Effect<number, BudgetError>;
     readonly deferInline?: boolean;
+    /** The session can compact, so an over-budget turn is recovered by compacting. */
+    readonly canCompact?: boolean;
     readonly alreadyDeliveredItemIds: ReadonlySet<string>;
     readonly inject?: (
       history: ProviderAdapter.ProviderAdapterV2HistoricalContext,
@@ -72,7 +74,9 @@ export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextH
     });
     if (historyCost(selected.messages, selected.context) > budget) {
       if (input.deferInline) return { context: "", delivered: Effect.void, unsent: Effect.void };
-      return yield* new ContextHandoffBudgetError();
+      return yield* new ContextHandoffBudgetError(
+        input.canCompact === true ? { recoverable: true } : {},
+      );
     }
     const omittedItemIds = new Set(selected.omittedItemIds);
     const persist = (status: "pending" | "injected" | "inline") =>

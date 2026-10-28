@@ -93,6 +93,12 @@ vi.mock("~/state/projects", () => ({
   projectEnvironment: projectMocks,
 }));
 
+vi.mock("~/workspaceContext", () => ({
+  useWorkspaceSource: () => null,
+  useWorkspaceAvailability: () => null,
+  useScopedWorkspaceQuery: (atom: unknown) => atom,
+}));
+
 vi.mock("~/state/queries", () => ({
   useProjectPathSearch: vi.fn(),
 }));

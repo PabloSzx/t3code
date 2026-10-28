@@ -206,6 +206,7 @@ import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as WorkspaceActions from "./workspace/WorkspaceActions.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -1326,6 +1327,7 @@ export const layerWsRpc = (
       const keybindings = yield* Keybindings.Keybindings;
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
+      const workspaceActions = yield* WorkspaceActions.WorkspaceActions;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
@@ -2867,6 +2869,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
+        [WS_METHODS.workspaceAvailability]: (input) => workspaceActions.availability(input),
+        [WS_METHODS.workspacePrepareAction]: (input) => workspaceActions.prepare({ ...input, owner: currentSessionId }),
+        [WS_METHODS.workspaceCompleteAction]: (input) => workspaceActions.complete({ ...input, owner: currentSessionId }),
+        [WS_METHODS.workspaceOpenEditor]: (input) => workspaceActions.openEditor({ input, owner: currentSessionId }),
         [WS_METHODS.filesystemGetMetadata]: (input) =>
           workspaceFileSystem.getMetadata(input).pipe(
             Effect.mapError(

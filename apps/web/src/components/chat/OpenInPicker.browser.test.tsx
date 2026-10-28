@@ -1,4 +1,4 @@
-import { AuthOrchestrationOperateScope, EnvironmentId, type EditorId } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, EnvironmentId, ThreadId, type EditorId } from "@t3tools/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { Cause } from "effect";
 import { AsyncResult } from "effect/reactivity";
@@ -6,12 +6,15 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { act, fakeTimers, render as renderUi } from "../../../test/render";
 import type { RemoteOpenState } from "../../remoteOpen";
+import { WorkspaceContext } from "../../workspaceContext";
+import { shellEnvironment } from "../../state/shell";
 
 const state = vi.hoisted(() => ({
   allowed: new Set<string>(),
   remote: { mode: "local-exec" } as RemoteOpenState,
   clientEditors: ["vscode"] as readonly EditorId[],
   run: vi.fn(),
+  complete: vi.fn(),
   openUrl: vi.fn(),
   setPreferred: vi.fn(),
   markHintSeen: vi.fn(),
@@ -37,7 +40,7 @@ vi.mock(import("../../state/session"), async (importOriginal) => {
 });
 vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useAtomCommand: (() => state.run) as never,
+  useAtomCommand: ((command: unknown) => command === shellEnvironment.completeWorkspaceAction ? state.complete : state.run) as never,
 }));
 vi.mock(import("../../state/environments"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -76,7 +79,8 @@ async function setup() {
   state.allowed.clear();
   state.remote = { mode: "local-exec" };
   state.clientEditors = editors;
-  state.run.mockReset().mockResolvedValue(AsyncResult.success(undefined));
+  state.run.mockReset().mockResolvedValue(AsyncResult.success({ url: null, reservationId: null }));
+  state.complete.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   state.openUrl.mockReset().mockResolvedValue(true);
   state.setPreferred.mockReset();
   state.markHintSeen.mockReset();
@@ -107,7 +111,7 @@ async function setup() {
           compact={!panel}
         />
       );
-      await screen.rerender(node);
+      await screen.rerender(<WorkspaceContext value={{ environmentId: selected, threadId: ThreadId.make("editor-a"), root: "/work/project" }}>{node}</WorkspaceContext>);
     });
   }
 
@@ -160,6 +164,27 @@ async function setup() {
     [Symbol.asyncDispose]: () => environment.disposeAsync(),
   };
 }
+
+it("uses host preparation for a remote editor and acknowledges only after the URI opener accepts", async () => {
+  await using fixture = await setup();
+  state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "dev-host" } };
+  state.run.mockResolvedValue(AsyncResult.success({ url: "vscode://guarded/verified-target", reservationId: "handoff-a" }));
+  let acceptHandoff!: (accepted: boolean) => void;
+  const handoff = new Promise<boolean>((resolve) => { acceptHandoff = resolve; });
+  state.openUrl.mockReturnValue(handoff);
+  await fixture.renderPicker();
+  expect(state.run).not.toHaveBeenCalled();
+  await fixture.click(fixture.primaryButton());
+  await vi.waitFor(() => expect(state.openUrl).toHaveBeenCalledWith("vscode://guarded/verified-target"));
+  expect(state.run).toHaveBeenCalledWith({ environmentId: selected, input: {
+    cwd: "/work/project", editor: "vscode", workspace: { threadId: ThreadId.make("editor-a"), root: "/work/project" },
+    remote: { host: "dev-host", isFile: false }, activate: false,
+  } });
+  expect(state.complete).not.toHaveBeenCalled();
+  await act(async () => acceptHandoff(true));
+  await vi.waitFor(() => expect(state.complete).toHaveBeenCalledWith({ environmentId: selected, input: { reservationId: "handoff-a" } }));
+  expect(state.setPreferred).toHaveBeenCalledWith("vscode");
+});
 
 describe("host editor access", () => {
   it("uses the selected grant for both the button and a retained shortcut", async () => {

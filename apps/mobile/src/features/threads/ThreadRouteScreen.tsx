@@ -1,4 +1,5 @@
 import * as Dialog from "../../components/ui/Dialog";
+import { ThreadWorkspaceScope } from "./ThreadWorkspaceScope";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
@@ -285,7 +286,7 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
 
   if (selectedThread !== null && selectedThreadKey === routeThreadKey) {
     return withInspectorHeader(
-      <ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} />,
+      <ThreadWorkspaceScope><ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} /></ThreadWorkspaceScope>,
     );
   }
 

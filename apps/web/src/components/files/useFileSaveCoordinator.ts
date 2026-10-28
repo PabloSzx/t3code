@@ -7,8 +7,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
-  confirmProjectFileQueryData,
-  getUnsavedProjectFileQueryData,
+  useProjectFileScope,
 } from "./projectFilesQueryState";
 
 const FILE_SAVE_DEBOUNCE_MS = 500;
@@ -28,7 +27,8 @@ export function useFileSaveCoordinator({
 }: FileSaveOptions): Pick<FileSaveCoordinator, "change"> {
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
   const writeFile = useProjectFileWriter();
-  const inputs = { environmentId, cwd, relativePath, onPendingChange, writeFile };
+  const file = useProjectFileScope({ environmentId, cwd, relativePath });
+  const inputs = { environmentId, cwd, relativePath, onPendingChange, writeFile, file };
   const [current, setCurrent] = useState(() => ({
     inputs,
     session: createFileSaveSession(inputs),
@@ -38,7 +38,8 @@ export function useFileSaveCoordinator({
     current.inputs.cwd !== cwd ||
     current.inputs.relativePath !== relativePath ||
     current.inputs.onPendingChange !== onPendingChange ||
-    current.inputs.writeFile !== writeFile
+    current.inputs.writeFile !== writeFile ||
+    current.inputs.file !== file
   ) {
     setCurrent({ inputs, session: createFileSaveSession(inputs) });
   }
@@ -52,13 +53,13 @@ export function useFileSaveCoordinator({
     // Replay must retire the first session before recovery queues a draft to flush.
     queueMicrotask(() => {
       if (cancelled) return;
-      const unsaved = getUnsavedProjectFileQueryData(environmentId, cwd, relativePath);
+      const unsaved = file.unsaved();
       if (unsaved) session.change(unsaved.contents);
     });
     return () => {
       cancelled = true;
     };
-  }, [canWriteFiles, cwd, environmentId, relativePath, session]);
+  }, [canWriteFiles, cwd, environmentId, file, relativePath, session]);
   return session;
 }
 
@@ -72,8 +73,10 @@ function createFileSaveSession({
   relativePath,
   onPendingChange,
   writeFile,
+  file,
 }: FileSaveOptions & {
   writeFile: ReturnType<typeof useProjectFileWriter>;
+  file: ReturnType<typeof useProjectFileScope>;
 }) {
   const coordinatorRef = createRef<FileSaveCoordinator>();
   return {
@@ -87,9 +90,9 @@ function createFileSaveSession({
           writeFile({
             environmentId,
             input: { cwd, relativePath, contents: nextContents },
+            ...(file.workspace === undefined ? {} : { workspace: file.workspace }),
           }),
-        onConfirmed: (confirmedContents) =>
-          confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents),
+        onConfirmed: file.confirm,
       });
       coordinatorRef.current = coordinator;
       return () => {

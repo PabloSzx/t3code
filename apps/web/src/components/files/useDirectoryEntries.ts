@@ -1,12 +1,12 @@
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
-import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import { useEffect, useRef, useState } from "react";
 
-import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { projectEnvironment } from "~/state/projects";
 
 export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
+  const readEntries = useAtomQueryRunner(projectEnvironment.listEntries, { refresh: true, reportFailure: false, reportDefect: false });
   const [directories, setDirectories] = useState(new Map<string, readonly ProjectEntry[]>());
   const [errors, setErrors] = useState(new Map<string, string>());
   const [pending, setPending] = useState(1);
@@ -23,16 +23,12 @@ export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
   const startRequest = (directoryPath: string, refresh: boolean): Promise<void> => {
     loaded.current.add(directoryPath);
     requested.current.add(directoryPath);
-    const atom = projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath } });
+    const target = { environmentId, input: { cwd, directoryPath } };
     const request = (async () => {
       if (running.current >= 4) await new Promise<void>((resolve) => waiting.current.push(resolve));
       else running.current++;
       const result = active.current
-        ? await executeAtomQuery(appAtomRegistry, atom, {
-            refresh: true,
-            reportFailure: false,
-            reportDefect: false,
-          })
+        ? await readEntries(target)
         : undefined;
       const next = waiting.current.shift();
       if (next) next();

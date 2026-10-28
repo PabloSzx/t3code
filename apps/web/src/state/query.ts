@@ -3,6 +3,7 @@ import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useContext } from "react";
+import { useScopedWorkspaceQuery } from "../workspaceContext";
 
 const EMPTY_ASYNC_RESULT_ATOM = Atom.make(AsyncResult.initial<never, never>(false)).pipe(
   Atom.withLabel("web-environment-query:empty"),
@@ -36,7 +37,8 @@ function queryUpdatedAt(result: AsyncResult.AsyncResult<unknown, unknown>): numb
 export function useEnvironmentQuery<A, E>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
 ): EnvironmentQueryView<A, E> {
-  const selectedAtom = atom ?? EMPTY_ASYNC_RESULT_ATOM;
+  const scopedAtom = useScopedWorkspaceQuery(atom);
+  const selectedAtom = scopedAtom ?? EMPTY_ASYNC_RESULT_ATOM;
   const result = useAtomValue(selectedAtom);
   const refresh = useAtomRefresh(selectedAtom);
   return {
@@ -56,7 +58,8 @@ export function useEnvironmentQuerySelector<A, E, B>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
   select: (result: AsyncResult.AsyncResult<A, E>) => B,
 ): B {
-  return useAtomValue(atom ?? EMPTY_ASYNC_RESULT_ATOM, select);
+  const scopedAtom = useScopedWorkspaceQuery(atom);
+  return useAtomValue(scopedAtom ?? EMPTY_ASYNC_RESULT_ATOM, select);
 }
 
 type QueryResultAtom = Atom.Atom<AsyncResult.AsyncResult<unknown, unknown>>;
@@ -82,8 +85,10 @@ export function useEnvironmentQueryIsNewer(
   query: QueryResultAtom | null,
   than: QueryResultAtom | null,
 ): boolean {
+  const scopedQuery = useScopedWorkspaceQuery(query);
+  const scopedThan = useScopedWorkspaceQuery(than);
   return useAtomValue(
-    queryIsNewerAtom(query ?? EMPTY_ASYNC_RESULT_ATOM, than ?? EMPTY_ASYNC_RESULT_ATOM),
+    queryIsNewerAtom(scopedQuery ?? EMPTY_ASYNC_RESULT_ATOM, scopedThan ?? EMPTY_ASYNC_RESULT_ATOM),
   );
 }
 
@@ -92,7 +97,8 @@ export function useEnvironmentQueryRefresh<A, E>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
 ): { readonly refresh: () => void; readonly isPending: () => boolean } {
   const registry = useContext(RegistryContext);
-  const selectedAtom = atom ?? EMPTY_ASYNC_RESULT_ATOM;
+  const scopedAtom = useScopedWorkspaceQuery(atom);
+  const selectedAtom = scopedAtom ?? EMPTY_ASYNC_RESULT_ATOM;
   const refresh = useAtomRefresh(selectedAtom);
   return { refresh, isPending: () => atom !== null && registry.get(selectedAtom).waiting };
 }

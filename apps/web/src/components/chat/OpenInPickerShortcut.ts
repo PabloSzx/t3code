@@ -5,9 +5,8 @@ import { usePreferredEditor } from "../../editorPreferences";
 import { editorLabelForPlatform } from "../../editorLabels";
 import { isOpenFavoriteEditorShortcut } from "../../keybindings";
 import { announce } from "../../lib/announce";
-import { useRemoteOpenState } from "../../remoteOpen";
-import { shellEnvironment } from "../../state/shell";
-import { useAtomCommand } from "../../state/use-atom-command";
+import { useRemoteOpenState, useRemoteCapableEditors } from "../../remoteOpen";
+import { useWorkspaceEditorAction } from "../../workspaceEditor";
 
 export function useOpenFavoriteEditorShortcut({
   enabled,
@@ -22,12 +21,13 @@ export function useOpenFavoriteEditorShortcut({
   availableEditors: ReadonlyArray<EditorId>;
   openInCwd: string | null;
 }) {
-  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
-  const [preferredEditor] = usePreferredEditor(availableEditors);
+  const openInEditorMutation = useWorkspaceEditorAction(environmentId, { isFile: false });
   const remote = useRemoteOpenState(environmentId);
+  const remoteEditors = useRemoteCapableEditors();
+  const [preferredEditor] = usePreferredEditor(remote.mode === "local-exec" ? availableEditors : remoteEditors);
 
   useEffect(() => {
-    if (!enabled || remote.mode !== "local-exec") return;
+    if (!enabled || remote.mode === "remote-unavailable") return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || !isOpenFavoriteEditorShortcut(event, keybindings)) return;
       if (!openInCwd || !preferredEditor) return;

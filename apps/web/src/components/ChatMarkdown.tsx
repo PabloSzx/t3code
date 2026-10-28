@@ -151,7 +151,7 @@ import { resolveRemoteOpenState, useRemoteOpenResolution } from "../remoteOpen";
 import { useRightPanelStore } from "../rightPanelStore";
 import { readThreadShell, useProjects } from "../state/entities";
 import { serverEnvironment } from "../state/server";
-import { shellEnvironment } from "../state/shell";
+import { useWorkspaceEditorAction } from "../workspaceEditor";
 import { assetEnvironment } from "../state/assets";
 import {
   readEnvironmentScope,
@@ -578,9 +578,7 @@ function useChatMarkdownState({
   const [preferredEditor] = usePreferredEditor(availableEditors);
   const preferredEditorMenuLabel = openInEditorMenuLabel(preferredEditor);
   const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
-  const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
-    reportFailure: false,
-  });
+  const openInEditor = useWorkspaceEditorAction(environmentId);
   const revealFileInFileManager = (filePath: string) => {
     if (environmentId === null) {
       return Promise.resolve(

@@ -2,9 +2,13 @@ import type { QueryPersistence } from "./queryPersistence.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
 import { reuseUnchanged } from "./serverConfigProjection.ts";
+import { registerWorkspaceQuery } from "./workspaceTargets.ts";
+export { hasWorkspaceTargets, rebaseWorkspaceInput, registerWorkspaceQuery, scopeWorkspaceQuery } from "./workspaceTargets.ts";
 export { runStreamInEnvironment, followStreamInEnvironment } from "./environmentStreams.ts";
 import {
   type ClientGuardedRpcTag,
+  WorkspaceOperation,
+  type WorkspaceOperationContext,
   EnvironmentId,
   type EnvironmentId as EnvironmentIdType,
 } from "@t3tools/contracts";
@@ -144,6 +148,7 @@ export interface AtomCommandReporter {
 
 export interface AtomCommand<W, A, E> {
   readonly label: string;
+  readonly rpcTag?: EnvironmentUnaryRpcTag;
   readonly run: (registry: AtomRegistry.AtomRegistry, input: W) => Promise<AtomCommandResult<A, E>>;
 }
 
@@ -476,21 +481,35 @@ export async function settlePromise<A>(
   }
 }
 
-export function environmentRpcKey<Input>(target: {
+export interface EnvironmentRpcTarget<Input> {
   readonly environmentId: EnvironmentIdType;
   readonly input: Input;
-}): string {
-  return JSON.stringify([target.environmentId, target.input]);
+  readonly workspace?: WorkspaceOperationContext;
 }
 
-function parseEnvironmentRpcKey<Input>(key: string): {
-  readonly environmentId: EnvironmentIdType;
-  readonly input: Input;
-} {
-  const decoded = JSON.parse(key) as [EnvironmentIdType, Input];
+export function environmentRpcKey<Input>(target: EnvironmentRpcTarget<Input>): string {
+  return JSON.stringify([target.environmentId, target.input, target.workspace ?? null]);
+}
+
+const verifyWorkspaceDestination = Effect.fn("EnvironmentRpc.verifyWorkspaceDestination")(function* (
+  target: EnvironmentRpcTarget<unknown>,
+) {
+  if (target.workspace === undefined) return;
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  if (supervisor.target.environmentId !== target.environmentId) {
+    return yield* new EnvironmentRpcUnavailableError({
+      environmentId: target.environmentId,
+      message: "A captured workspace cannot be routed to another environment.",
+    });
+  }
+});
+
+function parseEnvironmentRpcKey<Input>(key: string): EnvironmentRpcTarget<Input> {
+  const decoded = JSON.parse(key) as [EnvironmentIdType, Input, WorkspaceOperationContext | null];
   return {
     environmentId: EnvironmentId.make(decoded[0]),
     input: decoded[1],
+    ...(decoded[2] == null ? {} : { workspace: decoded[2] }),
   };
 }
 
@@ -571,10 +590,7 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
     | AtomRegistry.AtomRegistry
     | R
   >,
-): (target: {
-  readonly environmentId: EnvironmentIdType;
-  readonly input: Input;
-}) => Atom.Atom<AsyncResult.AsyncResult<A, E | ER | Error>> {
+): (target: EnvironmentRpcTarget<Input>) => Atom.Atom<AsyncResult.AsyncResult<A, E | ER | Error>> {
   const connectionAtom = Atom.family((environmentId: EnvironmentIdType) =>
     runtime.atom(
       followStreamInEnvironment(
@@ -640,9 +656,11 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
               return Option.isSome(session)
                 ? runInEnvironment(
                     target.environmentId,
-                    options
-                      .execute(target.input, emit)
-                      .pipe(pendingOnceSessionReplaced(session.value)),
+                    verifyWorkspaceDestination(target).pipe(
+                      Effect.andThen(() => options.execute(target.input, emit)),
+                      Effect.provideService(WorkspaceOperation, target.workspace),
+                      pendingOnceSessionReplaced(session.value),
+                    ),
                   )
                 : Effect.never;
             case "connecting":
@@ -674,7 +692,7 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
               );
         if (!options.persistence) return answer();
         const persistence = options.persistence;
-        const cacheKey = JSON.stringify([options.label, target.input]);
+        const cacheKey = JSON.stringify([options.label, target.input, target.workspace ?? null]);
         const previous = Option.flatMap(
           get.self<AsyncResult.AsyncResult<A, unknown>>(),
           AsyncResult.value,
@@ -715,7 +733,11 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
         : intervalQuery.pipe(refreshOnSignalWhileRead(refreshTrigger, isFinal))
     ).pipe(Atom.setIdleTTL(idleTtlMs), Atom.withLabel(`${options.label}:${key}`));
   });
-  return (target) => family(environmentRpcKey(target));
+  return (target) => registerWorkspaceQuery({
+    atom: family(environmentRpcKey(target)),
+    target,
+    bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
+  });
 }
 
 export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
@@ -732,7 +754,12 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
     return runtime
       .atom(
         Stream.suspend(() =>
-          followStreamInEnvironment(target.environmentId, options.subscribe(target.input)),
+          followStreamInEnvironment(
+            target.environmentId,
+            Stream.unwrap(verifyWorkspaceDestination(target).pipe(Effect.as(
+              options.subscribe(target.input).pipe(Stream.provideService(WorkspaceOperation, target.workspace)),
+            ))),
+          ),
         ).pipe(options.completeWhen ? Stream.takeUntil(options.completeWhen) : (stream) => stream),
       )
       .pipe(
@@ -744,8 +771,11 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
         ),
       );
   });
-  return (target: { readonly environmentId: EnvironmentIdType; readonly input: Input }) =>
-    family(environmentRpcKey(target));
+  return (target: EnvironmentRpcTarget<Input>) => registerWorkspaceQuery({
+    atom: family(environmentRpcKey(target)),
+    target,
+    bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
+  });
 }
 
 export function createEnvironmentCommand<R, ER, Input, A, E>(
@@ -760,11 +790,22 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
   return createRuntimeCommand(runtime, {
     label: options.label,
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
-    ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
-    execute: (target, registry) =>
+    ...(options.concurrency === undefined ? {} : {
+      concurrency: options.concurrency.mode === "parallel" ? options.concurrency : {
+        mode: options.concurrency.mode,
+        key: (target: EnvironmentRpcTarget<Input>) => JSON.stringify([
+          options.concurrency?.mode === "parallel" ? null : options.concurrency?.key(target),
+          target.workspace ?? null,
+        ]),
+      },
+    }),
+    execute: (target: EnvironmentRpcTarget<Input>, registry) =>
       runInEnvironment(
         target.environmentId,
-        options.execute(target.input, registry, target.environmentId),
+        verifyWorkspaceDestination(target).pipe(
+          Effect.andThen(() => options.execute(target.input, registry, target.environmentId)),
+          Effect.provideService(WorkspaceOperation, target.workspace),
+        ),
       ),
   });
 }
@@ -920,8 +961,10 @@ export function createEnvironmentRpcCommand<
       );
     },
   });
+  const metadata: { readonly rpcTag?: EnvironmentUnaryRpcTag } = { rpcTag: options.tag };
   return {
     ...command,
+    ...metadata,
     requiredScopes: permissions.requiredScopes,
     permissionAtom: permissions.permissionAtom,
   };

@@ -821,6 +821,34 @@ describe("Treehouse worktrees", () => {
     }).pipe(provide),
   );
 
+  it.live("binds threads to externally leased slots without claiming them", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.driver.createWorktree({ cwd: f.cwd, refName: f.parentSha, path: null });
+      const owned = yield* f.leases.read(f.slot);
+      if (owned === null) return yield* Effect.die("missing fixture lease");
+      const statePath = f.path.join(f.root, "pool", "treehouse-state.json");
+      const snapshot = yield* f.fs.readFileString(statePath);
+      yield* f.fs.writeFileString(
+        statePath,
+        snapshot.replace(owned.record.lease.lease_holder, "agent-review"),
+      );
+      const otherHome = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
+        Effect.provide(TreehouseLeases.layer),
+        Effect.provideService(ServerConfig.ServerConfig, {
+          stateDir: f.path.join(f.root, "other-home"),
+        } as ServerConfig.ServerConfig["Service"]),
+      );
+      yield* otherHome.bindThread({ path: f.slot, threadId: "review-thread", sequence: 1 });
+      yield* otherHome.assertThread({ path: f.slot, threadId: "review-thread" });
+      const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+        Effect.provide(TreehouseWorktrees.layer),
+      );
+      assert.isFalse(yield* treehouse.remove({ cwd: f.cwd, path: f.slot }));
+      assert.include(yield* f.fs.readFileString(statePath), "agent-review");
+    }).pipe(provide),
+  );
+
   it.live("preserves metadata edits without claiming a returned or recycled slot", () =>
     Effect.gen(function* () {
       const family = yield* returnedFamily();

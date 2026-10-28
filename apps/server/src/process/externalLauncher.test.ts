@@ -18,6 +18,34 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as ExternalLauncher from "./externalLauncher.ts";
+import { WorkspaceOperation } from "@t3tools/contracts";
+import * as ServerConfig from "../config.ts";
+import { accessFixture, testLayer as treehouseTestLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
+
+it.live("refuses recycled editor targets below the transport before spawning", () =>
+  Effect.gen(function* () {
+    const f = yield* accessFixture();
+    const bin = f.path.join(f.root, "bin");
+    yield* f.fs.makeDirectory(bin);
+    yield* f.fs.writeFileString(f.path.join(bin, "code"), "#!/bin/sh\n", { mode: 0o755 });
+    const spawned: ChildProcess.StandardCommand[] = [];
+    const launcher = yield* ExternalLauncher.ExternalLauncher.pipe(
+      Effect.provide(layerTest({ platform: "linux", env: { PATH: bin }, onSpawn: (command) => spawned.push(command), config: yield* ServerConfig.ServerConfig })),
+    );
+    const next = yield* f.recycle;
+    for (const context of [undefined, f.context]) {
+      const result = yield* launcher.launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` }).pipe(
+        Effect.provideService(WorkspaceOperation, context), Effect.exit,
+      );
+      assert.isTrue(Exit.isFailure(result));
+    }
+    assert.equal(spawned.length, 0);
+    yield* launcher.launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` }).pipe(
+      Effect.provideService(WorkspaceOperation, next),
+    );
+    assert.equal(spawned.length, 1);
+  }).pipe(Effect.provide(treehouseTestLayer)),
+);
 
 // Windows drive letters break mocked POSIX PATH splitting; these tests also require /bin/sh stubs.
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
@@ -55,6 +83,7 @@ function makeMockDetachedHandle(input: MockSpawnResult & { readonly onUnref?: ()
 
 const layerTest = (input: {
   readonly platform: NodeJS.Platform;
+  readonly config?: ServerConfig.ServerConfig["Service"];
   readonly env?: Record<string, string>;
   readonly resolveExecutable?: (command: string) => string | undefined;
   readonly onSpawn?: (command: ChildProcess.StandardCommand) => void;
@@ -81,7 +110,7 @@ const layerTest = (input: {
   );
 
   return Layer.mergeAll(
-    ExternalLauncher.layer.pipe(Layer.provide(Layer.merge(NodeServices.layer, layerSpawner))),
+    ExternalLauncher.layer.pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, layerSpawner, input.config === undefined ? ServerConfig.layerTest(process.cwd(), { prefix: "editor-config-" }).pipe(Layer.provide(NodeServices.layer)) : Layer.succeed(ServerConfig.ServerConfig, input.config)))),
     Layer.succeed(HostProcess.Platform, input.platform),
     Layer.succeed(
       SpawnExecutableResolution,

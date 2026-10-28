@@ -68,7 +68,7 @@ import {
   AcpRegistrySetProviderResult,
 } from "./acpRegistry.ts";
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
-import { WorkspaceUnavailableError } from "./workspaceAccess.ts";
+import { WorkspaceUnavailableError, WorkspaceAvailability, WorkspaceAvailabilityInput, WorkspaceReservation, WorkspaceCompleteActionInput, WorkspaceEditorInput, WorkspaceEditorResult } from "./workspaceAccess.ts";
 import {
   AuthAccessStreamError,
   AuthAccessStreamEvent,
@@ -397,6 +397,10 @@ export const WS_METHODS = {
   projectsCreateNew: "projects.createNew",
 
   shellOpenInEditor: "shell.openInEditor",
+  workspaceAvailability: "workspace.availability",
+  workspacePrepareAction: "workspace.prepareAction",
+  workspaceCompleteAction: "workspace.completeAction",
+  workspaceOpenEditor: "workspace.openEditor",
 
   filesystemBrowse: "filesystem.browse",
   filesystemGetMetadata: "filesystem.getMetadata",
@@ -1277,9 +1281,26 @@ const WsProjectsCreateNewRpc = Rpc.make(WS_METHODS.projectsCreateNew, {
   error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsWorkspaceAvailabilityRpc = Rpc.make(WS_METHODS.workspaceAvailability, {
+  payload: WorkspaceAvailabilityInput, success: WorkspaceAvailability, stream: true,
+  error: EnvironmentAuthorizationError,
+});
+const WsWorkspacePrepareActionRpc = Rpc.make(WS_METHODS.workspacePrepareAction, {
+  payload: WorkspaceAvailabilityInput, success: WorkspaceReservation,
+  error: Schema.Union([WorkspaceUnavailableError, EnvironmentAuthorizationError]),
+});
+const WsWorkspaceCompleteActionRpc = Rpc.make(WS_METHODS.workspaceCompleteAction, {
+  payload: WorkspaceCompleteActionInput,
+  error: Schema.Union([WorkspaceUnavailableError, EnvironmentAuthorizationError]),
+});
+const WsWorkspaceOpenEditorRpc = Rpc.make(WS_METHODS.workspaceOpenEditor, {
+  payload: WorkspaceEditorInput, success: WorkspaceEditorResult,
+  error: Schema.Union([ExternalLauncherError, WorkspaceUnavailableError, EnvironmentAuthorizationError]),
+});
+
 const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: LaunchEditorInput,
-  error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ExternalLauncherError, WorkspaceUnavailableError, EnvironmentAuthorizationError]),
 });
 
 const WsFilesystemGetMetadataRpc = Rpc.make(WS_METHODS.filesystemGetMetadata, {
@@ -2042,6 +2063,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsWriteFileRpc,
   WsProjectsMutateRpc,
   WsShellOpenInEditorRpc,
+  WsWorkspaceAvailabilityRpc,
+  WsWorkspacePrepareActionRpc,
+  WsWorkspaceCompleteActionRpc,
+  WsWorkspaceOpenEditorRpc,
   WsFilesystemBrowseRpc,
   WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,

@@ -11,6 +11,7 @@ import {
   type EditorId,
   type FileManagerRevealKind,
   type LaunchEditorInput,
+  WorkspaceUnavailableError,
 } from "@t3tools/contracts";
 import { resolveEditorCommand } from "@t3tools/shared/editor";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -35,6 +36,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 
 export {
   ExternalLauncherError,
@@ -461,7 +463,7 @@ export class ExternalLauncher extends Context.Service<
     /** Requires file-manager in resolveAvailableEditors; Linux relies on its directory-handler probe. */
     readonly resolveFileManagerRevealKind: () => Effect.Effect<FileManagerRevealKind | undefined>;
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
-    readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError>;
+    readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError | WorkspaceUnavailableError>;
   }
 >()("t3/process/externalLauncher") {}
 
@@ -753,6 +755,7 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
 
 /** @public */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -836,7 +839,14 @@ export const make = Effect.gen(function* () {
     ),
     launchEditor: Effect.fnUntraced(
       function* (input) {
-        return yield* provideCommandResolutionServices(launchEditor(input));
+        const target = Option.match(parseTargetPathAndPosition(input.cwd), {
+          onNone: () => input.cwd,
+          onSome: (parsed) => parsed.path,
+        });
+        return yield* access.use({
+          targets: [target],
+          effect: provideCommandResolutionServices(launchEditor(input)),
+        }).pipe(Effect.catchTags({ TreehouseLeaseError: (cause) => Effect.fail(new WorkspaceUnavailableError({ reason: cause.reason === "update-required" ? "update-required" : "unavailable", cause })) }));
       },
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     ),

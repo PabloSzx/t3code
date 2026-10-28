@@ -1,4 +1,5 @@
-import { ThreadId, WorkspaceOperation, type WorkspaceOperationContext } from "@t3tools/contracts";
+import { ThreadId, WorkspaceOperation, type ActiveWorkspace, type WorkspaceAvailability } from "@t3tools/contracts";
+export type { ActiveWorkspace, WorkspaceAvailability } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -18,17 +19,6 @@ import * as TreehouseWorktrees from "../vcs/TreehouseWorktrees.ts";
 import * as TreehouseLeases from "./treehouseLeases.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
 
-export interface ActiveWorkspace {
-  readonly state: "native" | "active";
-  readonly cwd: string;
-  readonly context: WorkspaceOperationContext;
-}
-export type WorkspaceAvailability =
-  | ActiveWorkspace
-  | {
-      readonly state: "released" | "unavailable";
-      readonly cwd: null;
-    };
 export class WorkspaceAccessError extends Schema.TaggedError<WorkspaceAccessError>()(
   "WorkspaceAccessError",
   { threadId: ThreadId, cause: Schema.Defect() },
@@ -38,7 +28,7 @@ export class WorkspaceAccessError extends Schema.TaggedError<WorkspaceAccessErro
   }
 }
 type ThreadLookup = ProjectionStore.ProjectionStoreV2 | ProjectService.ProjectService;
-type ActivationDependencies =
+export type ActivationDependencies =
   | ThreadLookup
   | EventSink.EventSinkV2
   | IdAllocator.IdAllocatorV2
@@ -193,6 +183,8 @@ const make = Effect.gen(function* () {
       effect.pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
+        // Allocation is trusted lifecycle work, not a continuation of a stale ordinary request.
+        Effect.provideService(WorkspaceOperation, undefined),
         Effect.mapError((cause) => new WorkspaceAccessError({ threadId: input.threadId, cause })),
       ),
   );

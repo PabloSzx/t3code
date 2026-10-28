@@ -1,7 +1,6 @@
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import {
   AuthOrchestrationOperateScope,
-  buildRemoteOpenUrl,
   EditorId,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -12,7 +11,6 @@ import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../key
 import { usePreferredEditor } from "../../editorPreferences";
 import { editorLabelForPlatform } from "../../editorLabels";
 import {
-  openRemoteEditorUrl,
   useRemoteCapableEditors,
   useRemoteOpenHint,
   useRemoteOpenState,
@@ -61,8 +59,7 @@ import {
 } from "../JetBrainsIcons";
 import { announce } from "~/lib/announce";
 import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
-import { shellEnvironment } from "~/state/shell";
-import { useAtomCommand } from "~/state/use-atom-command";
+import { useWorkspaceEditorAction } from "~/workspaceEditor";
 import {
   THREAD_DETAILS_PANEL_CHEVRON_CLASS,
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -228,7 +225,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   const isPanel = displayMode === "panel";
   const ActionGroup = isPanel ? "div" : Group;
   const panelAnchorRef = useRef<HTMLDivElement | null>(null);
-  const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
+  const openInEditorMutation = useWorkspaceEditorAction(environmentId, { isFile: openInCwdIsFile });
   const remote = useRemoteOpenState(environmentId);
   const canOperateHost = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const isHostEditorDenied = remote.mode === "local-exec" && !canOperateHost;
@@ -246,23 +243,7 @@ export const OpenInPicker = memo(function OpenInPicker({
     const editor = editorId ?? preferredEditor;
     if (!editor) return false;
     if (remote.mode === "remote-unavailable") return false;
-    if (remote.mode === "remote-links") {
-      const url = buildRemoteOpenUrl({
-        editor,
-        ...remote.host,
-        absolutePath: openInCwd,
-        isFile: openInCwdIsFile,
-      });
-      if (url === undefined) return false;
-      // Only record hint-seen/preferred when the shell actually accepted
-      // the URL (an older desktop build can refuse the editor scheme).
-      const opened = await openRemoteEditorUrl(url);
-      if (!opened) return false;
-      markRemoteHintSeen();
-      setPreferredEditor(editor);
-      return true;
-    }
-    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
+    if (remote.mode === "local-exec" && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
     const result = openInEditorMutation({
       environmentId,
       input: {
@@ -271,8 +252,12 @@ export const OpenInPicker = memo(function OpenInPicker({
         ...(revealFileManager && editor === "file-manager" ? { reveal: true } : {}),
       },
     });
-    setPreferredEditor(editor);
-    return (await result)._tag === "Success";
+    const opened = (await result)._tag === "Success";
+    if (opened) {
+      if (remote.mode === "remote-links") markRemoteHintSeen();
+      setPreferredEditor(editor);
+    }
+    return opened;
   };
 
   const openFavoriteEditorShortcutLabel = shortcutLabelForCommand(

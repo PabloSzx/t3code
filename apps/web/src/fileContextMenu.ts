@@ -12,8 +12,7 @@ import {
 } from "~/components/preview/fileExplorerLabel";
 import { readLocalApi } from "./localApi";
 import { serverEnvironment } from "./state/server";
-import { shellEnvironment } from "./state/shell";
-import { useAtomCommand } from "./state/use-atom-command";
+import { useWorkspaceEditorAction } from "./workspaceEditor";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { toastManager } from "./components/ui/toast";
 import { useAtomValue } from "@effect/atom-react";
@@ -87,7 +86,7 @@ function buildFileContextMenuItems(input: {
 }
 
 export function useFileContextMenu(environmentId: EnvironmentId | null) {
-  const openInEditor = useAtomCommand(shellEnvironment.openInEditor, { reportFailure: false });
+  const openInEditor = useWorkspaceEditorAction(environmentId);
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
 
   const availableEditors = serverConfig?.availableEditors ?? [];

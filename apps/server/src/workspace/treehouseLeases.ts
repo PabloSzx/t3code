@@ -12,6 +12,7 @@ import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
 import { ThreadId, type WorkspaceOperationContext } from "@t3tools/contracts";
 import { isNetworkPath } from "@t3tools/shared/path";
+import * as WorkspaceLifecycle from "./WorkspaceLifecycle.ts";
 
 const LeaseId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/));
 export const TreehouseLease = Schema.Struct({
@@ -215,6 +216,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const lifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   const registry = Option.isSome(config)
     ? path.join(config.value.stateDir, "treehouse-leases")
     : null;
@@ -260,6 +262,8 @@ const make = Effect.gen(function* () {
     const temp = `${input.target}.tmp`;
     yield* fs.writeFileString(temp, json, { mode: 0o600 });
     yield* fs.rename(temp, input.target);
+    if (Option.isSome(lifecycle) && path.basename(input.target) !== "use.json")
+      yield* lifecycle.value.invalidate;
   });
   const withLock: TreehouseLeaseStore["Service"]["withLock"] = Effect.fn(
     "TreehouseLeases.withLock",
@@ -322,7 +326,8 @@ const make = Effect.gen(function* () {
   const read = Effect.fn("TreehouseLeases.read")(
     function* (target: string) {
       const slot = yield* inspect(target);
-      if (slot === null) return null;
+      // Leases held outside T3 stay unmanaged; T3 never pins, binds, or returns them.
+      if (slot === null || !slot.lease_holder.startsWith("t3-code:")) return null;
       const root = yield* location();
       const id = yield* decodeLeaseId(slot.lease_id);
       const recordPath = path.join(root, "leases", `${id}.json`);

@@ -1,5 +1,7 @@
 import {
   type EnvironmentId,
+  type ThreadId,
+  type WorkspaceOperationContext,
   ProjectId,
   type ProjectReadFileResult,
   type ScopedProjectRef,
@@ -47,16 +49,20 @@ export type {
 export interface OptimisticProjectFile {
   readonly data: ProjectReadFileResult;
   readonly confirmedAgainst: object | null | undefined;
+  readonly workspace?: WorkspaceOperationContext;
 }
 
 export interface OptimisticProjectFileTarget {
   readonly environmentId: EnvironmentId;
+  readonly threadId?: ThreadId;
   readonly cwd: string;
   readonly relativePath: string;
 }
 
 function optimisticProjectFileKey(target: OptimisticProjectFileTarget): string {
-  return JSON.stringify([target.environmentId, target.cwd, target.relativePath]);
+  return target.threadId === undefined
+    ? JSON.stringify([target.environmentId, target.cwd, target.relativePath])
+    : JSON.stringify([target.environmentId, "thread", target.threadId, target.relativePath]);
 }
 
 function writtenFilePaths(

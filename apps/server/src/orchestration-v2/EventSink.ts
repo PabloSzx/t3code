@@ -16,6 +16,7 @@ import {
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
+import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -297,6 +298,10 @@ const layerBase: Layer.Layer<
         Effect.andThen(runOutcomes.record(outcomes)),
         Effect.andThen(eventStore.publishCommitted(events)),
         Effect.andThen(publishLiveEvents(events)),
+        Effect.andThen(events.some(({ event }) =>
+          event.type === "thread.created" || event.type === "thread.metadata-updated" ||
+          event.type === "thread.deleted" || event.type === "thread.unarchived"
+        ) ? WorkspaceLifecycle.invalidate : Effect.void),
       );
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.

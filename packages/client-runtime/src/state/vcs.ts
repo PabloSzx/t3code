@@ -4,6 +4,8 @@ import {
   type VcsListRefsResult,
   type VcsStatusResult,
   WS_METHODS,
+  WorkspaceOperation,
+  type WorkspaceOperationContext,
 } from "@t3tools/contracts";
 import { applyGitStatusStreamEvent } from "@t3tools/shared/git";
 import * as Duration from "effect/Duration";
@@ -19,6 +21,8 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcSubscriptionAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
+  registerWorkspaceQuery,
+  type EnvironmentRpcTarget,
 } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -126,7 +130,8 @@ export const makeCachedVcsRefsChanges = Effect.fn("CachedVcsRefsState.makeChange
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   const cache = yield* Persistence.EnvironmentCacheStore;
   const environmentId = supervisor.target.environmentId;
-  const useCache = canUseVcsRefsCache(input);
+  const workspace = yield* WorkspaceOperation;
+  const useCache = workspace?.generation == null && canUseVcsRefsCache(input);
   const cached =
     useCache && persistedCacheReadable
       ? yield* cache.loadVcsRefs(environmentId, input.cwd).pipe(
@@ -245,7 +250,7 @@ export function createVcsEnvironmentAtoms<R, E>(
    * cached page atom and collapsing paginated ref lists mid-scroll.
    */
   const listRefsFamily = Atom.family((key: string) => {
-    const [environmentId, input] = JSON.parse(key) as [EnvironmentId, VcsListRefsInput];
+    const [environmentId, input, workspace] = JSON.parse(key) as [EnvironmentId, VcsListRefsInput, WorkspaceOperationContext | null];
     return runtime
       .atom((get) => {
         const state = get(vcsRefsCacheStateAtom({ environmentId }));
@@ -254,17 +259,18 @@ export function createVcsEnvironmentAtoms<R, E>(
           input,
           state.revision,
           state.persistedCacheReadable,
-        );
+        ).pipe(Stream.provideService(WorkspaceOperation, workspace ?? undefined));
       })
       .pipe(
         Atom.setIdleTTL(VCS_REFS_IDLE_TTL_MS),
         Atom.withLabel(`environment-data:vcs:list-refs:${key}`),
       );
   });
-  const listRefs = (target: {
-    readonly environmentId: EnvironmentId;
-    readonly input: VcsListRefsInput;
-  }) => listRefsFamily(JSON.stringify([target.environmentId, target.input]));
+  const listRefs = (target: EnvironmentRpcTarget<VcsListRefsInput>) => registerWorkspaceQuery({
+    atom: listRefsFamily(JSON.stringify([target.environmentId, target.input, target.workspace ?? null])),
+    target,
+    bind: ({ workspace, input }) => listRefsFamily(JSON.stringify([target.environmentId, input, workspace])),
+  });
   const invalidateRefs = (
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,

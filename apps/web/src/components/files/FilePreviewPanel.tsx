@@ -119,9 +119,7 @@ import {
 } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
-  getOptimisticProjectFileQueryData,
-  getProjectFileContents,
-  setProjectFileQueryData,
+  useProjectFileScope,
   useProjectFileQuery,
 } from "./projectFilesQueryState";
 
@@ -682,6 +680,7 @@ function EditableFileSurface({
     relativePath,
     onPendingChange,
   });
+  const fileScope = useProjectFileScope({ environmentId, cwd, relativePath });
   // Retain file identity for echoed editor changes; only external changes replace the editor's draft.
   const [externalFile, setExternalFile] = useState(() =>
     editableFileContents(environmentId, cwd, relativePath, contents),
@@ -707,9 +706,9 @@ function EditableFileSurface({
     file,
     lineAnnotations: nextLineAnnotations,
   }: EditorChangeEvent<"file", FileCommentAnnotationGroup, undefined>) => {
-    if (file.contents === getProjectFileContents(environmentId, cwd, relativePath)) return;
+    if (file.contents === fileScope.contents()) return;
     setEditedContents(file.contents);
-    setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
+    fileScope.change(file.contents);
     saveCoordinator.change(file.contents);
     if (!nextLineAnnotations) return;
     const remapped = remapFileCommentAnnotations(nextLineAnnotations);
@@ -934,6 +933,7 @@ function RenderedMarkdownSurface({
     onPendingChange,
   });
 
+  const fileScope = useProjectFileScope({ environmentId, cwd, relativePath });
   return (
     <ScrollArea className="min-h-0 flex-1">
       <FileMarkdownPreview
@@ -947,11 +947,10 @@ function RenderedMarkdownSurface({
             ? undefined
             : ({ markerOffset, checked }) => {
                 const currentContents =
-                  getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
-                  contents;
+                  fileScope.data()?.contents ?? contents;
                 const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
                 if (nextContents === currentContents) return;
-                setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+                fileScope.change(nextContents);
                 saveCoordinator.change(nextContents);
               }
         }

@@ -15,7 +15,8 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { useEnvironmentThreadRefs, useThreadRefs, useQuietThreadShell } from "../state/entities";
+import { useEnvironmentThreadRefs, useThreadRefs, useQuietThreadShell, useProject } from "../state/entities";
+import { WorkspaceContext } from "../workspaceContext";
 import { useEnvironmentShellStatus } from "../state/shell";
 import { useEnvironmentThread } from "../state/threads";
 import {
@@ -53,6 +54,9 @@ export function ThreadRouteView({
   const serverThreadRef: ScopedThreadRef | null =
     target.kind === "server" ? target.threadRef : inferredThreadRef;
   const serverThread = useQuietThreadShell(serverThreadRef);
+  const workspaceProject = useProject(serverThreadRef && serverThread ? { environmentId: serverThreadRef.environmentId, projectId: serverThread.projectId } : null);
+  const editorRoot = serverThread?.worktreePath ?? workspaceProject?.workspaceRoot;
+  const editorSource = serverThreadRef && editorRoot !== undefined ? { ...serverThreadRef, root: editorRoot } : null;
   const backgroundSubmissionPending = useBackgroundDraftSubmissionPending(
     target.kind === "draft" ? serverThreadRef : null,
   );
@@ -197,7 +201,9 @@ export function ThreadRouteView({
       className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
       inert={background}
     >
-      <BackgroundThreadContext value={background}>{view}</BackgroundThreadContext>
+      <WorkspaceContext value={editorSource}>
+        <BackgroundThreadContext value={background}>{view}</BackgroundThreadContext>
+      </WorkspaceContext>
     </SidebarInset>
   );
 }

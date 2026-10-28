@@ -1,4 +1,5 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
+import { useScopedWorkspaceQuery } from "./workspace-access";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -25,7 +26,8 @@ function formatError(cause: Cause.Cause<unknown>): string {
 export function useEnvironmentQuery<A, E>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
 ): EnvironmentQueryView<A> {
-  const selectedAtom = atom ?? EMPTY_ASYNC_RESULT_ATOM;
+  const scoped = useScopedWorkspaceQuery(atom);
+  const selectedAtom = scoped ?? EMPTY_ASYNC_RESULT_ATOM;
   const result = useAtomValue(selectedAtom);
   const refresh = useAtomRefresh(selectedAtom);
   return {

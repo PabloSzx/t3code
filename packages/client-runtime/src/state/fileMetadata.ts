@@ -6,6 +6,8 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   WS_METHODS,
+  WorkspaceOperation,
+  type WorkspaceOperationContext,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import * as Clock from "effect/Clock";
@@ -24,7 +26,7 @@ import {
   EnvironmentRpcUnavailableError,
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
-import { createEnvironmentQueryAtomFamily } from "./runtime.ts";
+import { createEnvironmentQueryAtomFamily, registerWorkspaceQuery, type EnvironmentRpcTarget } from "./runtime.ts";
 
 const METADATA_STALE_TIME_MS = 60_000;
 const METADATA_CACHE_LIMIT = 1024;
@@ -47,14 +49,16 @@ class FileMetadataRequest extends Request.Class<
     session: RpcSession;
     supervisor: EnvironmentSupervisor.EnvironmentSupervisor["Service"];
     retained?: RetainedMetadata;
+    workspace?: WorkspaceOperationContext;
   },
   FilesystemEntryMetadata | null,
   EnvironmentRpcFailure<typeof WS_METHODS.filesystemGetMetadata> | EnvironmentRpcUnavailableError
 > {}
 
-export function createFileMetadataAtoms<R, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
-) {
+function makeFileMetadataAtoms<R, E>({ runtime, workspace }: {
+  readonly runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>;
+  readonly workspace?: WorkspaceOperationContext;
+}) {
   const cache = new WeakMap<RpcSession, Map<string, CachedMetadata>>();
   const invalidationVersions = new WeakMap<RpcSession, number>();
   const inFlight = new WeakMap<RpcSession, Map<string, Set<{ valid: boolean }>>>();
@@ -146,6 +150,7 @@ export function createFileMetadataAtoms<R, E>(
               EnvironmentSupervisor.EnvironmentSupervisor,
               entries[0].request.supervisor,
             ),
+            Effect.provideService(WorkspaceOperation, workspace),
           );
           const now = yield* Clock.currentTimeMillis;
           const byPath = new Map(paths.map((path, index) => [path, result.entries[index] ?? null]));
@@ -213,6 +218,7 @@ export function createFileMetadataAtoms<R, E>(
           session: session.value,
           supervisor,
           ...(retained ? { retained } : {}),
+          ...(workspace === undefined ? {} : { workspace }),
         }),
         resolver,
       );
@@ -332,5 +338,37 @@ export function createFileMetadataAtoms<R, E>(
     seedAfterRead,
     invalidate,
     refreshPath,
+  };
+}
+
+export function createFileMetadataAtoms<R, E>(runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>) {
+  const native = makeFileMetadataAtoms({ runtime });
+  const generations = new Map<string, typeof native>();
+  const select = (workspace: WorkspaceOperationContext | undefined) => {
+    if (workspace?.generation == null) return native;
+    const key = JSON.stringify(workspace);
+    let current = generations.get(key);
+    if (current === undefined) {
+      current = makeFileMetadataAtoms({ runtime, workspace });
+      generations.set(key, current);
+      if (generations.size > 32) generations.delete(generations.keys().next().value!);
+    }
+    return current;
+  };
+  const metadata = (target: EnvironmentRpcTarget<FileMetadataInput>) => registerWorkspaceQuery({
+    atom: select(target.workspace).metadata(target),
+    target,
+    bind: (captured) => select(captured.workspace).metadata({ ...target, ...captured }),
+  });
+  return {
+    metadata,
+    retainThread: native.retainThread,
+    rememberEntries: (...args: Parameters<typeof native.rememberEntries>) => Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberEntries(...args)),
+    rememberFile: (...args: Parameters<typeof native.rememberFile>) => Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberFile(...args)),
+    seedAfterRead: native.seedAfterRead,
+    invalidate: (path: string) => Effect.forEach([native, ...generations.values()], (entry) => entry.invalidate(path), { discard: true }),
+    refreshPath: (environmentId: EnvironmentId, path: string, registry: AtomRegistry.AtomRegistry) => {
+      for (const entry of [native, ...generations.values()]) entry.refreshPath(environmentId, path, registry);
+    },
   };
 }

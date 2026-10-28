@@ -7,6 +7,7 @@ import {
   AuthOrchestrationOperateScope,
   EnvironmentAuthorizationError,
   type EnvironmentId,
+  type WorkspaceUnavailableError,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -20,9 +21,9 @@ export const ORCHESTRATION_OPERATE_DENIED_MESSAGE =
 export function useOrchestrationCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
   command: AtomCommand<W, A, E>,
   options?: string | AtomCommandOptions,
-): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> {
+): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>> {
   const run = useAtomCommand(command, options);
-  return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError>> => {
+  return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>> => {
     if (!readEnvironmentScope(value.environmentId, AuthOrchestrationOperateScope)) {
       return AsyncResult.failure(
         Cause.fail(

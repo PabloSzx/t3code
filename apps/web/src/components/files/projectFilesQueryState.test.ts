@@ -1,5 +1,5 @@
 import type { ProjectReadFileResult } from "@t3tools/contracts";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -23,6 +23,7 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
+  createProjectFileScope,
   clearProjectFileQueryData,
   confirmProjectFileQueryData,
   getOptimisticProjectFileQueryData,
@@ -176,5 +177,48 @@ describe("project files queries", () => {
     expect(
       confirmProjectFileQueryData(environmentId, "/repo", "convex.json", '{"nodeVersion":"22"}'),
     ).toBe(true);
+  });
+  it("keeps a returned workspace's unsaved draft out of the checkout that reuses its path", () => {
+    vi.stubGlobal("window", {});
+    const threadA = ThreadId.make("draft-owner-a");
+    const generationA = "a".repeat(32);
+    const scopeA = createProjectFileScope({
+      environmentId,
+      cwd: "/pool/1/repo",
+      relativePath: "notes.md",
+      threadId: threadA,
+      workspace: { threadId: threadA, generation: generationA },
+    });
+    scopeA.change("unsaved from A");
+
+    // A is returned, then resumed in a different physical slot with a new lease generation.
+    const resumedA = createProjectFileScope({
+      environmentId,
+      cwd: "/pool/2/repo",
+      relativePath: "notes.md",
+      threadId: threadA,
+      workspace: { threadId: threadA, generation: "b".repeat(32) },
+    });
+    expect(resumedA.data()?.contents).toBe("unsaved from A");
+    expect(resumedA.unsaved()).toBeNull();
+    expect(resumedA.requiresRetry()).toBe(true);
+    expect(resumedA.confirm("unsaved from A")).toBe(false);
+
+    // Another thread now leases A's old slot path; it never sees A's text.
+    const threadB = ThreadId.make("slot-reuser-b");
+    const scopeB = createProjectFileScope({
+      environmentId,
+      cwd: "/pool/1/repo",
+      relativePath: "notes.md",
+      threadId: threadB,
+      workspace: { threadId: threadB, generation: "c".repeat(32) },
+    });
+    expect(scopeB.data()).toBeNull();
+    expect(scopeB.unsaved()).toBeNull();
+
+    // An explicit edit after resume adopts the text for the new generation and allows saving.
+    resumedA.change("unsaved from A");
+    expect(resumedA.unsaved()?.contents).toBe("unsaved from A");
+    expect(resumedA.requiresRetry()).toBe(false);
   });
 });

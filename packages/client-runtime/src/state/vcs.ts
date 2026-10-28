@@ -250,7 +250,11 @@ export function createVcsEnvironmentAtoms<R, E>(
    * cached page atom and collapsing paginated ref lists mid-scroll.
    */
   const listRefsFamily = Atom.family((key: string) => {
-    const [environmentId, input, workspace] = JSON.parse(key) as [EnvironmentId, VcsListRefsInput, WorkspaceOperationContext | null];
+    const [environmentId, input, workspace] = JSON.parse(key) as [
+      EnvironmentId,
+      VcsListRefsInput,
+      WorkspaceOperationContext | null,
+    ];
     return runtime
       .atom((get) => {
         const state = get(vcsRefsCacheStateAtom({ environmentId }));
@@ -266,11 +270,15 @@ export function createVcsEnvironmentAtoms<R, E>(
         Atom.withLabel(`environment-data:vcs:list-refs:${key}`),
       );
   });
-  const listRefs = (target: EnvironmentRpcTarget<VcsListRefsInput>) => registerWorkspaceQuery({
-    atom: listRefsFamily(JSON.stringify([target.environmentId, target.input, target.workspace ?? null])),
-    target,
-    bind: ({ workspace, input }) => listRefsFamily(JSON.stringify([target.environmentId, input, workspace])),
-  });
+  const listRefs = (target: EnvironmentRpcTarget<VcsListRefsInput>) =>
+    registerWorkspaceQuery({
+      atom: listRefsFamily(
+        JSON.stringify([target.environmentId, target.input, target.workspace ?? null]),
+      ),
+      target,
+      bind: ({ workspace, input }) =>
+        listRefsFamily(JSON.stringify([target.environmentId, input, workspace])),
+    });
   const invalidateRefs = (
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,

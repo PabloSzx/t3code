@@ -190,19 +190,27 @@ it.effect("separates captured workspace query caches and subscription identities
   Effect.gen(function* () {
     const h = yield* makeEnvironmentQueryHarness(Effect.void);
     const query = createEnvironmentQueryAtomFamily(h.runtime, {
-      label: "workspace-query", execute: () => WorkspaceOperation,
+      label: "workspace-query",
+      execute: () => WorkspaceOperation,
     });
     const subscription = createEnvironmentSubscriptionAtomFamily(h.runtime, {
-      label: "workspace-subscription", subscribe: () => Stream.fromEffect(WorkspaceOperation),
+      label: "workspace-subscription",
+      subscribe: () => Stream.fromEffect(WorkspaceOperation),
     });
-    const a = { environmentId: QUERY_ENVIRONMENT.environmentId, input: undefined,
-      workspace: { threadId: ThreadId.make("a"), generation: "a".repeat(32) } };
+    const a = {
+      environmentId: QUERY_ENVIRONMENT.environmentId,
+      input: undefined,
+      workspace: { threadId: ThreadId.make("a"), generation: "a".repeat(32) },
+    };
     const b = { ...a, workspace: { threadId: ThreadId.make("b"), generation: "b".repeat(32) } };
     expect(query(a)).not.toBe(query(b));
     expect(subscription(a)).not.toBe(subscription(b));
     const registry = yield* mountEnvironmentQuery(query(a));
     for (const atom of [query(b), subscription(a), subscription(b)]) {
-      yield* Effect.acquireRelease(Effect.sync(() => registry.mount(atom)), (unmount) => Effect.sync(unmount));
+      yield* Effect.acquireRelease(
+        Effect.sync(() => registry.mount(atom)),
+        (unmount) => Effect.sync(unmount),
+      );
     }
     expect(yield* readEnvironmentQuery(registry, query(a))).toEqual(a.workspace);
     expect(yield* readEnvironmentQuery(registry, query(b))).toEqual(b.workspace);
@@ -215,18 +223,39 @@ it.effect("binds view-local workspace queries without sharing a recycled path's 
   Effect.gen(function* () {
     const h = yield* makeEnvironmentQueryHarness(Effect.void);
     const query = createEnvironmentQueryAtomFamily(h.runtime, {
-      label: "workspace-view", execute: () => WorkspaceOperation,
+      label: "workspace-view",
+      execute: () => WorkspaceOperation,
     });
-    const target = { environmentId: QUERY_ENVIRONMENT.environmentId, input: { cwd: "/pool/shared" } };
+    const target = {
+      environmentId: QUERY_ENVIRONMENT.environmentId,
+      input: { cwd: "/pool/shared" },
+    };
     const contextA = { threadId: ThreadId.make("view-a"), generation: "a".repeat(32) };
     const contextB = { threadId: ThreadId.make("view-b"), generation: "b".repeat(32) };
-    const a = scopeWorkspaceQuery({ atom: query(target), environmentId: target.environmentId, availability: { state: "active", cwd: target.input.cwd, context: contextA } })!;
-    const b = scopeWorkspaceQuery({ atom: query(target), environmentId: target.environmentId, availability: { state: "active", cwd: target.input.cwd, context: contextB } })!;
+    const a = scopeWorkspaceQuery({
+      atom: query(target),
+      environmentId: target.environmentId,
+      availability: { state: "active", cwd: target.input.cwd, context: contextA },
+    })!;
+    const b = scopeWorkspaceQuery({
+      atom: query(target),
+      environmentId: target.environmentId,
+      availability: { state: "active", cwd: target.input.cwd, context: contextB },
+    })!;
     const registry = yield* mountEnvironmentQuery(a);
-    yield* Effect.acquireRelease(Effect.sync(() => registry.mount(b)), (unmount) => Effect.sync(unmount));
+    yield* Effect.acquireRelease(
+      Effect.sync(() => registry.mount(b)),
+      (unmount) => Effect.sync(unmount),
+    );
     expect(yield* readEnvironmentQuery(registry, a)).toEqual(contextA);
     expect(yield* readEnvironmentQuery(registry, b)).toEqual(contextB);
-    expect(scopeWorkspaceQuery({ atom: query(target), environmentId: target.environmentId, availability: { state: "released", cwd: null } })).toBeNull();
+    expect(
+      scopeWorkspaceQuery({
+        atom: query(target),
+        environmentId: target.environmentId,
+        availability: { state: "released", cwd: null },
+      }),
+    ).toBeNull();
   }).pipe(Effect.scoped),
 );
 

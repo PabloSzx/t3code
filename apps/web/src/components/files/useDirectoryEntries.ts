@@ -6,7 +6,11 @@ import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 import { projectEnvironment } from "~/state/projects";
 
 export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
-  const readEntries = useAtomQueryRunner(projectEnvironment.listEntries, { refresh: true, reportFailure: false, reportDefect: false });
+  const readEntries = useAtomQueryRunner(projectEnvironment.listEntries, {
+    refresh: true,
+    reportFailure: false,
+    reportDefect: false,
+  });
   const [directories, setDirectories] = useState(new Map<string, readonly ProjectEntry[]>());
   const [errors, setErrors] = useState(new Map<string, string>());
   const [pending, setPending] = useState(1);
@@ -27,9 +31,7 @@ export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
     const request = (async () => {
       if (running.current >= 4) await new Promise<void>((resolve) => waiting.current.push(resolve));
       else running.current++;
-      const result = active.current
-        ? await readEntries(target)
-        : undefined;
+      const result = active.current ? await readEntries(target) : undefined;
       const next = waiting.current.shift();
       if (next) next();
       else running.current--;

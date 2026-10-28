@@ -3,7 +3,12 @@ import { createCommandPermissions } from "./commandPermissions.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
 import { reuseUnchanged } from "./serverConfigProjection.ts";
 import { registerWorkspaceQuery } from "./workspaceTargets.ts";
-export { hasWorkspaceTargets, rebaseWorkspaceInput, registerWorkspaceQuery, scopeWorkspaceQuery } from "./workspaceTargets.ts";
+export {
+  hasWorkspaceTargets,
+  rebaseWorkspaceInput,
+  registerWorkspaceQuery,
+  scopeWorkspaceQuery,
+} from "./workspaceTargets.ts";
 export { runStreamInEnvironment, followStreamInEnvironment } from "./environmentStreams.ts";
 import {
   type ClientGuardedRpcTag,
@@ -491,18 +496,18 @@ export function environmentRpcKey<Input>(target: EnvironmentRpcTarget<Input>): s
   return JSON.stringify([target.environmentId, target.input, target.workspace ?? null]);
 }
 
-const verifyWorkspaceDestination = Effect.fn("EnvironmentRpc.verifyWorkspaceDestination")(function* (
-  target: EnvironmentRpcTarget<unknown>,
-) {
-  if (target.workspace === undefined) return;
-  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-  if (supervisor.target.environmentId !== target.environmentId) {
-    return yield* new EnvironmentRpcUnavailableError({
-      environmentId: target.environmentId,
-      message: "A captured workspace cannot be routed to another environment.",
-    });
-  }
-});
+const verifyWorkspaceDestination = Effect.fn("EnvironmentRpc.verifyWorkspaceDestination")(
+  function* (target: EnvironmentRpcTarget<unknown>) {
+    if (target.workspace === undefined) return;
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    if (supervisor.target.environmentId !== target.environmentId) {
+      return yield* new EnvironmentRpcUnavailableError({
+        environmentId: target.environmentId,
+        message: "A captured workspace cannot be routed to another environment.",
+      });
+    }
+  },
+);
 
 function parseEnvironmentRpcKey<Input>(key: string): EnvironmentRpcTarget<Input> {
   const decoded = JSON.parse(key) as [EnvironmentIdType, Input, WorkspaceOperationContext | null];
@@ -733,11 +738,12 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
         : intervalQuery.pipe(refreshOnSignalWhileRead(refreshTrigger, isFinal))
     ).pipe(Atom.setIdleTTL(idleTtlMs), Atom.withLabel(`${options.label}:${key}`));
   });
-  return (target) => registerWorkspaceQuery({
-    atom: family(environmentRpcKey(target)),
-    target,
-    bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
-  });
+  return (target) =>
+    registerWorkspaceQuery({
+      atom: family(environmentRpcKey(target)),
+      target,
+      bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
+    });
 }
 
 export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
@@ -756,9 +762,15 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
         Stream.suspend(() =>
           followStreamInEnvironment(
             target.environmentId,
-            Stream.unwrap(verifyWorkspaceDestination(target).pipe(Effect.as(
-              options.subscribe(target.input).pipe(Stream.provideService(WorkspaceOperation, target.workspace)),
-            ))),
+            Stream.unwrap(
+              verifyWorkspaceDestination(target).pipe(
+                Effect.as(
+                  options
+                    .subscribe(target.input)
+                    .pipe(Stream.provideService(WorkspaceOperation, target.workspace)),
+                ),
+              ),
+            ),
           ),
         ).pipe(options.completeWhen ? Stream.takeUntil(options.completeWhen) : (stream) => stream),
       )
@@ -771,11 +783,12 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
         ),
       );
   });
-  return (target: EnvironmentRpcTarget<Input>) => registerWorkspaceQuery({
-    atom: family(environmentRpcKey(target)),
-    target,
-    bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
-  });
+  return (target: EnvironmentRpcTarget<Input>) =>
+    registerWorkspaceQuery({
+      atom: family(environmentRpcKey(target)),
+      target,
+      bind: (captured) => family(environmentRpcKey({ ...target, ...captured })),
+    });
 }
 
 export function createEnvironmentCommand<R, ER, Input, A, E>(
@@ -790,15 +803,23 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
   return createRuntimeCommand(runtime, {
     label: options.label,
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
-    ...(options.concurrency === undefined ? {} : {
-      concurrency: options.concurrency.mode === "parallel" ? options.concurrency : {
-        mode: options.concurrency.mode,
-        key: (target: EnvironmentRpcTarget<Input>) => JSON.stringify([
-          options.concurrency?.mode === "parallel" ? null : options.concurrency?.key(target),
-          target.workspace ?? null,
-        ]),
-      },
-    }),
+    ...(options.concurrency === undefined
+      ? {}
+      : {
+          concurrency:
+            options.concurrency.mode === "parallel"
+              ? options.concurrency
+              : {
+                  mode: options.concurrency.mode,
+                  key: (target: EnvironmentRpcTarget<Input>) =>
+                    JSON.stringify([
+                      options.concurrency?.mode === "parallel"
+                        ? null
+                        : options.concurrency?.key(target),
+                      target.workspace ?? null,
+                    ]),
+                },
+        }),
     execute: (target: EnvironmentRpcTarget<Input>, registry) =>
       runInEnvironment(
         target.environmentId,

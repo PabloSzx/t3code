@@ -68,6 +68,19 @@ const reactHooks = vi.hoisted(() => {
       refs[index] ??= { current: initialValue };
       return refs[index] as { current: A };
     },
+    useState<A>(initialValue: A | (() => A)): [A, (next: A) => void] {
+      const index = nextIndex();
+      refs[index] ??= {
+        current: typeof initialValue === "function" ? (initialValue as () => A)() : initialValue,
+      };
+      const ref = refs[index] as { current: A };
+      return [
+        ref.current,
+        (next) => {
+          ref.current = next;
+        },
+      ];
+    },
   };
 });
 
@@ -86,6 +99,7 @@ vi.mock("react", async (importOriginal) => {
     useEffect: reactHooks.useEffect,
     useMemo: <A,>(factory: () => A) => factory(),
     useRef: reactHooks.useRef,
+    useState: reactHooks.useState,
   };
 });
 

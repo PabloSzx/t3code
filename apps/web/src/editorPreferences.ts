@@ -1,4 +1,5 @@
 import {
+  AuthOrchestrationOperateScope,
   EDITORS,
   EditorId,
   EnvironmentAuthorizationError,
@@ -13,6 +14,7 @@ import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
 import { AsyncResult } from "effect/reactivity";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "./hooks/useLocalStorage";
+import { readEnvironmentScope } from "./state/session";
 import { useWorkspaceEditorAction } from "./workspaceEditor";
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
@@ -84,6 +86,16 @@ export function useOpenInPreferredEditor(
         Cause.fail(
           new PreferredEditorEnvironmentRequiredError({
             targetPath,
+          }),
+        ),
+      );
+    }
+    if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) {
+      return AsyncResult.failure(
+        Cause.fail(
+          new EnvironmentAuthorizationError({
+            requiredScope: AuthOrchestrationOperateScope,
+            message: "This connection cannot open an editor on this environment.",
           }),
         ),
       );

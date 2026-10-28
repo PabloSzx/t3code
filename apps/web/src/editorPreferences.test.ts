@@ -14,9 +14,7 @@ const state = vi.hoisted(() => ({
   setPreference: vi.fn(),
 }));
 
-vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
-vi.mock("./state/shell", () => ({ shellEnvironment: { openInEditor: "openInEditor" } }));
-vi.mock("./state/use-atom-command", () => ({ useAtomCommand: () => state.run }));
+vi.mock("./workspaceEditor", () => ({ useWorkspaceEditorAction: () => state.run }));
 vi.mock("./state/session", () => ({
   readEnvironmentScope: (environmentId: string, scope: string) =>
     scope === AuthOrchestrationOperateScope && state.allowed.has(environmentId),

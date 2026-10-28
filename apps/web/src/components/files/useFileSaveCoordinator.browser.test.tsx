@@ -19,11 +19,31 @@ vi.mock(import("~/state/use-atom-command"), async (original) => ({
   ...(await original()),
   useAtomCommand: (() => writeFile) as never,
 }));
-vi.mock(import("./projectFilesQueryState"), async (original) => ({
-  ...(await original()),
-  confirmProjectFileQueryData: confirmFile,
-  getUnsavedProjectFileQueryData: getUnsavedFile,
-}));
+vi.mock(import("./projectFilesQueryState"), async (original) => {
+  const actual = await original();
+  const scopes = new Map<string, ReturnType<typeof actual.useProjectFileScope>>();
+  return {
+    ...actual,
+    useProjectFileScope: ((options: {
+      environmentId: string;
+      cwd: string;
+      relativePath: string;
+    }) => {
+      const key = JSON.stringify(options);
+      let scope = scopes.get(key);
+      if (scope === undefined) {
+        scope = {
+          ...actual.createProjectFileScope(options as never),
+          unsaved: () => getUnsavedFile(options.environmentId, options.cwd, options.relativePath),
+          confirm: (contents: string) =>
+            confirmFile(options.environmentId, options.cwd, options.relativePath, contents),
+        };
+        scopes.set(key, scope);
+      }
+      return scope;
+    }) as never,
+  };
+});
 
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 

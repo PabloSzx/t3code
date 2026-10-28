@@ -62,13 +62,14 @@ export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
 const decodePrepareThread = Schema.decodeUnknownSync(GitPreparePullRequestThreadInput);
 const decodeStackedAction = Schema.decodeUnknownSync(GitRunStackedActionInput);
+const decodeWorkspaceEditor = Schema.decodeUnknownSync(WorkspaceEditorInput);
 
 export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
   if (method === WS_METHODS.workspaceOpenEditor) {
-    const editor = Schema.decodeUnknownSync(WorkspaceEditorInput)(input);
+    const editor = decodeWorkspaceEditor(input);
     return editor.remote !== undefined && editor.activate !== true
       ? [AuthFilesystemReadScope]
       : [AuthOrchestrationOperateScope, AuthFilesystemReadScope];

@@ -684,7 +684,9 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 );
 
 const layerRuntimeDependencies = WorkspaceActions.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(RuntimeLayer.layerEventSink, ProjectionStoreV2.layer, WorkspaceActionIds.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(RuntimeLayer.layerEventSink, ProjectionStoreV2.layer, WorkspaceActionIds.layer),
+  ),
   Layer.provideMerge(layerRuntimeCoreDependencies),
   Layer.provideMerge(layerUsage),
   Layer.provideMerge(layerBackground),

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
@@ -8,7 +9,6 @@ import {
   type ProjectReadFileResult,
   T3_PROJECT_FILE_NAME,
 } from "@t3tools/contracts";
-import { useMemo } from "react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -149,15 +149,29 @@ export function useProjectFileScope(
   const threadId = source?.environmentId === options.environmentId ? source.threadId : undefined;
   const workspace =
     threadId !== undefined && availability?.cwd != null ? availability.context : undefined;
-  return useMemo(
-    () =>
-      createProjectFileScope({
-        ...options,
-        ...(threadId === undefined ? {} : { threadId }),
-        ...(workspace === undefined ? {} : { workspace }),
-      }),
-    [options.environmentId, options.cwd, options.relativePath, threadId, workspace],
-  );
+  const scoped: ProjectFileScopeOptions = {
+    ...options,
+    ...(threadId === undefined ? {} : { threadId }),
+    ...(workspace === undefined ? {} : { workspace }),
+  };
+  // The save session keys on scope identity; rebuild only when the file or lease generation changes.
+  const [current, setCurrent] = useState(() => ({
+    options: scoped,
+    scope: createProjectFileScope(scoped),
+  }));
+  const previous = current.options;
+  if (
+    previous.environmentId !== scoped.environmentId ||
+    previous.cwd !== scoped.cwd ||
+    previous.relativePath !== scoped.relativePath ||
+    previous.threadId !== scoped.threadId ||
+    previous.workspace?.generation !== scoped.workspace?.generation
+  ) {
+    const next = { options: scoped, scope: createProjectFileScope(scoped) };
+    setCurrent(next);
+    return next.scope;
+  }
+  return current.scope;
 }
 
 interface ProjectQueryState<A> {

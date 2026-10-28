@@ -463,7 +463,9 @@ export class ExternalLauncher extends Context.Service<
     /** Requires file-manager in resolveAvailableEditors; Linux relies on its directory-handler probe. */
     readonly resolveFileManagerRevealKind: () => Effect.Effect<FileManagerRevealKind | undefined>;
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
-    readonly launchEditor: (input: LaunchEditorInput) => Effect.Effect<void, ExternalLauncherError | WorkspaceUnavailableError>;
+    readonly launchEditor: (
+      input: LaunchEditorInput,
+    ) => Effect.Effect<void, ExternalLauncherError | WorkspaceUnavailableError>;
   }
 >()("t3/process/externalLauncher") {}
 
@@ -843,10 +845,22 @@ export const make = Effect.gen(function* () {
           onNone: () => input.cwd,
           onSome: (parsed) => parsed.path,
         });
-        return yield* access.use({
-          targets: [target],
-          effect: provideCommandResolutionServices(launchEditor(input)),
-        }).pipe(Effect.catchTags({ TreehouseLeaseError: (cause) => Effect.fail(new WorkspaceUnavailableError({ reason: cause.reason === "update-required" ? "update-required" : "unavailable", cause })) }));
+        return yield* access
+          .use({
+            targets: [target],
+            effect: provideCommandResolutionServices(launchEditor(input)),
+          })
+          .pipe(
+            Effect.catchTags({
+              TreehouseLeaseError: (cause) =>
+                Effect.fail(
+                  new WorkspaceUnavailableError({
+                    reason: cause.reason === "update-required" ? "update-required" : "unavailable",
+                    cause,
+                  }),
+                ),
+            }),
+          );
       },
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     ),

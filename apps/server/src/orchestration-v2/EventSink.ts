@@ -298,10 +298,17 @@ const layerBase: Layer.Layer<
         Effect.andThen(runOutcomes.record(outcomes)),
         Effect.andThen(eventStore.publishCommitted(events)),
         Effect.andThen(publishLiveEvents(events)),
-        Effect.andThen(events.some(({ event }) =>
-          event.type === "thread.created" || event.type === "thread.metadata-updated" ||
-          event.type === "thread.deleted" || event.type === "thread.unarchived"
-        ) ? WorkspaceLifecycle.invalidate : Effect.void),
+        Effect.andThen(
+          events.some(
+            ({ event }) =>
+              event.type === "thread.created" ||
+              event.type === "thread.metadata-updated" ||
+              event.type === "thread.deleted" ||
+              event.type === "thread.unarchived",
+          )
+            ? WorkspaceLifecycle.invalidate
+            : Effect.void,
+        ),
       );
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.

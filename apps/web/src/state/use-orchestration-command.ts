@@ -21,9 +21,15 @@ export const ORCHESTRATION_OPERATE_DENIED_MESSAGE =
 export function useOrchestrationCommand<W extends { readonly environmentId: EnvironmentId }, A, E>(
   command: AtomCommand<W, A, E>,
   options?: string | AtomCommandOptions,
-): (value: W) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>> {
+): (
+  value: W,
+) => Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>> {
   const run = useAtomCommand(command, options);
-  return async (value: W): Promise<AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>> => {
+  return async (
+    value: W,
+  ): Promise<
+    AtomCommandResult<A, E | EnvironmentAuthorizationError | WorkspaceUnavailableError>
+  > => {
     if (!readEnvironmentScope(value.environmentId, AuthOrchestrationOperateScope)) {
       return AsyncResult.failure(
         Cause.fail(

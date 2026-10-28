@@ -1,4 +1,9 @@
-import { AuthOrchestrationOperateScope, EnvironmentId, ThreadId, type EditorId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  EnvironmentId,
+  ThreadId,
+  type EditorId,
+} from "@t3tools/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { Cause } from "effect";
 import { AsyncResult } from "effect/reactivity";
@@ -40,7 +45,8 @@ vi.mock(import("../../state/session"), async (importOriginal) => {
 });
 vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useAtomCommand: ((command: unknown) => command === shellEnvironment.completeWorkspaceAction ? state.complete : state.run) as never,
+  useAtomCommand: ((command: unknown) =>
+    command === shellEnvironment.completeWorkspaceAction ? state.complete : state.run) as never,
 }));
 vi.mock(import("../../state/environments"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -111,7 +117,17 @@ async function setup() {
           compact={!panel}
         />
       );
-      await screen.rerender(<WorkspaceContext value={{ environmentId: selected, threadId: ThreadId.make("editor-a"), root: "/work/project" }}>{node}</WorkspaceContext>);
+      await screen.rerender(
+        <WorkspaceContext
+          value={{
+            environmentId: selected,
+            threadId: ThreadId.make("editor-a"),
+            root: "/work/project",
+          }}
+        >
+          {node}
+        </WorkspaceContext>,
+      );
     });
   }
 
@@ -168,21 +184,38 @@ async function setup() {
 it("uses host preparation for a remote editor and acknowledges only after the URI opener accepts", async () => {
   await using fixture = await setup();
   state.remote = { mode: "remote-links", host: { kind: "ssh-alias", host: "dev-host" } };
-  state.run.mockResolvedValue(AsyncResult.success({ url: "vscode://guarded/verified-target", reservationId: "handoff-a" }));
+  state.run.mockResolvedValue(
+    AsyncResult.success({ url: "vscode://guarded/verified-target", reservationId: "handoff-a" }),
+  );
   let acceptHandoff!: (accepted: boolean) => void;
-  const handoff = new Promise<boolean>((resolve) => { acceptHandoff = resolve; });
+  const handoff = new Promise<boolean>((resolve) => {
+    acceptHandoff = resolve;
+  });
   state.openUrl.mockReturnValue(handoff);
   await fixture.renderPicker();
   expect(state.run).not.toHaveBeenCalled();
   await fixture.click(fixture.primaryButton());
-  await vi.waitFor(() => expect(state.openUrl).toHaveBeenCalledWith("vscode://guarded/verified-target"));
-  expect(state.run).toHaveBeenCalledWith({ environmentId: selected, input: {
-    cwd: "/work/project", editor: "vscode", workspace: { threadId: ThreadId.make("editor-a"), root: "/work/project" },
-    remote: { host: "dev-host", isFile: false }, activate: false,
-  } });
+  await vi.waitFor(() =>
+    expect(state.openUrl).toHaveBeenCalledWith("vscode://guarded/verified-target"),
+  );
+  expect(state.run).toHaveBeenCalledWith({
+    environmentId: selected,
+    input: {
+      cwd: "/work/project",
+      editor: "vscode",
+      workspace: { threadId: ThreadId.make("editor-a"), root: "/work/project" },
+      remote: { host: "dev-host", isFile: false },
+      activate: false,
+    },
+  });
   expect(state.complete).not.toHaveBeenCalled();
   await act(async () => acceptHandoff(true));
-  await vi.waitFor(() => expect(state.complete).toHaveBeenCalledWith({ environmentId: selected, input: { reservationId: "handoff-a" } }));
+  await vi.waitFor(() =>
+    expect(state.complete).toHaveBeenCalledWith({
+      environmentId: selected,
+      input: { reservationId: "handoff-a" },
+    }),
+  );
   expect(state.setPreferred).toHaveBeenCalledWith("vscode");
 });
 

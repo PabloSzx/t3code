@@ -10,11 +10,7 @@ import { BackgroundThreadContext } from "./backgroundThread";
 import { isOpenFavoriteEditorShortcut, shortcutLabelForCommand } from "../../keybindings";
 import { usePreferredEditor } from "../../editorPreferences";
 import { editorLabelForPlatform } from "../../editorLabels";
-import {
-  useRemoteCapableEditors,
-  useRemoteOpenHint,
-  useRemoteOpenState,
-} from "../../remoteOpen";
+import { useRemoteCapableEditors, useRemoteOpenHint, useRemoteOpenState } from "../../remoteOpen";
 import { useEnvironment } from "../../state/environments";
 import { ChevronDownIcon, FolderClosedIcon, SquareArrowOutUpRightIcon } from "lucide-react";
 
@@ -243,7 +239,11 @@ export const OpenInPicker = memo(function OpenInPicker({
     const editor = editorId ?? preferredEditor;
     if (!editor) return false;
     if (remote.mode === "remote-unavailable") return false;
-    if (remote.mode === "local-exec" && !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return false;
+    if (
+      remote.mode === "local-exec" &&
+      !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+    )
+      return false;
     const result = openInEditorMutation({
       environmentId,
       input: {

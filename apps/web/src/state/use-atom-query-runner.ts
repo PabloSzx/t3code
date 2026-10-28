@@ -25,8 +25,20 @@ export function useAtomQueryRunner<T, A, E>(
 
   return (target: T) => {
     const original = family(target);
-    const atom = source === null ? original : scopeWorkspaceQuery({ atom: original, environmentId: source.environmentId, threadId: source.threadId, root: source.root, availability });
-    if (atom === null) return Promise.resolve(AsyncResult.failure(Cause.fail(new WorkspaceUnavailableError({ reason: "unavailable" }))));
+    const atom =
+      source === null
+        ? original
+        : scopeWorkspaceQuery({
+            atom: original,
+            environmentId: source.environmentId,
+            threadId: source.threadId,
+            root: source.root,
+            availability,
+          });
+    if (atom === null)
+      return Promise.resolve(
+        AsyncResult.failure(Cause.fail(new WorkspaceUnavailableError({ reason: "unavailable" }))),
+      );
     return executeAtomQuery(registry, atom, {
       label: explicitLabel ?? atom.label?.[0] ?? "atom query",
       reportFailure,

@@ -12,18 +12,45 @@ export interface WorkspaceSource {
   readonly root: string;
 }
 export const WorkspaceContext = createContext<WorkspaceSource | null>(null);
-const EMPTY = Atom.make<AsyncResult.AsyncResult<WorkspaceAvailability, never>>(AsyncResult.initial());
-export function useWorkspaceSource() { return use(WorkspaceContext); }
+const EMPTY = Atom.make<AsyncResult.AsyncResult<WorkspaceAvailability, never>>(
+  AsyncResult.initial(),
+);
+export function useWorkspaceSource() {
+  return use(WorkspaceContext);
+}
 export function useWorkspaceAvailability() {
   const source = useWorkspaceSource();
-  const value = useAtomValue(source === null ? EMPTY : shellEnvironment.workspaceAvailability({ environmentId: source.environmentId, input: { threadId: source.threadId } }));
+  const value = useAtomValue(
+    source === null
+      ? EMPTY
+      : shellEnvironment.workspaceAvailability({
+          environmentId: source.environmentId,
+          input: { threadId: source.threadId },
+        }),
+  );
   return source === null ? null : Option.getOrNull(AsyncResult.value(value));
 }
-export function useScopedWorkspaceQuery<A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null) {
+export function useScopedWorkspaceQuery<A, E>(
+  atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
+) {
   const source = useWorkspaceSource();
   const availability = useWorkspaceAvailability();
-  return source === null ? atom : scopeWorkspaceQuery({ atom, environmentId: source.environmentId, threadId: source.threadId, root: source.root, availability });
+  return source === null
+    ? atom
+    : scopeWorkspaceQuery({
+        atom,
+        environmentId: source.environmentId,
+        threadId: source.threadId,
+        root: source.root,
+        availability,
+      });
 }
-export function WorkspaceProvider({ source, children }: { readonly source: WorkspaceSource | null; readonly children: ReactNode }) {
+export function WorkspaceProvider({
+  source,
+  children,
+}: {
+  readonly source: WorkspaceSource | null;
+  readonly children: ReactNode;
+}) {
   return <WorkspaceContext value={source}>{children}</WorkspaceContext>;
 }

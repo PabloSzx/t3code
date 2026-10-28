@@ -24,7 +24,9 @@ export function useOpenFavoriteEditorShortcut({
   const openInEditorMutation = useWorkspaceEditorAction(environmentId, { isFile: false });
   const remote = useRemoteOpenState(environmentId);
   const remoteEditors = useRemoteCapableEditors();
-  const [preferredEditor] = usePreferredEditor(remote.mode === "local-exec" ? availableEditors : remoteEditors);
+  const [preferredEditor] = usePreferredEditor(
+    remote.mode === "local-exec" ? availableEditors : remoteEditors,
+  );
 
   useEffect(() => {
     if (!enabled || remote.mode === "remote-unavailable") return;

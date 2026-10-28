@@ -118,10 +118,7 @@ import {
   workspaceAssetResource,
 } from "./filePreviewMode";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
-import {
-  useProjectFileScope,
-  useProjectFileQuery,
-} from "./projectFilesQueryState";
+import { useProjectFileScope, useProjectFileQuery } from "./projectFilesQueryState";
 
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
@@ -946,8 +943,7 @@ function RenderedMarkdownSurface({
           readOnly
             ? undefined
             : ({ markerOffset, checked }) => {
-                const currentContents =
-                  fileScope.data()?.contents ?? contents;
+                const currentContents = fileScope.data()?.contents ?? contents;
                 const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
                 if (nextContents === currentContents) return;
                 fileScope.change(nextContents);

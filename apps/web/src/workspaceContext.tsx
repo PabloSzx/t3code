@@ -12,7 +12,9 @@ export interface WorkspaceSource {
   readonly root: string;
 }
 export const WorkspaceContext = createContext<WorkspaceSource | null>(null);
-const NO_AVAILABILITY = Atom.make<AsyncResult.AsyncResult<WorkspaceAvailability, never>>(AsyncResult.initial());
+const NO_AVAILABILITY = Atom.make<AsyncResult.AsyncResult<WorkspaceAvailability, never>>(
+  AsyncResult.initial(),
+);
 
 export function useWorkspaceSource() {
   return use(WorkspaceContext);
@@ -21,14 +23,29 @@ export function useWorkspaceSource() {
 export function useWorkspaceAvailability(override?: WorkspaceSource | null) {
   const inherited = use(WorkspaceContext);
   const source = override === undefined ? inherited : override;
-  const result = useAtomValue(source === null ? NO_AVAILABILITY : shellEnvironment.workspaceAvailability({
-    environmentId: source.environmentId, input: { threadId: source.threadId },
-  }));
+  const result = useAtomValue(
+    source === null
+      ? NO_AVAILABILITY
+      : shellEnvironment.workspaceAvailability({
+          environmentId: source.environmentId,
+          input: { threadId: source.threadId },
+        }),
+  );
   return source === null ? null : Option.getOrNull(AsyncResult.value(result));
 }
 
-export function useScopedWorkspaceQuery<A, E>(atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null) {
+export function useScopedWorkspaceQuery<A, E>(
+  atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
+) {
   const source = use(WorkspaceContext);
   const availability = useWorkspaceAvailability();
-  return source === null ? atom : scopeWorkspaceQuery({ atom, environmentId: source.environmentId, threadId: source.threadId, root: source.root, availability });
+  return source === null
+    ? atom
+    : scopeWorkspaceQuery({
+        atom,
+        environmentId: source.environmentId,
+        threadId: source.threadId,
+        root: source.root,
+        availability,
+      });
 }

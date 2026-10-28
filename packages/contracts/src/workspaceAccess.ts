@@ -34,11 +34,13 @@ export const WorkspaceEditorInput = Schema.Struct({
   ...LaunchEditorInput.fields,
   activate: Schema.optional(Schema.Boolean),
   workspace: Schema.optional(Schema.Struct({ threadId: ThreadId, root: Schema.String })),
-  remote: Schema.optional(Schema.Struct({
-    host: Schema.String.check(Schema.isMinLength(1)),
-    username: Schema.optional(Schema.String),
-    isFile: Schema.optional(Schema.Boolean),
-  })),
+  remote: Schema.optional(
+    Schema.Struct({
+      host: Schema.String.check(Schema.isMinLength(1)),
+      username: Schema.optional(Schema.String),
+      isFile: Schema.optional(Schema.Boolean),
+    }),
+  ),
 });
 export type WorkspaceEditorInput = typeof WorkspaceEditorInput.Type;
 export const WorkspaceEditorResult = Schema.Struct({

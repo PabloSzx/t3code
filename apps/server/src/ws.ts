@@ -2870,9 +2870,12 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
         [WS_METHODS.workspaceAvailability]: (input) => workspaceActions.availability(input),
-        [WS_METHODS.workspacePrepareAction]: (input) => workspaceActions.prepare({ ...input, owner: currentSessionId }),
-        [WS_METHODS.workspaceCompleteAction]: (input) => workspaceActions.complete({ ...input, owner: currentSessionId }),
-        [WS_METHODS.workspaceOpenEditor]: (input) => workspaceActions.openEditor({ input, owner: currentSessionId }),
+        [WS_METHODS.workspacePrepareAction]: (input) =>
+          workspaceActions.prepare({ ...input, owner: currentSessionId }),
+        [WS_METHODS.workspaceCompleteAction]: (input) =>
+          workspaceActions.complete({ ...input, owner: currentSessionId }),
+        [WS_METHODS.workspaceOpenEditor]: (input) =>
+          workspaceActions.openEditor({ input, owner: currentSessionId }),
         [WS_METHODS.filesystemGetMetadata]: (input) =>
           workspaceFileSystem.getMetadata(input).pipe(
             Effect.mapError(

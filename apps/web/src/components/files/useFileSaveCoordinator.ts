@@ -6,9 +6,7 @@ import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
-import {
-  useProjectFileScope,
-} from "./projectFilesQueryState";
+import { useProjectFileScope } from "./projectFilesQueryState";
 
 const FILE_SAVE_DEBOUNCE_MS = 500;
 
@@ -59,7 +57,7 @@ export function useFileSaveCoordinator({
     return () => {
       cancelled = true;
     };
-  }, [canWriteFiles, cwd, environmentId, file, relativePath, session]);
+  }, [canWriteFiles, file, session]);
   return session;
 }
 

@@ -286,7 +286,9 @@ function LiveThreadRouteController(props: ThreadRouteScreenProps) {
 
   if (selectedThread !== null && selectedThreadKey === routeThreadKey) {
     return withInspectorHeader(
-      <ThreadWorkspaceScope><ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} /></ThreadWorkspaceScope>,
+      <ThreadWorkspaceScope>
+        <ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} />
+      </ThreadWorkspaceScope>,
     );
   }
 

@@ -24,10 +24,17 @@ vi.mock("@effect/atom-react", () => ({
       ? AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: 1 })
       : AsyncResult.initial(false),
 }));
-vi.mock("./session", () => ({
-  environmentSession: { sessionStateAtom: () => ({}) },
-  usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } }),
-}));
+vi.mock("./session", async () => {
+  const { Atom } = await import("effect/reactivity");
+  const prepared = Atom.make({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } });
+  return {
+    environmentSession: {
+      sessionStateAtom: () => ({}),
+      preparedConnectionValueAtom: () => prepared,
+    },
+    usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } }),
+  };
+});
 vi.mock("./presentation", () => ({
   useEnvironmentPresentation: () => ({
     isReady: true,
@@ -39,7 +46,12 @@ vi.mock("./query", () => ({
 }));
 vi.mock("./projectClones", () => ({ environmentProjectCloneListAtom: () => null }));
 vi.mock("./workspace-access", () => ({ useScopedWorkspaceQuery: <A>(atom: A) => atom }));
-vi.mock("./shell", () => ({ shellEnvironment: { workspaceAvailability: () => ({}) } }));
+vi.mock("./shell", async () => {
+  const { Atom, AsyncResult } = await import("effect/reactivity");
+  // Availability that never arrives, as before the first subscription result.
+  const pending = Atom.make(AsyncResult.initial(true));
+  return { shellEnvironment: { workspaceAvailability: () => pending } };
+});
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
 vi.mock("@t3tools/client-runtime/state/assets", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/state/assets")>()),
@@ -47,7 +59,7 @@ vi.mock("@t3tools/client-runtime/state/assets", async (importOriginal) => ({
 }));
 vi.mock("./use-atom-query-runner", () => ({ useAtomQueryRunner: () => state.mint }));
 
-import { useRefreshAssetUrl, useAssetUrlState } from "./assets";
+import { refreshAssetUrl, useRefreshAssetUrl, useAssetUrlState } from "./assets";
 
 const environmentId = EnvironmentId.make("asset-environment");
 const threadId = ThreadId.make("asset-thread");
@@ -103,4 +115,11 @@ it("lets the server authorize an explicit refresh before the client grant loads"
   });
   state.mint.mockResolvedValue(AsyncResult.failure(Cause.fail(denied)));
   await expect(useRefreshAssetUrl(environmentId, resource)()).resolves.toBeNull();
+});
+
+it("stops waiting for workspace availability when the preview is closed", async () => {
+  const controller = new AbortController();
+  const pending = refreshAssetUrl(environmentId, resource, controller.signal);
+  controller.abort();
+  expect(await pending).toBeNull();
 });

@@ -10,6 +10,7 @@ import {
 import { executeAtomQuery, scopeWorkspaceQuery } from "@t3tools/client-runtime/state/runtime";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import { Atom, AsyncResult, AtomRegistry } from "effect/reactivity";
 import { useCallback } from "react";
 
@@ -116,12 +117,15 @@ export async function refreshAssetUrl(
   const availability =
     threadId === null
       ? null
-      : await Effect.runPromise(
+      : await Effect.runPromiseExit(
           AtomRegistry.getResult(
             appAtomRegistry,
             shellEnvironment.workspaceAvailability({ environmentId, input: { threadId } }),
           ).pipe(Effect.orElseSucceed(() => null)),
-        );
+          // Closing the preview cancels the wait too, so no subscription outlives the task.
+          signal ? { signal } : undefined,
+        ).then((exit) => (Exit.isSuccess(exit) ? exit.value : null));
+  if (signal?.aborted) return null;
   const atom =
     threadId === null
       ? unscoped

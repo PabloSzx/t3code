@@ -46,6 +46,7 @@ import { ConnectOnboardingRouteScreen } from "./features/cloud/ConnectOnboarding
 import { useConnectOnboardingNavigation } from "./features/cloud/connectOnboardingNavigation";
 import { AttachmentFileScreen } from "./features/files/AttachmentFileScreen";
 import { ThreadFilesTreeScreen, ThreadFileScreen } from "./features/files/ThreadFilesRouteScreen";
+import { withThreadWorkspace } from "./features/threads/ThreadWorkspaceScope";
 import { AdaptiveWorkspaceLayout } from "./features/layout/AdaptiveWorkspaceLayout";
 import { selectedPullRequestKey } from "./features/pull-requests/pullRequestSelection";
 import {
@@ -155,6 +156,16 @@ import {
   selectWorkspaceDetail,
   workspaceDetailRouter,
 } from "./features/workspace/workspace-detail-selection";
+
+// Thread-owned workspace screens resolve paths through the thread's lease generation.
+const ScopedThreadTerminalRouteScreen = withThreadWorkspace(ThreadTerminalRouteScreen);
+const ScopedReviewSheet = withThreadWorkspace(ReviewSheet);
+const ScopedThreadFilesTreeScreen = withThreadWorkspace(ThreadFilesTreeScreen);
+const ScopedThreadFileScreen = withThreadWorkspace(ThreadFileScreen);
+const ScopedGitOverviewSheet = withThreadWorkspace(GitOverviewSheet);
+const ScopedGitCommitSheet = withThreadWorkspace(GitCommitSheet);
+const ScopedGitBranchesSheet = withThreadWorkspace(GitBranchesSheet);
+const ScopedGitConfirmSheet = withThreadWorkspace(GitConfirmSheet);
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -809,7 +820,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     ThreadTerminal: createNativeStackScreen({
-      screen: ThreadTerminalRouteScreen,
+      screen: ScopedThreadTerminalRouteScreen,
       linking: `${THREAD_LINKING_PREFIX}/terminal`,
       options: SOLID_HEADER_OPTIONS,
     }),
@@ -841,7 +852,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     ThreadReview: createNativeStackScreen({
-      screen: ReviewSheet,
+      screen: ScopedReviewSheet,
       linking: `${THREAD_LINKING_PREFIX}/review`,
       options: GLASS_HEADER_OPTIONS,
     }),
@@ -858,7 +869,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     ThreadFiles: createNativeStackScreen({
-      screen: ThreadFilesTreeScreen,
+      screen: ScopedThreadFilesTreeScreen,
       linking: `${THREAD_LINKING_PREFIX}/files`,
       options: {
         ...GLASS_HEADER_OPTIONS,
@@ -866,7 +877,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     ThreadFile: createNativeStackScreen({
-      screen: ThreadFileScreen,
+      screen: ScopedThreadFileScreen,
       linking: `${THREAD_LINKING_PREFIX}/files/:path*`,
       options: GLASS_HEADER_OPTIONS,
     }),
@@ -924,7 +935,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     GitOverview: createNativeStackScreen({
-      screen: GitOverviewSheet,
+      screen: ScopedGitOverviewSheet,
       linking: `${THREAD_LINKING_PREFIX}/git`,
       options: {
         ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
@@ -944,7 +955,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     GitCommit: createNativeStackScreen({
-      screen: GitCommitSheet,
+      screen: ScopedGitCommitSheet,
       linking: `${THREAD_LINKING_PREFIX}/git/commit`,
       options: {
         ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
@@ -954,7 +965,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     GitBranches: createNativeStackScreen({
-      screen: GitBranchesSheet,
+      screen: ScopedGitBranchesSheet,
       linking: `${THREAD_LINKING_PREFIX}/git/branches`,
       options: {
         ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
@@ -964,7 +975,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       },
     }),
     GitConfirm: createNativeStackScreen({
-      screen: GitConfirmSheet,
+      screen: ScopedGitConfirmSheet,
       linking: `${THREAD_LINKING_PREFIX}/git-confirm`,
       options: {
         ...HORIZONTAL_FORM_SHEET_OPTIONS,

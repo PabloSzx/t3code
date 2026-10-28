@@ -96,6 +96,32 @@ it.live(
     ),
 );
 
+it.live("refreshes a reused pooled search index after a workspace write", () =>
+  Effect.gen(function* () {
+    const f = yield* accessFixture();
+    const entries = yield* WorkspaceEntries.WorkspaceEntries;
+    const search = (query: string) =>
+      entries
+        .search({ cwd: f.slot, query, limit: 10 })
+        .pipe(Effect.provideService(WorkspaceOperation, f.context));
+    yield* f.fs.writeFileString(f.path.join(f.slot, "first-note.txt"), "a");
+    expect((yield* search("note")).entries.map((entry) => entry.path)).toEqual(["first-note.txt"]);
+    yield* f.fs.writeFileString(f.path.join(f.slot, "second-note.txt"), "b");
+    yield* entries.refresh(f.slot).pipe(Effect.provideService(WorkspaceOperation, f.context));
+    expect((yield* search("note")).entries.map((entry) => entry.path).sort()).toEqual([
+      "first-note.txt",
+      "second-note.txt",
+    ]);
+  }).pipe(
+    Effect.provide(
+      WorkspaceEntries.layer.pipe(
+        Layer.provide(WorkspacePaths.layer),
+        Layer.provideMerge(treehouseLayer),
+      ),
+    ),
+  ),
+);
+
 const makeTempDir = Effect.fn(function* (opts?: { prefix?: string; git?: boolean }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const dir = yield* fileSystem.makeTempDirectoryScoped({

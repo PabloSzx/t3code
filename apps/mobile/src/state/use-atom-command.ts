@@ -29,18 +29,21 @@ export function useAtomCommand<A, E, W>(
           ? command
           : {
               ...command,
-              run: (_registry: typeof registry, target: W) =>
-                runThreadWorkspaceCommand({
+              run: (_registry: typeof registry, target: W) => {
+                const workspaceBinding = command.workspaceBinding?.(target);
+                return runThreadWorkspaceCommand({
                   target,
                   source,
                   availability,
+                  // Queued status refreshes and worktree removal never resume a returned workspace.
                   mode:
-                    command.rpcTag === undefined ||
-                    command.rpcTag === WS_METHODS.projectsWriteFile ||
-                    command.rpcTag === WS_METHODS.vcsRefreshStatus ||
-                    command.rpcTag === WS_METHODS.vcsRemoveWorktree
+                    command.workspaceMode ??
+                    (command.rpcTag === WS_METHODS.vcsRefreshStatus ||
+                    command.rpcTag === WS_METHODS.vcsRemoveWorktree ||
+                    (command.rpcTag === undefined && command.workspaceBinding === undefined)
                       ? "captured"
-                      : "activate",
+                      : "activate"),
+                  ...(workspaceBinding === undefined ? {} : { binding: workspaceBinding }),
                   run: (next) => command.run(registry, next),
                   prepare: () =>
                     shellEnvironment.prepareWorkspaceAction.run(registry, {
@@ -52,7 +55,8 @@ export function useAtomCommand<A, E, W>(
                       environmentId: source!.environmentId,
                       input: { reservationId },
                     }),
-                }),
+                });
+              },
             };
       return runAtomCommand(registry, scoped, value, { label, reportFailure, reportDefect });
     },

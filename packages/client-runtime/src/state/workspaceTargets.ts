@@ -39,14 +39,32 @@ export function registerWorkspaceQuery<A, E, Input>(
   return options.atom;
 }
 
+const WORKSPACE_PATH_FIELDS = ["cwd", "workspaceRoot", "worktreePath", "absolutePath", "path"];
+// Nested inputs that address a workspace: asset resources and review patch requests.
+const WORKSPACE_NESTED_FIELDS = ["resource", "request", "preview"];
+// Asset resources that address the thread's own workspace; others are host-wide or immutable.
+const WORKSPACE_ASSET_TAGS = new Set(["workspace-file", "media-file", "draft-workspace-file"]);
+
+function isWorkspaceRecord(record: Record<string, unknown>): boolean {
+  if (typeof record._tag === "string") return WORKSPACE_ASSET_TAGS.has(record._tag);
+  return (
+    WORKSPACE_PATH_FIELDS.some((key) => typeof record[key] === "string") ||
+    Array.isArray(record.paths)
+  );
+}
+
 export function hasWorkspaceTargets(input: unknown): boolean {
   if (input === null || typeof input !== "object") return false;
   const record = input as Record<string, unknown>;
-  return (
-    ["cwd", "workspaceRoot", "worktreePath", "absolutePath", "path"].some(
-      (key) => typeof record[key] === "string",
-    ) || Array.isArray(record.paths)
-  );
+  if (isWorkspaceRecord(record)) return true;
+  return WORKSPACE_NESTED_FIELDS.some((key) => {
+    const nested = record[key];
+    return (
+      nested !== null &&
+      typeof nested === "object" &&
+      isWorkspaceRecord(nested as Record<string, unknown>)
+    );
+  });
 }
 
 export interface ScopeWorkspaceQueryOptions<A, E> {
@@ -106,14 +124,32 @@ export function rebaseWorkspaceInput<Input>({
       ? destination + value.slice(source.length)
       : value;
   };
+  const rebaseRecord = (record: Record<string, unknown>): Record<string, unknown> => {
+    // Absolute file targets inside the captured workspace follow it; relative ones already do.
+    const relative =
+      typeof record.relativePath === "string" && rebase(record.relativePath) !== record.relativePath
+        ? { relativePath: rebase(record.relativePath) }
+        : {};
+    return {
+      ...record,
+      ...Object.fromEntries(
+        WORKSPACE_PATH_FIELDS.filter((key) => typeof record[key] === "string").map((key) => [
+          key,
+          rebase(record[key]),
+        ]),
+      ),
+      ...relative,
+      ...(Array.isArray(record.paths) ? { paths: record.paths.map(rebase) } : {}),
+    };
+  };
   const record = input as Record<string, unknown>;
   return {
-    ...record,
+    ...rebaseRecord(record),
     ...Object.fromEntries(
-      ["cwd", "workspaceRoot", "worktreePath", "absolutePath", "path"]
-        .filter((key) => typeof record[key] === "string")
-        .map((key) => [key, rebase(record[key])]),
+      WORKSPACE_NESTED_FIELDS.filter((key) => {
+        const nested = record[key];
+        return nested !== null && typeof nested === "object" && !Array.isArray(nested);
+      }).map((key) => [key, rebaseRecord(record[key] as Record<string, unknown>)]),
     ),
-    ...(Array.isArray(record.paths) ? { paths: record.paths.map(rebase) } : {}),
   } as Input;
 }

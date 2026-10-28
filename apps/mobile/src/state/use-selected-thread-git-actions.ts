@@ -72,11 +72,15 @@ export function useSelectedThreadGitActions() {
     AuthOrchestrationOperateScope,
   );
   const canChangeThreadBranch = canWriteSourceControl && canOperateThread;
-  const { selectedThreadCwd, selectedThreadWorktreePath } = useSelectedThreadWorktree();
+  const { selectedThreadCwd, selectedThreadWorktreePath, recordedCwd } =
+    useSelectedThreadWorktree();
+  // Git mutations are explicit: they target the recorded path, which the command hook resumes
+  // and rebases when the workspace was returned. Status reads keep the available path.
+  const actionCwd = selectedThreadCwd ?? recordedCwd;
   const runStackedAction = useAtomCommand(
     vcsActionManager.runStackedAction({
       environmentId: selectedThread?.environmentId ?? null,
-      cwd: selectedThreadCwd,
+      cwd: actionCwd,
     }),
     { reportFailure: false },
   );
@@ -181,7 +185,7 @@ export function useSelectedThreadGitActions() {
       if (
         !selectedThread ||
         !selectedThreadProject ||
-        !selectedThreadCwd ||
+        !actionCwd ||
         !readEnvironmentScope(selectedThread.environmentId, AuthSourceControlWriteScope) ||
         (options?.changesThreadBranch === true &&
           !readEnvironmentScope(selectedThread.environmentId, AuthOrchestrationOperateScope))
@@ -191,14 +195,14 @@ export function useSelectedThreadGitActions() {
 
       const target = {
         environmentId: selectedThread.environmentId,
-        cwd: selectedThreadCwd,
+        cwd: actionCwd,
       };
       setPendingConnectionError(null);
       const run = () =>
         execute({
           thread: selectedThread,
           project: selectedThreadProject,
-          cwd: selectedThreadCwd,
+          cwd: actionCwd,
         });
       const result =
         options?.managedExternally === true
@@ -213,7 +217,7 @@ export function useSelectedThreadGitActions() {
       }
       return result.value;
     },
-    [selectedThread, selectedThreadCwd, selectedThreadProject],
+    [selectedThread, actionCwd, selectedThreadProject],
   );
 
   const refreshSelectedThreadBranches = useCallback(async (): Promise<ReadonlyArray<VcsRef>> => {

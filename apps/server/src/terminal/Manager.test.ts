@@ -9,6 +9,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   TerminalProviderInstanceNotFoundError,
+  ThreadId,
+  WorkspaceOperation,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
@@ -481,6 +483,41 @@ it.layer(
       ),
   );
 
+  it.effect.each(["open", "restart", "attach"] as const)(
+    "refuses to spawn on %s with a missing or superseded lease generation",
+    (entry) =>
+      Effect.gen(function* () {
+        const f = yield* createTreehouseWorkspace();
+        const { manager, ptyAdapter } = yield* createManager();
+        const input = restartInput({ cwd: f.slot, worktreePath: f.slot });
+        const launch = () =>
+          entry === "open"
+            ? manager.open(input).pipe(Effect.asVoid)
+            : entry === "restart"
+              ? manager.restart(input).pipe(Effect.asVoid)
+              : manager.attachStream(input, () => Effect.void).pipe(Effect.asVoid);
+        const thread = ThreadId.make("thread-1");
+        const missing = yield* launch().pipe(Effect.result);
+        assert.equal(missing._tag, "Failure", "a pooled spawn must carry its lease generation");
+        const superseded = yield* launch().pipe(
+          Effect.provideService(WorkspaceOperation, {
+            threadId: thread,
+            generation: "c".repeat(32),
+          }),
+          Effect.result,
+        );
+        assert.equal(superseded._tag, "Failure", "an old generation must not reach the slot");
+        assert.equal(ptyAdapter.spawnInputs.length, 0);
+        const generation = yield* f.leases.operationGeneration({ path: f.slot, threadId: thread });
+        yield* launch().pipe(
+          Effect.provideService(WorkspaceOperation, { threadId: thread, generation }),
+        );
+        assert.equal(ptyAdapter.spawnInputs.length, 1);
+      }).pipe(
+        Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "terminal-ownership-" })),
+      ),
+  );
+
   it.effect(
     "pins the actual subdirectory cwd until PTY exit, even after closing and detaching",
     () =>
@@ -505,7 +542,16 @@ it.layer(
         const { manager, ptyAdapter } = yield* createManager().pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
         );
-        const opened = yield* manager.open(openInput({ cwd: f.subdir, worktreePath: f.slot }));
+        const generation = yield* f.leases.operationGeneration({
+          path: f.slot,
+          threadId: "thread-1",
+        });
+        const opened = yield* manager.open(openInput({ cwd: f.subdir, worktreePath: f.slot })).pipe(
+          Effect.provideService(WorkspaceOperation, {
+            threadId: ThreadId.make("thread-1"),
+            generation,
+          }),
+        );
         assert.equal(opened.status, "running");
         assert.equal(ptyAdapter.spawnInputs[0]?.cwd, f.subdir);
         const owned = yield* f.leases.read(f.slot);

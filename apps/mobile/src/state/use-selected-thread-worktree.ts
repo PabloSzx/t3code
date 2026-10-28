@@ -30,6 +30,8 @@ export function useSelectedThreadWorktree() {
   const usable = !guarded || availability?.cwd != null;
 
   return {
+    /** The recorded path, for explicit actions that resume a returned workspace first. */
+    recordedCwd: selectedThreadWorktreePath ?? selectedThreadProject?.workspaceRoot ?? null,
     selectedThreadWorktreePath: usable ? selectedThreadWorktreePath : null,
     selectedThreadCwd: usable
       ? (selectedThreadWorktreePath ?? selectedThreadProject?.workspaceRoot ?? null)

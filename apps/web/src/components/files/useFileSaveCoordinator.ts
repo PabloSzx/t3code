@@ -25,8 +25,17 @@ export function useFileSaveCoordinator({
 }: FileSaveOptions): Pick<FileSaveCoordinator, "change"> {
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
   const writeFile = useProjectFileWriter();
+  const recoverFile = useAtomCommand(projectEnvironment.writeFile);
   const file = useProjectFileScope({ environmentId, cwd, relativePath });
-  const inputs = { environmentId, cwd, relativePath, onPendingChange, writeFile, file };
+  const inputs = {
+    environmentId,
+    cwd,
+    relativePath,
+    onPendingChange,
+    writeFile,
+    recoverFile,
+    file,
+  };
   const [current, setCurrent] = useState(() => ({
     inputs,
     session: createFileSaveSession(inputs),
@@ -37,6 +46,7 @@ export function useFileSaveCoordinator({
     current.inputs.relativePath !== relativePath ||
     current.inputs.onPendingChange !== onPendingChange ||
     current.inputs.writeFile !== writeFile ||
+    current.inputs.recoverFile !== recoverFile ||
     current.inputs.file !== file
   ) {
     setCurrent({ inputs, session: createFileSaveSession(inputs) });
@@ -52,7 +62,7 @@ export function useFileSaveCoordinator({
     queueMicrotask(() => {
       if (cancelled) return;
       const unsaved = file.unsaved();
-      if (unsaved) session.change(unsaved.contents);
+      if (unsaved) session.recover(unsaved.contents);
     });
     return () => {
       cancelled = true;
@@ -62,7 +72,7 @@ export function useFileSaveCoordinator({
 }
 
 function useProjectFileWriter() {
-  return useAtomCommand(projectEnvironment.writeFile);
+  return useAtomCommand(projectEnvironment.writeFileFromEdit);
 }
 
 function createFileSaveSession({
@@ -71,21 +81,29 @@ function createFileSaveSession({
   relativePath,
   onPendingChange,
   writeFile,
+  recoverFile,
   file,
 }: FileSaveOptions & {
   writeFile: ReturnType<typeof useProjectFileWriter>;
+  recoverFile: ReturnType<typeof useProjectFileWriter>;
   file: ReturnType<typeof useProjectFileScope>;
 }) {
   const coordinatorRef = createRef<FileSaveCoordinator>();
+  // A recovered draft persists without resuming a returned workspace; a keystroke may resume it.
+  let explicitEdit = false;
   return {
-    change: (contents: string) => coordinatorRef.current?.change(contents),
+    change: (contents: string) => {
+      explicitEdit = true;
+      coordinatorRef.current?.change(contents);
+    },
+    recover: (contents: string) => coordinatorRef.current?.change(contents),
     setup: () => {
       const coordinator = new FileSaveCoordinator({
         debounceMs: FILE_SAVE_DEBOUNCE_MS,
         canPersist: () => readEnvironmentScope(environmentId, AuthFilesystemWriteScope),
         onPendingChange: (pending) => onPendingChange(relativePath, pending),
         persist: (nextContents) =>
-          writeFile({
+          (explicitEdit ? writeFile : recoverFile)({
             environmentId,
             input: { cwd, relativePath, contents: nextContents },
             ...(file.workspace === undefined ? {} : { workspace: file.workspace }),

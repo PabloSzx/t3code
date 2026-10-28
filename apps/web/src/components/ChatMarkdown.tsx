@@ -152,6 +152,7 @@ import { useRightPanelStore } from "../rightPanelStore";
 import { readThreadShell, useProjects } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { useWorkspaceEditorAction } from "../workspaceEditor";
+import { useResumeWorkspace } from "../workspaceContext";
 import { assetEnvironment } from "../state/assets";
 import {
   readEnvironmentScope,
@@ -579,6 +580,7 @@ function useChatMarkdownState({
   const preferredEditorMenuLabel = openInEditorMenuLabel(preferredEditor);
   const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
   const openInEditor = useWorkspaceEditorAction(environmentId);
+  const resumeWorkspace = useResumeWorkspace();
   const revealFileInFileManager = (filePath: string) => {
     if (environmentId === null) {
       return Promise.resolve(
@@ -777,8 +779,12 @@ function useChatMarkdownState({
     if (!threadRef) return;
     // Every open supersedes pending lookups, including synchronous opens.
     const isLatestLookup = claimWorkspaceBasenameLookup();
-    const openAt = (path: string) =>
-      useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line);
+    // Opening a file is an explicit action, so a returned workspace resumes before the panel reads.
+    const openAt = (path: string) => {
+      void resumeWorkspace().then(() =>
+        useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line),
+      );
+    };
     if (
       fileLinkMeta.workspaceLookupPath === null ||
       !cwd ||

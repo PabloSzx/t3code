@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -118,6 +119,8 @@ export class WorkspaceEntries extends Context.Service<
   }
 >()("t3/workspace/WorkspaceEntries") {}
 
+const POOLED_INDEX_MAX_AGE_MS = 5_000;
+
 /** Ignored files offered for copying; more than this is a build folder, not config. */
 const IGNORED_FILES_LIMIT = 200;
 
@@ -159,6 +162,7 @@ export const make = Effect.gen(function* () {
   const workspaceSearchIndexes = yield* WorkspaceSearchIndex.WorkspaceSearchIndexMap;
   const pooledIndexes = yield* WorkspaceSearchIndex.PooledWorkspaceSearchIndexMap;
   const pooledKeys = new Set<string>();
+  const pooledBuiltAt = new Map<string, number>();
   const lifecycle = yield* Effect.serviceOption(WorkspaceLifecycle.WorkspaceLifecycle);
   if (lifecycle._tag === "Some")
     // A return or rebind retires every pooled index so none outlives its lease generation.
@@ -187,6 +191,14 @@ export const make = Effect.gen(function* () {
     const context = yield* WorkspaceOperation;
     if (context?.generation != null) {
       const key = WorkspaceSearchIndex.pooledWorkspaceSearchIndexKey({ ...input, context });
+      // Unwatched changes made by providers or terminals become visible within this age.
+      const now = yield* Clock.currentTimeMillis;
+      const builtAt = pooledBuiltAt.get(key);
+      if (builtAt !== undefined && now - builtAt > POOLED_INDEX_MAX_AGE_MS) {
+        pooledBuiltAt.delete(key);
+        yield* pooledIndexes.invalidate(key);
+      }
+      if (!pooledBuiltAt.has(key)) pooledBuiltAt.set(key, now);
       pooledKeys.add(key);
       return yield* input.effect.pipe(Effect.provide(pooledIndexes.get(key)));
     }
@@ -207,7 +219,17 @@ export const make = Effect.gen(function* () {
 
   const refresh: WorkspaceEntries["Service"]["refresh"] = Effect.fn("WorkspaceEntries.refresh")(
     function* (cwd) {
-      if ((yield* WorkspaceOperation)?.generation != null) return;
+      const context = yield* WorkspaceOperation;
+      if (context?.generation != null) {
+        // Pooled indexes do not watch the slot; a known write retires them for the next query.
+        for (const variant of WorkspaceSearchIndex.WORKSPACE_SEARCH_INDEX_VARIANTS) {
+          const key = WorkspaceSearchIndex.pooledWorkspaceSearchIndexKey({ cwd, variant, context });
+          pooledKeys.delete(key);
+          pooledBuiltAt.delete(key);
+          yield* pooledIndexes.invalidate(key);
+        }
+        return;
+      }
       const normalizedCwd = yield* normalizeWorkspaceRoot(cwd).pipe(
         Effect.orElseSucceed(() => cwd),
       );

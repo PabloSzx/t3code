@@ -8,7 +8,7 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { expect, it } from "vite-plus/test";
 
-import { runThreadWorkspaceCommand } from "./shellCommands.ts";
+import { resumeWorkspaceForAction, runThreadWorkspaceCommand } from "./shellCommands.ts";
 
 it("uses the resumed generation and keeps its reservation through the command", async () => {
   const environmentId = EnvironmentId.make("host");
@@ -99,4 +99,93 @@ it("does not move a command to another environment or activate native paths", as
     run: async (target) => AsyncResult.success(target),
   });
   expect(foreign).toMatchObject({ _tag: "Success", value: { input: { cwd: "/other" } } });
+});
+
+it("uses an active workspace without asking for activation authority", async () => {
+  const environmentId = EnvironmentId.make("host");
+  const threadId = ThreadId.make("active-pooled");
+  const context = { threadId, generation: "d".repeat(32) };
+  const unexpected = async () => {
+    throw new Error("An active workspace must not need prepare");
+  };
+  const result = await runThreadWorkspaceCommand({
+    target: { environmentId, input: { cwd: "/pool/a" } },
+    source: { environmentId, threadId, root: "/pool/a" },
+    availability: { state: "active", cwd: "/pool/a", context },
+    mode: "activate",
+    prepare: unexpected,
+    complete: unexpected,
+    run: async (target) => AsyncResult.success(target),
+  });
+  expect(result).toMatchObject({ _tag: "Success", value: { workspace: context } });
+});
+
+it("binds a closure-scoped action such as commit to the resumed workspace", async () => {
+  const environmentId = EnvironmentId.make("host");
+  const threadId = ThreadId.make("stacked-action");
+  const context = { threadId, generation: "e".repeat(32) };
+  let prepared = 0;
+  const result = await runThreadWorkspaceCommand({
+    target: { actionId: "commit-1", action: "commit" },
+    source: { environmentId, threadId, root: "/pool/old" },
+    availability: { state: "released", cwd: null },
+    mode: "activate",
+    binding: {
+      environmentId,
+      cwd: "/pool/old",
+      bind: (input, workspace) => ({ ...input, workspace }),
+    },
+    prepare: async () => {
+      prepared += 1;
+      return AsyncResult.success({
+        workspace: { state: "active", cwd: "/pool/new", context },
+        reservationId: null,
+      });
+    },
+    complete: async () => undefined,
+    run: async (target) => AsyncResult.success(target),
+  });
+  expect(prepared).toBe(1);
+  expect(result).toMatchObject({
+    _tag: "Success",
+    value: { actionId: "commit-1", workspace: { context, cwd: "/pool/new" } },
+  });
+});
+
+it("resumes only a returned workspace before an explicit navigation", async () => {
+  const threadId = ThreadId.make("navigating");
+  let prepared = 0;
+  const completed: string[] = [];
+  const options = {
+    prepare: async () => {
+      prepared += 1;
+      return AsyncResult.success({
+        workspace: {
+          state: "active" as const,
+          cwd: "/pool/new",
+          context: { threadId, generation: "f".repeat(32) },
+        },
+        reservationId: "resume",
+      });
+    },
+    complete: async (id: string) => {
+      completed.push(id);
+    },
+  };
+  expect(
+    await resumeWorkspaceForAction({
+      ...options,
+      availability: {
+        state: "active",
+        cwd: "/pool/a",
+        context: { threadId, generation: "a".repeat(32) },
+      },
+    }),
+  ).toBe(true);
+  expect(prepared).toBe(0);
+  expect(
+    await resumeWorkspaceForAction({ ...options, availability: { state: "released", cwd: null } }),
+  ).toBe(true);
+  expect(prepared).toBe(1);
+  expect(completed).toEqual(["resume"]);
 });

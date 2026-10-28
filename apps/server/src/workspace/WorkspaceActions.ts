@@ -80,14 +80,24 @@ const make = Effect.gen(function* () {
       readonly closed: Deferred.Deferred<void>;
     }
   >();
+  const admissions = new Map<string, number>();
+  let totalAdmissions = 0;
   const unavailable = () => new WorkspaceUnavailableError({ reason: "unavailable" });
   const prepare = Effect.fn("WorkspaceActions.prepare")(
     function* (input: PrepareWorkspaceActionOptions) {
-      if (
-        reservations.size >= 1024 ||
-        [...reservations.values()].filter((entry) => entry.owner === input.owner).length >= 16
-      )
-        return yield* unavailable();
+      // Admission is counted synchronously before any await, so concurrent prepares cannot all
+      // pass the cap; each admission is returned when its attempt ends without a reservation.
+      const owned = admissions.get(input.owner) ?? 0;
+      if (totalAdmissions >= 1024 || owned >= 16) return yield* unavailable();
+      admissions.set(input.owner, owned + 1);
+      totalAdmissions += 1;
+      const releaseAdmission = Effect.sync(() => {
+        const remaining = (admissions.get(input.owner) ?? 1) - 1;
+        if (remaining === 0) admissions.delete(input.owner);
+        else admissions.set(input.owner, remaining);
+        totalAdmissions -= 1;
+      });
+      let transferred = false;
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const scope = yield* Scope.make();
@@ -114,6 +124,7 @@ const make = Effect.gen(function* () {
             yield* Scope.close(scope, Exit.void);
             return { workspace, reservationId: null };
           }
+          transferred = true;
           const reservationId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
           const stop = yield* Deferred.make<void>();
           const closed = yield* Deferred.make<void>();
@@ -123,6 +134,7 @@ const make = Effect.gen(function* () {
             Effect.ensuring(
               Scope.close(scope, Exit.void).pipe(
                 Effect.andThen(Effect.sync(() => reservations.delete(reservationId))),
+                Effect.andThen(releaseAdmission),
                 Effect.andThen(Deferred.succeed(closed, undefined)),
               ),
             ),
@@ -131,7 +143,7 @@ const make = Effect.gen(function* () {
           );
           return { workspace, reservationId };
         }),
-      );
+      ).pipe(Effect.ensuring(Effect.suspend(() => (transferred ? Effect.void : releaseAdmission))));
     },
     Effect.catchTags({
       WorkspaceAccessError: (cause) =>

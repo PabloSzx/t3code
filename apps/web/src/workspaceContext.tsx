@@ -1,7 +1,8 @@
-import { createContext, use } from "react";
-import { useAtomValue } from "@effect/atom-react";
+import { createContext, use, useContext } from "react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId, WorkspaceAvailability } from "@t3tools/contracts";
 import { scopeWorkspaceQuery } from "@t3tools/client-runtime/state/runtime";
+import { resumeWorkspaceForAction } from "@t3tools/client-runtime/state/shell";
 import { AsyncResult, Atom } from "effect/reactivity";
 import * as Option from "effect/Option";
 import { shellEnvironment } from "./state/shell";
@@ -48,4 +49,27 @@ export function useScopedWorkspaceQuery<A, E>(
         root: source.root,
         availability,
       });
+}
+
+/** Returns a callback that resumes this view's returned workspace before an explicit action. */
+export function useResumeWorkspace() {
+  const registry = useContext(RegistryContext);
+  const source = use(WorkspaceContext);
+  const availability = useWorkspaceAvailability();
+  return () =>
+    source === null
+      ? Promise.resolve(true)
+      : resumeWorkspaceForAction({
+          availability,
+          prepare: () =>
+            shellEnvironment.prepareWorkspaceAction.run(registry, {
+              environmentId: source.environmentId,
+              input: { threadId: source.threadId },
+            }),
+          complete: (reservationId) =>
+            shellEnvironment.completeWorkspaceAction.run(registry, {
+              environmentId: source.environmentId,
+              input: { reservationId },
+            }),
+        });
 }

@@ -38,6 +38,7 @@ vi.mock("./query", () => ({
   useEnvironmentQuery: () => ({ data: state.session, error: null }),
 }));
 vi.mock("./projectClones", () => ({ environmentProjectCloneListAtom: () => null }));
+vi.mock("./workspace-access", () => ({ useScopedWorkspaceQuery: <A>(atom: A) => atom }));
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
 vi.mock("@t3tools/client-runtime/state/assets", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/state/assets")>()),

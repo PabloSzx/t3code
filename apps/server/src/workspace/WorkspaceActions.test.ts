@@ -226,3 +226,39 @@ it.effect.each(["ack", "expiry", "shutdown"] as const)(
       expect(yield* f.release).toBeNull();
     }).pipe(Effect.provide(layer)),
 );
+
+it.effect("admits at most sixteen concurrent reservations per owner", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const attempts = yield* Effect.forEach(
+      Array.from({ length: 17 }),
+      () =>
+        f.actions
+          .prepare({ owner: "busy", threadId: f.context.threadId, activate: false })
+          .pipe(Effect.result),
+      { concurrency: "unbounded" },
+    );
+    const reserved = attempts.flatMap((attempt) =>
+      attempt._tag === "Success" && attempt.success.reservationId !== null
+        ? [attempt.success.reservationId]
+        : [],
+    );
+    expect(reserved).toHaveLength(16);
+    // Another owner still has its own admissions while this one is full.
+    const other = yield* f.actions.prepare({
+      owner: "other",
+      threadId: f.context.threadId,
+      activate: false,
+    });
+    expect(other.reservationId).not.toBeNull();
+    for (const reservationId of reserved)
+      yield* f.actions.complete({ owner: "busy", reservationId });
+    // Completed reservations return their admissions.
+    const again = yield* f.actions.prepare({
+      owner: "busy",
+      threadId: f.context.threadId,
+      activate: false,
+    });
+    expect(again.reservationId).not.toBeNull();
+  }).pipe(Effect.provide(layer)),
+);

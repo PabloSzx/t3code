@@ -15,6 +15,7 @@ import { assetEnvironment } from "~/state/assets";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { usePreparedConnection } from "~/state/session";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
+import { useScopedWorkspaceQuery } from "~/workspaceContext";
 
 export { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 
@@ -88,6 +89,25 @@ export function makeRevisionedAssetUrlFamily(
 
 export const revisionedAssetUrl = makeRevisionedAssetUrlFamily(assetEnvironment.createUrl);
 
+// A scoped asset query identifies its lease generation; the wrapper is keyed by that query.
+const scopedRevisionedAssetUrls = new WeakMap<
+  Atom.Atom<AsyncResult.AsyncResult<AssetCreateUrlResult, unknown>>,
+  ReturnType<typeof makeRevisionedAssetUrlFamily>
+>();
+function revisionedScopedAssetUrl(
+  input: AssetUrlTarget & {
+    readonly query: Atom.Atom<AsyncResult.AsyncResult<AssetCreateUrlResult, unknown>>;
+    readonly revision: string | null;
+  },
+) {
+  let family = scopedRevisionedAssetUrls.get(input.query);
+  if (family === undefined) {
+    family = makeRevisionedAssetUrlFamily(() => input.query);
+    scopedRevisionedAssetUrls.set(input.query, family);
+  }
+  return family(input);
+}
+
 /**
  * Pass `revision` for a workspace file whose bytes can change under the same
  * path; each new revision gets a freshly minted URL.
@@ -99,12 +119,18 @@ export function useAssetUrlState(
 ): AssetUrlState {
   const blocked = blockedAssetUrlState(resource, useFilesystemReadAccess(environmentId));
   const preparedConnection = usePreparedConnection(environmentId);
-  const result = useAtomValue(
+  // Revisioned wrappers rebuild per mount, so they bind to the scoped base query each read.
+  const query = useScopedWorkspaceQuery(
     blocked !== null || environmentId === null || resource === null
+      ? null
+      : assetEnvironment.createUrl({ environmentId, input: { resource } }),
+  );
+  const result = useAtomValue(
+    query === null || environmentId === null || resource === null
       ? EMPTY_ASSET_URL_ATOM
       : revision === undefined
-        ? assetEnvironment.createUrl({ environmentId, input: { resource } })
-        : revisionedAssetUrl({ environmentId, input: { resource }, revision }),
+        ? query
+        : revisionedScopedAssetUrl({ environmentId, input: { resource }, query, revision }),
   );
   if (blocked !== null) return blocked;
   return {

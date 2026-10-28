@@ -151,9 +151,27 @@ export interface AtomCommandReporter {
   readonly error: (message: string, cause: Cause.Cause<unknown>) => void;
 }
 
+export interface AtomCommandWorkspaceBinding<W> {
+  readonly environmentId: EnvironmentIdType;
+  /** Workspace path the command addresses, or null when it addresses none. */
+  readonly cwd: string | null;
+  // Method syntax keeps commands assignable across narrower inputs; callers keep the input type.
+  bind(
+    input: W,
+    workspace: { readonly context: WorkspaceOperationContext; readonly cwd: string },
+  ): unknown;
+}
+
 export interface AtomCommand<W, A, E> {
   readonly label: string;
   readonly rpcTag?: EnvironmentUnaryRpcTag;
+  /** For commands whose argument is not an `{ environmentId, input }` target. */
+  workspaceBinding?(input: W): AtomCommandWorkspaceBinding<W> | undefined;
+  /**
+   * `captured` never resumes a returned pooled workspace: replays, recovery and background
+   * work. `activate` resumes it for a new user action. Omitted, the client hook decides.
+   */
+  readonly workspaceMode?: "activate" | "captured";
   readonly run: (registry: AtomRegistry.AtomRegistry, input: W) => Promise<AtomCommandResult<A, E>>;
 }
 

@@ -9,6 +9,8 @@ import {
   type ThreadId,
   type ProjectId,
   WS_METHODS,
+  WorkspaceOperation,
+  type WorkspaceOperationContext,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -82,6 +84,8 @@ export interface RunVcsStackedActionInput {
   readonly threadId?: ThreadId;
   readonly projectId?: ProjectId;
   readonly onProgress?: (event: GitActionProgressEvent) => void;
+  /** Lease generation and checkout path captured for a pooled workspace action. */
+  readonly workspace?: { readonly context: WorkspaceOperationContext; readonly cwd: string };
 }
 
 export class VcsActionUnavailableError extends Schema.TaggedError<VcsActionUnavailableError>()(
@@ -467,7 +471,7 @@ export function createVcsActionManager<R, E>(
 
         const rpcInput: GitRunStackedActionInput = {
           actionId: transportActionId,
-          cwd: target.cwd,
+          cwd: input.workspace?.cwd ?? target.cwd,
           action: input.action,
           ...(input.commitMessage ? { commitMessage: input.commitMessage } : {}),
           ...(input.featureBranch ? { featureBranch: true } : {}),
@@ -484,7 +488,9 @@ export function createVcsActionManager<R, E>(
         return yield* consumeVcsActionProgress(
           runStreamInEnvironment(
             target.environmentId,
-            runStreamGuarded(WS_METHODS.gitRunStackedAction, rpcInput),
+            runStreamGuarded(WS_METHODS.gitRunStackedAction, rpcInput).pipe(
+              Stream.provideService(WorkspaceOperation, input.workspace?.context),
+            ),
           ),
           {
             target,
@@ -527,8 +533,23 @@ export function createVcsActionManager<R, E>(
         );
       }),
     });
-    runStackedActionCommands.set(commandKey, command);
-    return command;
+    // Stacked actions take their cwd from the target, so workspace binding attaches it explicitly.
+    const bound: AtomCommand<RunVcsStackedActionInput, GitRunStackedActionResult, unknown> =
+      target === null
+        ? command
+        : {
+            ...command,
+            workspaceBinding: (input) =>
+              input.workspace !== undefined
+                ? undefined
+                : {
+                    environmentId: target.environmentId,
+                    cwd: target.cwd,
+                    bind: (current, workspace) => ({ ...current, workspace }),
+                  },
+          };
+    runStackedActionCommands.set(commandKey, bound);
+    return bound;
   };
 
   const setState = (

@@ -1,4 +1,4 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { SourceControlProviderKind, WorkspaceOperation } from "@t3tools/contracts";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -8,6 +8,8 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/process";
+import * as Result from "effect/Result";
+import { vi } from "vite-plus/test";
 
 import {
   GitCommandError,
@@ -21,6 +23,10 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
+import {
+  accessFixture,
+  testLayer as treehouseTestLayer,
+} from "../vcs/TreehouseWorktrees.testkit.ts";
 
 const CLONE_URLS = {
   nameWithOwner: "octocat/t3code",
@@ -660,3 +666,47 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
     ),
   );
 });
+
+it.live("refuses a stale publish into a pooled slot that another conversation now uses", () =>
+  Effect.gen(function* () {
+    const f = yield* accessFixture();
+    const stale = f.context;
+    yield* f.recycle;
+    const createRepository = vi.fn(() => Effect.succeed(CLONE_URLS));
+    const ensureRemote = vi.fn(() => Effect.succeed("origin"));
+    const pushCurrentBranch = vi.fn(() => Effect.die("unexpected push"));
+    const result = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service
+        .publishRepository({
+          cwd: f.slot,
+          provider: SourceControlProviderKind.make("github"),
+          repository: "octocat/t3code",
+          visibility: "private",
+          protocol: "ssh",
+        })
+        .pipe(Effect.provideService(WorkspaceOperation, stale), Effect.result);
+    }).pipe(
+      Effect.provide(
+        SourceControlRepositoryService.layer.pipe(
+          Layer.provide(
+            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+              resolveLink: () => undefined,
+              get: () => Effect.succeed(makeProvider({ createRepository })),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(GitVcsDriver.GitVcsDriver)({
+              execute: () => Effect.succeed(processOutput()),
+              ensureRemote,
+              pushCurrentBranch,
+            }),
+          ),
+        ),
+      ),
+    );
+    assert.isTrue(Result.isFailure(result));
+    assert.strictEqual(createRepository.mock.calls.length, 0);
+    assert.strictEqual(ensureRemote.mock.calls.length, 0);
+  }).pipe(Effect.provide(treehouseTestLayer)),
+);

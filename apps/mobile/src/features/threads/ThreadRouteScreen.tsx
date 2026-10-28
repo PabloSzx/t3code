@@ -1,5 +1,6 @@
 import * as Dialog from "../../components/ui/Dialog";
 import { ThreadWorkspaceScope } from "./ThreadWorkspaceScope";
+import { useResumeWorkspace } from "../../state/workspace-access";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
@@ -399,6 +400,7 @@ function ThreadRouteContent(
     };
   })();
   const navigation = useNavigation();
+  const resumeWorkspace = useResumeWorkspace();
   const selectDetail = useSelectWorkspaceDetail();
   const openPullRequest = useOpenPullRequest();
   const mergeBack = useAtomCommand(threadEnvironment.mergeBack, "merge thread back");
@@ -697,11 +699,14 @@ function ThreadRouteContent(
       return;
     }
 
-    void navigation.navigate("ThreadTerminal", {
-      environmentId: String(selectedThread.environmentId),
-      threadId: String(selectedThread.id),
-      ...(nextTerminalId ? { terminalId: nextTerminalId } : {}),
-    });
+    // Opening a terminal is an explicit action, so a returned workspace resumes first.
+    void resumeWorkspace().then(() =>
+      navigation.navigate("ThreadTerminal", {
+        environmentId: String(selectedThread.environmentId),
+        threadId: String(selectedThread.id),
+        ...(nextTerminalId ? { terminalId: nextTerminalId } : {}),
+      }),
+    );
   };
 
   const handleOpenNewTerminal = () => {

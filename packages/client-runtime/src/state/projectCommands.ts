@@ -104,7 +104,7 @@ export function createProjectEnvironmentAtoms<R, E>(
     key: ({ environmentId, input }: { environmentId: string; input: { projectId: string } }) =>
       JSON.stringify([environmentId, input.projectId]),
   };
-  return {
+  const atoms = {
     fileMetadata: fileMetadata.metadata,
     fileMetadataThread: fileMetadata.retainThread,
     invalidateFileMetadata: createEnvironmentCommand(runtime, {
@@ -235,5 +235,12 @@ export function createProjectEnvironmentAtoms<R, E>(
             fileMetadata.refreshPath(environmentId, path, registry);
         }),
     }),
+  };
+  return {
+    ...atoms,
+    // Writes a user just typed may resume a returned workspace; `writeFile` stays captured for
+    // recovered drafts and replays.
+    writeFileFromEdit: { ...atoms.writeFile, workspaceMode: "activate" as const },
+    writeFile: { ...atoms.writeFile, workspaceMode: "captured" as const },
   };
 }

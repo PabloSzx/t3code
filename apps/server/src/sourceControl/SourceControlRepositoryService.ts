@@ -30,6 +30,8 @@ import {
   type GitCloneProgressLine,
 } from "../project/gitCloneProgress.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
+import { isTreehouseLeaseError } from "../workspace/treehouseLeases.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -194,6 +196,26 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
+  // Repository writes admit their target once, so a stale generation cannot reach a recycled slot.
+  const guard = <A, E, R>(input: {
+    readonly operation: string;
+    readonly provider: SourceControlProviderKind;
+    readonly targets: readonly string[];
+    readonly effect: Effect.Effect<A, E, R>;
+  }) =>
+    access.use({ targets: input.targets, effect: input.effect }).pipe(
+      Effect.mapError((cause) =>
+        isTreehouseLeaseError(cause)
+          ? new SourceControlRepositoryError({
+              operation: input.operation,
+              provider: input.provider,
+              detail: cause.message,
+              cause,
+            })
+          : cause,
+      ),
+    );
 
   const ensureConcreteProvider = (input: {
     readonly operation: string;
@@ -529,7 +551,12 @@ export const make = Effect.gen(function* () {
       );
     }),
     prepareClone: Effect.fnUntraced(function* (input) {
-      return yield* prepareClone(input).pipe(
+      return yield* guard({
+        operation: "cloneRepository",
+        provider: input.provider ?? SourceControlProviderKind.make("unknown"),
+        targets: [input.destinationPath],
+        effect: prepareClone(input),
+      }).pipe(
         mapRepositoryError(
           "cloneRepository",
           input.provider ?? SourceControlProviderKind.make("unknown"),
@@ -537,7 +564,12 @@ export const make = Effect.gen(function* () {
       );
     }),
     cloneRepository: Effect.fnUntraced(function* (input, options) {
-      return yield* cloneRepository(input, options).pipe(
+      return yield* guard({
+        operation: "cloneRepository",
+        provider: input.provider ?? SourceControlProviderKind.make("unknown"),
+        targets: [input.destinationPath],
+        effect: cloneRepository(input, options),
+      }).pipe(
         mapRepositoryError(
           "cloneRepository",
           input.provider ?? SourceControlProviderKind.make("unknown"),
@@ -545,14 +577,21 @@ export const make = Effect.gen(function* () {
       );
     }),
     discardClone: Effect.fnUntraced(function* (destinationPath) {
-      return yield* discardClone(destinationPath).pipe(
-        mapRepositoryError("discardClone", SourceControlProviderKind.make("unknown")),
-      );
+      const provider = SourceControlProviderKind.make("unknown");
+      return yield* guard({
+        operation: "discardClone",
+        provider,
+        targets: [destinationPath],
+        effect: discardClone(destinationPath),
+      }).pipe(mapRepositoryError("discardClone", provider));
     }),
     publishRepository: Effect.fnUntraced(function* (input) {
-      return yield* publishRepository(input).pipe(
-        mapRepositoryError("publishRepository", input.provider),
-      );
+      return yield* guard({
+        operation: "publishRepository",
+        provider: input.provider,
+        targets: [input.cwd],
+        effect: publishRepository(input),
+      }).pipe(mapRepositoryError("publishRepository", input.provider));
     }),
   });
 });

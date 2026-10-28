@@ -22,6 +22,7 @@ import { environmentSession, usePreparedConnection } from "./session";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import { useAtomQueryRunner } from "./use-atom-query-runner";
+import { useScopedWorkspaceQuery } from "./workspace-access";
 
 export type { AssetUrlFailureReason, AssetUrlState } from "./asset-url-state";
 
@@ -51,11 +52,12 @@ export function useAssetUrlState(
   const blocked = blockedAssetUrlState(resource, fileAccess);
   const preparedConnection = usePreparedConnection(environmentId);
   const connectionPhase = fileEnvironment.presentation?.connection.phase ?? "available";
-  const result = useAtomValue(
+  const query = useScopedWorkspaceQuery(
     blocked !== null || environmentId === null || resource === null
-      ? EMPTY_ASSET_URL_ATOM
+      ? null
       : assetEnvironment.createUrl({ environmentId, input: { resource } }),
   );
+  const result = useAtomValue(query ?? EMPTY_ASSET_URL_ATOM);
   const shared =
     blocked ??
     assetUrlStateFromResult(

@@ -36,6 +36,8 @@ import {
   ClaudeSettings,
   CodexSettings,
   ProviderInstanceId,
+  ThreadId,
+  WorkspaceOperation,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -2728,6 +2730,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           })
           .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
       }
+      // Spawning admits the request's captured lease generation, so a request queued before a
+      // return and resume cannot open a shell in the resumed or a recycled checkout.
+      const captured = yield* WorkspaceOperation;
+      const context =
+        captured?.threadId === input.threadId
+          ? captured
+          : captured === undefined
+            ? undefined
+            : { threadId: ThreadId.make(input.threadId), generation: null };
+      const release = yield* leases
+        .pinOperation({ targets: paths, ...(context === undefined ? {} : { context }) })
+        .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
+      yield* release;
     },
   );
 

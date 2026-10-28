@@ -20,7 +20,11 @@ import { projectEnvironment } from "~/state/projects";
 import { useProjectPathSearch } from "~/state/queries";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import { revisionedQuery } from "~/state/revisionedQuery";
-import { useWorkspaceSource, useScopedWorkspaceQuery, useWorkspaceAvailability } from "~/workspaceContext";
+import {
+  useWorkspaceSource,
+  useScopedWorkspaceQuery,
+  useWorkspaceAvailability,
+} from "~/workspaceContext";
 
 const EMPTY_PROJECT_FILE_PATH = "";
 const EMPTY_PROJECT_ENTRIES_QUERY_ATOM = Atom.make(
@@ -56,54 +60,104 @@ export interface ProjectFileScopeOptions {
 
 export function createProjectFileScope(options: ProjectFileScopeOptions) {
   const { environmentId, cwd, relativePath, threadId, workspace } = options;
-  const optimistic = projectEnvironment.optimisticFile({ environmentId, cwd, relativePath, ...(threadId === undefined ? {} : { threadId }) });
-  const query = projectEnvironment.readFile({ environmentId, input: { cwd, relativePath, ...(relativePath === T3_PROJECT_FILE_NAME ? { allowMissing: true } : {}) }, ...(workspace === undefined ? {} : { workspace }) });
-  const sameGeneration = (other: WorkspaceOperationContext | undefined) => other?.threadId === workspace?.threadId && other?.generation === workspace?.generation;
+  const optimistic = projectEnvironment.optimisticFile({
+    environmentId,
+    cwd,
+    relativePath,
+    ...(threadId === undefined ? {} : { threadId }),
+  });
+  let readQuery: ReturnType<typeof projectEnvironment.readFile> | undefined;
+  // Build lazily: constructing the family member is a read request owner, so it must not exist without read access.
+  const query = () =>
+    (readQuery ??= projectEnvironment.readFile({
+      environmentId,
+      input: {
+        cwd,
+        relativePath,
+        ...(relativePath === T3_PROJECT_FILE_NAME ? { allowMissing: true } : {}),
+      },
+      ...(workspace === undefined ? {} : { workspace }),
+    }));
+  const sameGeneration = (other: WorkspaceOperationContext | undefined) =>
+    other?.threadId === workspace?.threadId && other?.generation === workspace?.generation;
   const draft = () => appAtomRegistry.get(optimistic);
   const data = () => {
     const value = draft();
-    return value?.confirmedAgainst === undefined || sameGeneration(value?.workspace) ? (value?.data ?? null) : null;
+    return value?.confirmedAgainst === undefined || sameGeneration(value?.workspace)
+      ? (value?.data ?? null)
+      : null;
   };
   return {
-    optimistic, query, data, workspace,
-    contents: () => data()?.contents ?? Option.getOrUndefined(AsyncResult.value(appAtomRegistry.get(query)))?.contents,
+    optimistic,
+    query,
+    data,
+    workspace,
+    contents: () =>
+      data()?.contents ??
+      Option.getOrUndefined(AsyncResult.value(appAtomRegistry.get(query())))?.contents,
     unsaved: () => {
       const value = draft();
-      return value?.confirmedAgainst === undefined && sameGeneration(value?.workspace) ? value?.data ?? null : null;
+      return value?.confirmedAgainst === undefined && sameGeneration(value?.workspace)
+        ? (value?.data ?? null)
+        : null;
     },
     requiresRetry: () => {
       const value = draft();
-      return value !== null && value.confirmedAgainst === undefined && !sameGeneration(value.workspace);
+      return (
+        value !== null && value.confirmedAgainst === undefined && !sameGeneration(value.workspace)
+      );
     },
     change: (contents: string) => {
-      if (!unsavedFileMounts.has(optimistic)) unsavedFileMounts.set(optimistic, appAtomRegistry.mount(optimistic));
+      if (!unsavedFileMounts.has(optimistic))
+        unsavedFileMounts.set(optimistic, appAtomRegistry.mount(optimistic));
       const captured = workspace ?? draft()?.workspace;
       appAtomRegistry.set(optimistic, {
-        confirmedAgainst: undefined, ...(captured === undefined ? {} : { workspace: captured }),
-        data: { relativePath, contents, byteLength: new TextEncoder().encode(contents).byteLength, truncated: false },
+        confirmedAgainst: undefined,
+        ...(captured === undefined ? {} : { workspace: captured }),
+        data: {
+          relativePath,
+          contents,
+          byteLength: new TextEncoder().encode(contents).byteLength,
+          truncated: false,
+        },
       });
     },
     confirm: (contents: string) => {
       const value = draft();
       if (value?.data.contents !== contents || !sameGeneration(value.workspace)) return false;
-      const confirmed = { ...value, confirmedAgainst: appAtomRegistry.get(query) };
+      const confirmed = { ...value, confirmedAgainst: appAtomRegistry.get(query()) };
       appAtomRegistry.set(optimistic, confirmed);
       releaseUnsavedFile(optimistic);
-      appAtomRegistry.refresh(query);
-      void executeAtomQuery(appAtomRegistry, query, { reportDefect: false, reportFailure: false }).then((result) => {
-        if (result._tag === "Success" && appAtomRegistry.get(optimistic) === confirmed) appAtomRegistry.set(optimistic, null);
+      appAtomRegistry.refresh(query());
+      void executeAtomQuery(appAtomRegistry, query(), {
+        reportDefect: false,
+        reportFailure: false,
+      }).then((result) => {
+        if (result._tag === "Success" && appAtomRegistry.get(optimistic) === confirmed)
+          appAtomRegistry.set(optimistic, null);
       });
       return true;
     },
   };
 }
 
-export function useProjectFileScope(options: Omit<ProjectFileScopeOptions, "threadId" | "workspace">) {
+export function useProjectFileScope(
+  options: Omit<ProjectFileScopeOptions, "threadId" | "workspace">,
+) {
   const source = useWorkspaceSource();
   const availability = useWorkspaceAvailability();
   const threadId = source?.environmentId === options.environmentId ? source.threadId : undefined;
-  const workspace = threadId !== undefined && availability?.cwd != null ? availability.context : undefined;
-  return useMemo(() => createProjectFileScope({ ...options, ...(threadId === undefined ? {} : { threadId }), ...(workspace === undefined ? {} : { workspace }) }), [options.environmentId, options.cwd, options.relativePath, threadId, workspace]);
+  const workspace =
+    threadId !== undefined && availability?.cwd != null ? availability.context : undefined;
+  return useMemo(
+    () =>
+      createProjectFileScope({
+        ...options,
+        ...(threadId === undefined ? {} : { threadId }),
+        ...(workspace === undefined ? {} : { workspace }),
+      }),
+    [options.environmentId, options.cwd, options.relativePath, threadId, workspace],
+  );
 }
 
 interface ProjectQueryState<A> {
@@ -264,7 +318,9 @@ export function useProjectEntriesQuery(
 ): ProjectQueryState<ProjectListEntriesResult> {
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
-  const scoped = useScopedWorkspaceQuery(getProjectEntriesQueryAtom(environmentId, cwd, directoryPath));
+  const scoped = useScopedWorkspaceQuery(
+    canReadFiles ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath) : null,
+  );
   const atom = canReadFiles && scoped !== null ? scoped : EMPTY_PROJECT_ENTRIES_QUERY_ATOM;
   const result = useAtomValue(revisionedQuery(atom, canReadFiles ? revision : undefined));
   const refreshAtom = useAtomRefresh(atom);
@@ -319,17 +375,19 @@ export function useProjectFileQuery(
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const isQueryEnabled = enabled;
-  const scope = useProjectFileScope({ environmentId, cwd, relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH });
-  const scoped = useScopedWorkspaceQuery(scope.query);
+  const scope = useProjectFileScope({
+    environmentId,
+    cwd,
+    relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH,
+  });
+  const scoped = useScopedWorkspaceQuery(enabled && canReadFiles ? scope.query() : null);
   const atom = enabled && canReadFiles && scoped !== null ? scoped : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);
   const refresh = () => refreshAtom();
   const readData = Option.getOrNull(AsyncResult.value(result));
   const isMissing = readData?.exists === false;
-  const optimisticResult = useAtomValue(
-    scope.optimistic,
-  );
+  const optimisticResult = useAtomValue(scope.optimistic);
   const optimisticFile = relativePath === null ? null : optimisticResult;
   const cause = failureCause(result);
   const readError = isProjectReadFileError(cause) ? cause : null;
@@ -344,7 +402,9 @@ export function useProjectFileQuery(
         : canReadFiles
           ? isMissing && !optimisticFile
             ? `'${relativePath}' does not exist.`
-            : scope.requiresRetry() ? "Unsaved text is retained from an inactive workspace. Resume and edit to retry saving." : errorMessage(cause)
+            : scope.requiresRetry()
+              ? "Unsaved text is retained from an inactive workspace. Resume and edit to retry saving."
+              : errorMessage(cause)
           : (fileAccess.error ?? "This connection cannot read host files."),
     isPending: isQueryEnabled && (fileAccess.isPending || result.waiting),
     readError,

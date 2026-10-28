@@ -26,7 +26,11 @@ import {
   EnvironmentRpcUnavailableError,
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
-import { createEnvironmentQueryAtomFamily, registerWorkspaceQuery, type EnvironmentRpcTarget } from "./runtime.ts";
+import {
+  createEnvironmentQueryAtomFamily,
+  registerWorkspaceQuery,
+  type EnvironmentRpcTarget,
+} from "./runtime.ts";
 
 const METADATA_STALE_TIME_MS = 60_000;
 const METADATA_CACHE_LIMIT = 1024;
@@ -55,7 +59,10 @@ class FileMetadataRequest extends Request.Class<
   EnvironmentRpcFailure<typeof WS_METHODS.filesystemGetMetadata> | EnvironmentRpcUnavailableError
 > {}
 
-function makeFileMetadataAtoms<R, E>({ runtime, workspace }: {
+function makeFileMetadataAtoms<R, E>({
+  runtime,
+  workspace,
+}: {
   readonly runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>;
   readonly workspace?: WorkspaceOperationContext;
 }) {
@@ -341,7 +348,9 @@ function makeFileMetadataAtoms<R, E>({ runtime, workspace }: {
   };
 }
 
-export function createFileMetadataAtoms<R, E>(runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>) {
+export function createFileMetadataAtoms<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+) {
   const native = makeFileMetadataAtoms({ runtime });
   const generations = new Map<string, typeof native>();
   const select = (workspace: WorkspaceOperationContext | undefined) => {
@@ -355,20 +364,31 @@ export function createFileMetadataAtoms<R, E>(runtime: Atom.AtomRuntime<Environm
     }
     return current;
   };
-  const metadata = (target: EnvironmentRpcTarget<FileMetadataInput>) => registerWorkspaceQuery({
-    atom: select(target.workspace).metadata(target),
-    target,
-    bind: (captured) => select(captured.workspace).metadata({ ...target, ...captured }),
-  });
+  const metadata = (target: EnvironmentRpcTarget<{ path: string; threadId?: ThreadId }>) =>
+    registerWorkspaceQuery({
+      atom: select(target.workspace).metadata(target),
+      target,
+      bind: (captured) => select(captured.workspace).metadata({ ...target, ...captured }),
+    });
   return {
     metadata,
     retainThread: native.retainThread,
-    rememberEntries: (...args: Parameters<typeof native.rememberEntries>) => Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberEntries(...args)),
-    rememberFile: (...args: Parameters<typeof native.rememberFile>) => Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberFile(...args)),
+    rememberEntries: (...args: Parameters<typeof native.rememberEntries>) =>
+      Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberEntries(...args)),
+    rememberFile: (...args: Parameters<typeof native.rememberFile>) =>
+      Effect.flatMap(WorkspaceOperation, (workspace) => select(workspace).rememberFile(...args)),
     seedAfterRead: native.seedAfterRead,
-    invalidate: (path: string) => Effect.forEach([native, ...generations.values()], (entry) => entry.invalidate(path), { discard: true }),
-    refreshPath: (environmentId: EnvironmentId, path: string, registry: AtomRegistry.AtomRegistry) => {
-      for (const entry of [native, ...generations.values()]) entry.refreshPath(environmentId, path, registry);
+    invalidate: (path: string) =>
+      Effect.forEach([native, ...generations.values()], (entry) => entry.invalidate(path), {
+        discard: true,
+      }),
+    refreshPath: (
+      environmentId: EnvironmentId,
+      path: string,
+      registry: AtomRegistry.AtomRegistry,
+    ) => {
+      for (const entry of [native, ...generations.values()])
+        entry.refreshPath(environmentId, path, registry);
     },
   };
 }

@@ -32,7 +32,10 @@ import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/s
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
-import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./stderr.ts";
+import {
+  appendProviderStderrTail as appendAcpStderrTail,
+  sanitizeProviderStderrExcerpt as sanitizeAcpStderrExcerpt,
+} from "@t3tools/provider-core/server/providerStderr";
 import {
   collectSessionConfigOptionValues,
   decideToolCallUpdateEmission,

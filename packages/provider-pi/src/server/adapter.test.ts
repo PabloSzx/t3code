@@ -4260,11 +4260,36 @@ describe("PiRpc early process exit", () => {
       const error = yield* Queue.take(connection.events).pipe(Effect.flip);
       assert.equal(error._tag, "PiRpcError");
       assert.equal(error.operation, "read");
-      assert.equal(error.detail, "pi process exited with code 1");
-      assert.isFalse((error.detail ?? "").includes("API_KEY"));
+      assert.equal(error.detail, "pi process exited with code 1: API_KEY=[redacted]");
       assert.isFalse((error.detail ?? "").includes("super-secret"));
-      assert.isFalse(error.message.includes("API_KEY"));
       assert.isFalse(error.message.includes("super-secret"));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("explains a launcher that exits before Pi starts, without leaking the home path", () =>
+    Effect.gen(function* () {
+      const home = yield* HostProcess.HomeDirectory;
+      const stderr = `No version is set for command node\nConsider adding nodejs 24.15.0 to ${home}/.tool-versions\n`;
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(
+          makeHandle({
+            exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(126)),
+            stderr: Stream.fromIterable([new TextEncoder().encode(stderr)]),
+          }),
+        ),
+      );
+      const connection = yield* makePiRpcConnection({
+        command: "pi",
+        args: ["--mode", "rpc"],
+        cwd: undefined,
+        env: {},
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+
+      const error = yield* Queue.take(connection.events).pipe(Effect.flip);
+      assert.include(error.detail ?? "", "pi process exited with code 126");
+      assert.include(error.detail ?? "", "No version is set for command node");
+      assert.include(error.detail ?? "", "~/.tool-versions");
+      assert.notInclude(error.detail ?? "", home);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

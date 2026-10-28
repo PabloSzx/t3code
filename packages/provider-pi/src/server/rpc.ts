@@ -19,6 +19,10 @@ import {
 } from "@t3tools/shared/toolOutput";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import {
+  appendProviderStderrTail,
+  sanitizeProviderStderrExcerpt,
+} from "@t3tools/provider-core/server/providerStderr";
 
 export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   operation: Schema.String,
@@ -136,12 +140,21 @@ function summarizePiError(error: unknown): string {
     : text;
 }
 
-// Pi 0.84+ may exit 1 during import without any protocol output.
-function describePiStdoutClosure(exitCode: number | undefined): string {
-  if (exitCode === undefined || !Number.isFinite(exitCode)) {
-    return "pi process closed stdout";
-  }
-  return `pi process exited with code ${exitCode}`;
+const PI_STARTUP_STDERR_MAX_CHARS = 500;
+
+// Pi 0.84+ may exit 1 during import without any protocol output. A process that exits before
+// speaking the protocol usually explains why on stderr, such as a version manager with no Node.
+function describePiStdoutClosure(exitCode: number | undefined, startupStderr: string): string {
+  const base =
+    exitCode === undefined || !Number.isFinite(exitCode)
+      ? "pi process closed stdout"
+      : `pi process exited with code ${exitCode}`;
+  if (startupStderr.length === 0) return base;
+  const excerpt =
+    startupStderr.length > PI_STARTUP_STDERR_MAX_CHARS
+      ? `…${startupStderr.slice(-PI_STARTUP_STDERR_MAX_CHARS)}`
+      : startupStderr;
+  return `${base}: ${excerpt}`;
 }
 
 function parsePiRecord(line: string): PiRpcRecord | undefined {
@@ -191,6 +204,11 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   let childExited = false;
   let diagnosingStdoutClose = false;
+  // Stderr is retained only until the first protocol record, and only reported if Pi then exits.
+  let receivedRecord = false;
+  let startupStderr = "";
+  const stderrDone = yield* Deferred.make<void>();
+  const homeDirectory = yield* HostProcess.HomeDirectory;
 
   const killProcessGroup = (signal: NodeJS.Signals): boolean => {
     try {
@@ -252,6 +270,8 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   const routeRecord =
     /* Protocol records and writes include streaming deltas; avoid a span per record. */
     Effect.fnUntraced(function* (record: PiRpcRecord) {
+      receivedRecord = true;
+      startupStderr = "";
       if (record["type"] === "response" && typeof record["id"] === "string") {
         const pending = pendingRequests.get(record["id"]);
         if (pending !== undefined) {
@@ -331,11 +351,18 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
               Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
               Effect.orElseSucceed(() => Option.none<number>()),
             );
+        if (!receivedRecord)
+          // Stderr can trail stdout; give a dying process a moment to finish explaining itself.
+          yield* Deferred.await(stderrDone).pipe(
+            Effect.timeoutOption(Duration.millis(250)),
+            Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+          );
         return yield* failTransport(
           new PiRpcError({
             operation: "read",
             detail: describePiStdoutClosure(
               Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
+              receivedRecord ? "" : sanitizeProviderStderrExcerpt(startupStderr, homeDirectory),
             ),
           }),
         );
@@ -346,13 +373,14 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   yield* child.stderr.pipe(
     Stream.decodeText(),
-    Stream.runForEach((chunk) =>
-      chunk.trim().length === 0
-        ? Effect.void
-        : // Log stderr length only; unbounded text may contain credentials or prompts.
-          Effect.logDebug("pi stderr", { stderrLength: chunk.length }),
-    ),
+    Stream.runForEach((chunk) => {
+      if (chunk.trim().length === 0) return Effect.void;
+      if (!receivedRecord) startupStderr = appendProviderStderrTail(startupStderr, chunk);
+      // Log stderr length only; unbounded text may contain credentials or prompts.
+      return Effect.logDebug("pi stderr", { stderrLength: chunk.length });
+    }),
     Effect.ignore,
+    Effect.ensuring(Deferred.succeed(stderrDone, undefined)),
     Effect.forkIn(scope),
   );
 

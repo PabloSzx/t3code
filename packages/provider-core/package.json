@@ -15,6 +15,10 @@
       "types": "./src/server/attachmentPrompt.ts",
       "import": "./src/server/attachmentPrompt.ts"
     },
+    "./server/providerStderr": {
+      "types": "./src/server/providerStderr.ts",
+      "import": "./src/server/providerStderr.ts"
+    },
     "./server/auth": {
       "types": "./src/server/auth.ts",
       "import": "./src/server/auth.ts"

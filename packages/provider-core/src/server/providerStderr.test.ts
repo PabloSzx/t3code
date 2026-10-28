@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { sanitizeAcpStderrExcerpt } from "./stderr.ts";
+import { sanitizeProviderStderrExcerpt } from "./providerStderr.ts";
 
-describe("AcpStderr", () => {
+describe("providerStderr", () => {
   it("redacts home paths, pairing URLs, and tokens from stderr excerpts", () => {
-    const excerpt = sanitizeAcpStderrExcerpt(
+    const excerpt = sanitizeProviderStderrExcerpt(
       [
         "Invalid project config at /Users/ada/.cursor/cli.json",
         "Authorization: Bearer secret-token-value",
@@ -28,7 +28,7 @@ describe("AcpStderr", () => {
   });
 
   it("redacts hyphenated OpenAI project keys and header credentials", () => {
-    const excerpt = sanitizeAcpStderrExcerpt(
+    const excerpt = sanitizeProviderStderrExcerpt(
       [
         "openai=sk-proj-abcdefghijklmnopqrstuvwxyz012345",
         "svc=sk-svcacct-abcdefghijklmnopqrstuvwxyz012345",

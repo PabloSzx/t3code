@@ -165,6 +165,8 @@ export function createShellEnvironmentAtoms<R, E>(
 
 export interface ResumeWorkspaceOptions {
   readonly availability: WorkspaceAvailability | null;
+  /** Reads availability when the subscription has not delivered it yet. */
+  readonly resolveAvailability: () => Promise<WorkspaceAvailability | null>;
   readonly prepare: () => Promise<AtomCommandResult<WorkspaceReservation, unknown>>;
   readonly complete: (reservationId: string) => Promise<unknown>;
 }
@@ -172,11 +174,12 @@ export interface ResumeWorkspaceOptions {
 /**
  * Resumes a returned workspace before an explicit navigation such as opening a file or terminal.
  * Mounting the destination then reads through the resumed generation. Active and native
- * workspaces need nothing, so passive mounts never reach this.
+ * workspaces need nothing, so passive mounts never reach this. Unknown availability is read
+ * first rather than treated as usable.
  */
 export async function resumeWorkspaceForAction(options: ResumeWorkspaceOptions): Promise<boolean> {
-  const { availability } = options;
-  if (availability === null || availability.state === "native" || availability.state === "active")
+  const availability = options.availability ?? (await options.resolveAvailability());
+  if (availability !== null && (availability.state === "native" || availability.state === "active"))
     return true;
   const prepared = await options.prepare();
   if (!AsyncResult.isSuccess(prepared)) return false;

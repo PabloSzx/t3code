@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   },
   commits: 0,
   pushes: 0,
-  metadataRequests: [] as { environmentId: string; branch: string }[],
+  metadataRequests: [] as { environmentId: string; branch: string; worktreePath?: string | null }[],
   results: [] as { type: string; description?: string }[],
   afterGitAction: undefined as (() => void) | undefined,
   statusRefreshes: 0,
@@ -68,7 +68,11 @@ vi.mock("./threads", () => ({
       environmentId: string;
       input: { branch: string; worktreePath: string | null };
     }) => {
-      state.metadataRequests.push({ environmentId, branch: input.branch });
+      state.metadataRequests.push({
+        environmentId,
+        branch: input.branch,
+        ...("worktreePath" in input ? { worktreePath: input.worktreePath } : {}),
+      });
       if (!state.scopes.has(AuthOrchestrationOperateScope)) {
         return AsyncResult.failure(Cause.fail(new Error("Task operation denied")));
       }
@@ -152,6 +156,21 @@ describe("thread Git mutation permissions", () => {
       expect(state.worktrees).toEqual(canOperate ? ["/repo-worktree"] : []);
       expect(state.thread.worktreePath).toBe(canOperate ? "/repo-worktree" : null);
       expect(state.thread.branch).toBe(canOperate ? "feature/task" : "main");
+    },
+  );
+
+  it.each(["create", "checkout"] as const)(
+    "keeps the current workspace binding when %s only changes the branch",
+    async (operation) => {
+      state.scopes.add(AuthOrchestrationOperateScope);
+      state.thread.worktreePath = "/pool/resumed";
+      const actions = useSelectedThreadGitActions();
+      if (operation === "create") await actions.onCreateSelectedThreadBranch("feature");
+      else await actions.onCheckoutSelectedThreadBranch("feature");
+      expect(state.metadataRequests).toEqual([
+        { environmentId: expect.anything(), branch: "feature" },
+      ]);
+      expect(state.thread.worktreePath).toBe("/pool/resumed");
     },
   );
 

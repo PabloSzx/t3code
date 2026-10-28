@@ -781,9 +781,9 @@ function useChatMarkdownState({
     const isLatestLookup = claimWorkspaceBasenameLookup();
     // Opening a file is an explicit action, so a returned workspace resumes before the panel reads.
     const openAt = (path: string) => {
-      void resumeWorkspace().then(() =>
-        useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line),
-      );
+      void resumeWorkspace().then((resumed) => {
+        if (resumed) useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line);
+      });
     };
     if (
       fileLinkMeta.workspaceLookupPath === null ||

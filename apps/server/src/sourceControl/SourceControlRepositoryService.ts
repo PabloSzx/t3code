@@ -551,11 +551,18 @@ export const make = Effect.gen(function* () {
       );
     }),
     prepareClone: Effect.fnUntraced(function* (input) {
+      // Admit the exact normalized path the clone writes to, not a differently spelled one.
+      const destinationPath = yield* normalizeDestinationPath(input.destinationPath).pipe(
+        mapRepositoryError(
+          "cloneRepository",
+          input.provider ?? SourceControlProviderKind.make("unknown"),
+        ),
+      );
       return yield* guard({
         operation: "cloneRepository",
         provider: input.provider ?? SourceControlProviderKind.make("unknown"),
-        targets: [input.destinationPath],
-        effect: prepareClone(input),
+        targets: [destinationPath],
+        effect: prepareClone({ ...input, destinationPath }),
       }).pipe(
         mapRepositoryError(
           "cloneRepository",
@@ -564,11 +571,17 @@ export const make = Effect.gen(function* () {
       );
     }),
     cloneRepository: Effect.fnUntraced(function* (input, options) {
+      const destinationPath = yield* normalizeDestinationPath(input.destinationPath).pipe(
+        mapRepositoryError(
+          "cloneRepository",
+          input.provider ?? SourceControlProviderKind.make("unknown"),
+        ),
+      );
       return yield* guard({
         operation: "cloneRepository",
         provider: input.provider ?? SourceControlProviderKind.make("unknown"),
-        targets: [input.destinationPath],
-        effect: cloneRepository(input, options),
+        targets: [destinationPath],
+        effect: cloneRepository({ ...input, destinationPath }, options),
       }).pipe(
         mapRepositoryError(
           "cloneRepository",
@@ -578,11 +591,14 @@ export const make = Effect.gen(function* () {
     }),
     discardClone: Effect.fnUntraced(function* (destinationPath) {
       const provider = SourceControlProviderKind.make("unknown");
+      const normalized = yield* normalizeDestinationPath(destinationPath).pipe(
+        mapRepositoryError("discardClone", provider),
+      );
       return yield* guard({
         operation: "discardClone",
         provider,
-        targets: [destinationPath],
-        effect: discardClone(destinationPath),
+        targets: [normalized],
+        effect: discardClone(normalized),
       }).pipe(mapRepositoryError("discardClone", provider));
     }),
     publishRepository: Effect.fnUntraced(function* (input) {

@@ -2739,10 +2739,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           : captured === undefined
             ? undefined
             : { threadId: ThreadId.make(input.threadId), generation: null };
-      const release = yield* leases
+      // Held until the caller's scope closes, after the shell's own lifetime pin is taken, so a
+      // return and resume cannot slip in between admission and spawn.
+      const admit = leases
         .pinOperation({ targets: paths, ...(context === undefined ? {} : { context }) })
         .pipe(Effect.mapError((cause) => new TerminalCwdStatError({ cwd: input.cwd, cause })));
-      yield* release;
+      yield* Effect.acquireRelease(admit, (release) => release).pipe(Effect.asVoid);
     },
   );
 
@@ -2884,7 +2886,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   });
 
   const openLocked = (input: TerminalOpenInput) =>
-    withWorkspaceLease(path.resolve(input.cwd), openWithWorkspaceLease(input));
+    withWorkspaceLease(path.resolve(input.cwd), Effect.scoped(openWithWorkspaceLease(input)));
 
   const open: TerminalManager["Service"]["open"] = (input) =>
     withThreadLock(
@@ -3325,7 +3327,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.flatMap((resolved) =>
           withWorkspaceLease(
             path.resolve(resolved.cwd),
-            assertTreehouseWorkspace(resolved).pipe(Effect.andThen(restartResolved(resolved))),
+            Effect.scoped(
+              assertTreehouseWorkspace(resolved).pipe(Effect.andThen(restartResolved(resolved))),
+            ),
           ),
         ),
       ),

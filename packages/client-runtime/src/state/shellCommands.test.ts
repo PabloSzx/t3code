@@ -171,6 +171,7 @@ it("resumes only a returned workspace before an explicit navigation", async () =
     complete: async (id: string) => {
       completed.push(id);
     },
+    resolveAvailability: async () => ({ state: "released" as const, cwd: null }),
   };
   expect(
     await resumeWorkspaceForAction({
@@ -188,4 +189,7 @@ it("resumes only a returned workspace before an explicit navigation", async () =
   ).toBe(true);
   expect(prepared).toBe(1);
   expect(completed).toEqual(["resume"]);
+  // Unknown availability is read first, so a released workspace still resumes.
+  expect(await resumeWorkspaceForAction({ ...options, availability: null })).toBe(true);
+  expect(prepared).toBe(2);
 });

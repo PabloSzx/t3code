@@ -17,6 +17,7 @@ import {
   type SourceControlCloneRepositoryInput,
 } from "@t3tools/contracts";
 
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -708,5 +709,40 @@ it.live("refuses a stale publish into a pooled slot that another conversation no
     assert.isTrue(Result.isFailure(result));
     assert.strictEqual(createRepository.mock.calls.length, 0);
     assert.strictEqual(ensureRemote.mock.calls.length, 0);
+  }).pipe(Effect.provide(treehouseTestLayer)),
+);
+
+it.live("admits the normalized clone destination, not its spelling", () =>
+  Effect.gen(function* () {
+    const f = yield* accessFixture();
+    yield* f.recycle;
+    const home = f.path.dirname(f.path.dirname(f.path.dirname(f.slot)));
+    const execute = vi.fn(() => Effect.succeed(processOutput()));
+    const result = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* service
+        .cloneRepository({
+          remoteUrl: "https://example.invalid/repo.git",
+          // `~` spells a path inside the recycled slot that the guard must still see.
+          destinationPath: `~/${f.path.relative(home, f.slot)}/nested/cloned`,
+        })
+        .pipe(Effect.result);
+    }).pipe(
+      Effect.provide(
+        SourceControlRepositoryService.layer.pipe(
+          Layer.provide(
+            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+              resolveLink: () => undefined,
+              get: () => Effect.succeed(makeProvider()),
+            }),
+          ),
+          Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({ execute })),
+        ),
+      ),
+      Effect.provideService(HostProcess.HomeDirectory, home),
+    );
+    assert.isTrue(Result.isFailure(result));
+    assert.strictEqual(execute.mock.calls.length, 0);
+    assert.isFalse(yield* f.fs.exists(f.path.join(f.slot, "nested")));
   }).pipe(Effect.provide(treehouseTestLayer)),
 );

@@ -3,7 +3,8 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId, WorkspaceAvailability } from "@t3tools/contracts";
 import { scopeWorkspaceQuery } from "@t3tools/client-runtime/state/runtime";
 import { resumeWorkspaceForAction } from "@t3tools/client-runtime/state/shell";
-import { AsyncResult, Atom } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { shellEnvironment } from "./state/shell";
 
@@ -61,6 +62,16 @@ export function useResumeWorkspace() {
       ? Promise.resolve(true)
       : resumeWorkspaceForAction({
           availability,
+          resolveAvailability: () =>
+            Effect.runPromise(
+              AtomRegistry.getResult(
+                registry,
+                shellEnvironment.workspaceAvailability({
+                  environmentId: source.environmentId,
+                  input: { threadId: source.threadId },
+                }),
+              ).pipe(Effect.orElseSucceed(() => null)),
+            ),
           prepare: () =>
             shellEnvironment.prepareWorkspaceAction.run(registry, {
               environmentId: source.environmentId,

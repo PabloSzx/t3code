@@ -518,6 +518,51 @@ it.layer(
       ),
   );
 
+  it.effect("keeps the lease admitted between the generation check and spawn", () =>
+    Effect.gen(function* () {
+      const f = yield* createTreehouseWorkspace();
+      const statStarted = yield* Deferred.make<void>();
+      const resumeStat = yield* Deferred.make<void>();
+      const fs = {
+        ...f.fs,
+        stat: (target: string) =>
+          target === f.subdir
+            ? Deferred.succeed(statStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(resumeStat)),
+                Effect.andThen(f.fs.stat(target)),
+              )
+            : f.fs.stat(target),
+      };
+      const { manager } = yield* createManager().pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+      );
+      const thread = ThreadId.make("thread-1");
+      const generation = yield* f.leases.operationGeneration({ path: f.slot, threadId: thread });
+      const opening = yield* manager
+        .open(openInput({ cwd: f.subdir, worktreePath: f.slot }))
+        .pipe(
+          Effect.provideService(WorkspaceOperation, { threadId: thread, generation }),
+          Effect.forkScoped,
+        );
+      yield* Deferred.await(statStarted);
+      const owned = yield* f.leases.read(f.slot);
+      assert.isNotNull(owned);
+      // Detach the binding so only an operation pin can keep the slot from being returned.
+      yield* f.leases.commitThread({
+        path: null,
+        threadId: "thread-1",
+        deleted: false,
+        sequence: 2,
+      });
+      // While the old request sits between admission and spawn, the slot cannot be returned.
+      assert.equal((yield* f.leases.assertReturnable(owned!).pipe(Effect.result))._tag, "Failure");
+      yield* Deferred.succeed(resumeStat, undefined);
+      yield* Fiber.join(opening);
+    }).pipe(
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "terminal-ownership-" })),
+    ),
+  );
+
   it.effect(
     "pins the actual subdirectory cwd until PTY exit, even after closing and detaching",
     () =>

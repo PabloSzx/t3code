@@ -7,10 +7,10 @@ import {
   createProjectFaviconUrlAtomFamily,
   EMPTY_ASSET_URL_ATOM,
 } from "@t3tools/client-runtime/state/assets";
-import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
+import { executeAtomQuery, scopeWorkspaceQuery } from "@t3tools/client-runtime/state/runtime";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { Atom, AsyncResult } from "effect/reactivity";
+import { Atom, AsyncResult, AtomRegistry } from "effect/reactivity";
 import { useCallback } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
@@ -22,6 +22,7 @@ import { environmentSession, usePreparedConnection } from "./session";
 import { useEnvironmentPresentation } from "./presentation";
 import { useEnvironmentQuery } from "./query";
 import { useAtomQueryRunner } from "./use-atom-query-runner";
+import { shellEnvironment } from "./shell";
 import { useScopedWorkspaceQuery } from "./workspace-access";
 
 export type { AssetUrlFailureReason, AssetUrlState } from "./asset-url-state";
@@ -107,7 +108,25 @@ export async function refreshAssetUrl(
 ): Promise<string | null> {
   const connectionAtom = environmentSession.preparedConnectionValueAtom(environmentId);
   if (appAtomRegistry.get(connectionAtom)._tag === "None") return null;
-  const atom = assetEnvironment.createUrl({ environmentId, input: { resource } });
+  // Presentation tasks run outside the screen's workspace scope, so a thread workspace resource
+  // carries that thread's current lease generation here. Other resources stay unbound.
+  const unscoped = assetEnvironment.createUrl({ environmentId, input: { resource } });
+  const threadId =
+    resource._tag === "workspace-file" || resource._tag === "media-file" ? resource.threadId : null;
+  const availability =
+    threadId === null
+      ? null
+      : await Effect.runPromise(
+          AtomRegistry.getResult(
+            appAtomRegistry,
+            shellEnvironment.workspaceAvailability({ environmentId, input: { threadId } }),
+          ).pipe(Effect.orElseSucceed(() => null)),
+        );
+  const atom =
+    threadId === null
+      ? unscoped
+      : scopeWorkspaceQuery({ atom: unscoped, environmentId, threadId, availability });
+  if (atom === null) return null;
   const result = await executeAtomQuery(appAtomRegistry, atom, {
     label: atom.label?.[0] ?? "asset url",
     refresh: true,

@@ -700,13 +700,14 @@ function ThreadRouteContent(
     }
 
     // Opening a terminal is an explicit action, so a returned workspace resumes first.
-    void resumeWorkspace().then(() =>
+    void resumeWorkspace().then((resumed) => {
+      if (!resumed) return;
       navigation.navigate("ThreadTerminal", {
         environmentId: String(selectedThread.environmentId),
         threadId: String(selectedThread.id),
         ...(nextTerminalId ? { terminalId: nextTerminalId } : {}),
-      }),
-    );
+      });
+    });
   };
 
   const handleOpenNewTerminal = () => {

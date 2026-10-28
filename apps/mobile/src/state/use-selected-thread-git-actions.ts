@@ -72,8 +72,7 @@ export function useSelectedThreadGitActions() {
     AuthOrchestrationOperateScope,
   );
   const canChangeThreadBranch = canWriteSourceControl && canOperateThread;
-  const { selectedThreadCwd, selectedThreadWorktreePath, recordedCwd } =
-    useSelectedThreadWorktree();
+  const { selectedThreadCwd, recordedCwd } = useSelectedThreadWorktree();
   // Git mutations are explicit: they target the recorded path, which the command hook resumes
   // and rebases when the workspace was returned. Status reads keep the available path.
   const actionCwd = selectedThreadCwd ?? recordedCwd;
@@ -265,22 +264,16 @@ export function useSelectedThreadGitActions() {
           const syncResult = await syncSelectedThreadBranchState({
             thread,
             cwd,
-            nextThreadState: {
-              branch: result.value.refName ?? thread.branch,
-              worktreePath: selectedThreadWorktreePath,
-            },
+            // A branch change keeps the thread's current workspace binding, including one the
+            // action just resumed; sending a pre-action path could detach it.
+            nextThreadState: { branch: result.value.refName ?? thread.branch },
           });
           return AsyncResult.isFailure(syncResult) ? AsyncResult.failure(syncResult.cause) : result;
         },
         { changesThreadBranch: true },
       );
     },
-    [
-      runSelectedThreadGitMutation,
-      selectedThreadWorktreePath,
-      syncSelectedThreadBranchState,
-      switchRef,
-    ],
+    [runSelectedThreadGitMutation, syncSelectedThreadBranchState, switchRef],
   );
 
   const onCreateSelectedThreadBranch = useCallback(
@@ -299,22 +292,16 @@ export function useSelectedThreadGitActions() {
           const syncResult = await syncSelectedThreadBranchState({
             thread,
             cwd,
-            nextThreadState: {
-              branch: result.value.refName ?? thread.branch,
-              worktreePath: selectedThreadWorktreePath,
-            },
+            // A branch change keeps the thread's current workspace binding, including one the
+            // action just resumed; sending a pre-action path could detach it.
+            nextThreadState: { branch: result.value.refName ?? thread.branch },
           });
           return AsyncResult.isFailure(syncResult) ? AsyncResult.failure(syncResult.cause) : result;
         },
         { changesThreadBranch: true },
       );
     },
-    [
-      runSelectedThreadGitMutation,
-      selectedThreadWorktreePath,
-      syncSelectedThreadBranchState,
-      createRef,
-    ],
+    [runSelectedThreadGitMutation, syncSelectedThreadBranchState, createRef],
   );
 
   const onCreateSelectedThreadWorktree = useCallback(
@@ -399,10 +386,7 @@ export function useSelectedThreadGitActions() {
             const syncResult = await syncSelectedThreadBranchState({
               thread,
               cwd,
-              nextThreadState: {
-                branch: result.value.branch.name,
-                worktreePath: selectedThreadWorktreePath,
-              },
+              nextThreadState: { branch: result.value.branch.name },
             });
             if (AsyncResult.isFailure(syncResult)) {
               return AsyncResult.failure(syncResult.cause);
@@ -426,7 +410,6 @@ export function useSelectedThreadGitActions() {
       runStackedAction,
       refreshSelectedThreadGitStatus,
       runSelectedThreadGitMutation,
-      selectedThreadWorktreePath,
       syncSelectedThreadBranchState,
     ],
   );

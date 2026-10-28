@@ -271,7 +271,8 @@ const make = Effect.gen(function* () {
   const read = Effect.fn("TreehouseLeases.read")(
     function* (target: string) {
       const slot = yield* inspect(target);
-      if (slot === null) return null;
+      // Leases held outside T3 stay unmanaged; T3 never pins, binds, or returns them.
+      if (slot === null || !slot.lease_holder.startsWith("t3-code:")) return null;
       const root = yield* location();
       const id = yield* decodeLeaseId(slot.lease_id);
       const recordPath = path.join(root, "leases", `${id}.json`);

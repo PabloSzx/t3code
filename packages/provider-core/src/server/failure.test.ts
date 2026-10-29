@@ -17,6 +17,7 @@ import {
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
   CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
   ContextHandoffBudgetError,
+  ContextHandoffBackgroundWorkError,
 } from "./failure.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -83,6 +84,16 @@ it("preserves actionable handoff errors wrapped by turn startup", () => {
   assert.equal(failure.code, CONTEXT_HANDOFF_BUDGET_FAILURE_CODE);
   // A provider that cannot compact keeps the plain error, with nothing to recover.
   assert.isNull(makeProviderFailure({ cause: new ContextHandoffBudgetError() }).code);
+  for (const error of [new ContextHandoffBudgetError(), new ContextHandoffBackgroundWorkError()]) {
+    const cause = new ProviderAdapter.ProviderAdapterTurnStartError({
+      driver: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("thread:handoff-error"),
+      providerThreadId: ProviderThreadId.make("provider-thread:handoff-error"),
+      runId: RunId.make("run:handoff-error"),
+      cause: error,
+    });
+    assert.equal(makeProviderFailure({ cause: Cause.fail(cause) }).message, error.message);
+  }
 });
 
 it("keeps unrecognized reasons and provider text out of category messages", () => {

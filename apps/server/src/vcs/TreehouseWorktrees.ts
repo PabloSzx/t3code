@@ -82,7 +82,7 @@ const make = Effect.gen(function* () {
   }) {
     const output = yield* runner.run({
       ...input,
-      stdin: "",
+      ...(input.command === "git" ? {} : { stdin: "" }),
       timeout: "15 minutes",
       maxOutputBytes: 1024 * 1024,
     });
@@ -191,7 +191,6 @@ const make = Effect.gen(function* () {
             command: "git",
             args: ["show-ref", "--verify", "--quiet", `refs/heads/${input.refName}`],
             cwd: input.cwd,
-            stdin: "",
           });
           if (local.code !== 0 && local.code !== 1)
             return yield* new TreehouseLeaseError({

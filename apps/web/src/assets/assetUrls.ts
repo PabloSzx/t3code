@@ -87,8 +87,6 @@ export function makeRevisionedAssetUrlFamily(
     family(JSON.stringify([target.environmentId, target.input.resource, target.revision]));
 }
 
-export const revisionedAssetUrl = makeRevisionedAssetUrlFamily(assetEnvironment.createUrl);
-
 // A scoped asset query identifies its lease generation; the wrapper is keyed by that query.
 const scopedRevisionedAssetUrls = new WeakMap<
   Atom.Atom<AsyncResult.AsyncResult<AssetCreateUrlResult, unknown>>,

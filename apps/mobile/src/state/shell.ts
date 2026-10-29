@@ -1,8 +1,8 @@
 import {
   createEnvironmentShellAtoms,
+  createShellEnvironmentAtoms,
   createEnvironmentShellSummaryAtom,
   createEnvironmentSnapshotAtom,
-  createShellEnvironmentAtoms,
   EMPTY_SHELL_STATE,
   type EnvironmentShellState,
 } from "@t3tools/client-runtime/state/shell";

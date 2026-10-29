@@ -213,6 +213,7 @@ it.effect(
           getContextBudgetRecoveryCandidates: Effect.die(
             "unused getContextBudgetRecoveryCandidates",
           ),
+          getOpenRemoteDelegatedTasks: Effect.die("unused getOpenRemoteDelegatedTasks"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           listActiveSubagentThreadIds: () => Effect.die("unused listActiveSubagentThreadIds"),
           listOlderSettledThreads: () => Effect.die("unused listOlderSettledThreads"),

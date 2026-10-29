@@ -8,6 +8,11 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({ diff: vi.fn() }));
+vi.mock("../../state/workspace-access", () => ({
+  useScopedWorkspaceQuery: <A,>(atom: A) => atom,
+  useWorkspaceSource: () => null,
+  useWorkspaceAvailability: () => null,
+}));
 vi.mock("../../state/pull-requests", () => ({ composerPullRequests: { diff: mocks.diff } }));
 
 import { usePullRequestDiff, usePullRequestDiffEntry } from "./usePullRequestDiff";

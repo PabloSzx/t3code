@@ -89,6 +89,7 @@ export function createProjectFileScope(options: ProjectFileScopeOptions) {
   };
   return {
     optimistic,
+    threadId,
     query,
     data,
     workspace,
@@ -340,7 +341,7 @@ export function useProjectEntriesQuery(
   const refreshAtom = useAtomRefresh(atom);
   const refresh = () => refreshAtom();
   return {
-    data: Option.getOrNull(AsyncResult.value(result)),
+    data: AsyncResult.getOrElse(result, () => null),
     error: fileAccess.isPending
       ? null
       : canReadFiles
@@ -399,7 +400,7 @@ export function useProjectFileQuery(
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);
   const refresh = () => refreshAtom();
-  const readData = Option.getOrNull(AsyncResult.value(result));
+  const readData = AsyncResult.getOrElse(result, () => null);
   const isMissing = readData?.exists === false;
   const optimisticResult = useAtomValue(scope.optimistic);
   const optimisticFile = relativePath === null ? null : optimisticResult;

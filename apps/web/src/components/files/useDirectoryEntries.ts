@@ -3,6 +3,8 @@ import * as Cause from "effect/Cause";
 import { useEffect, useRef, useState } from "react";
 
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
+import { useAtomMount, useAtomSubscribe } from "@effect/atom-react";
+import { environmentCatalog } from "~/connection/catalog";
 import { projectEnvironment } from "~/state/projects";
 
 export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
@@ -90,6 +92,7 @@ export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
     return startRequest(directoryPath, refresh);
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts the root directory read on mount and marks the hook inactive so late reads are ignored
   useEffect(() => {
     active.current = true;
     if (!requests.current.has("") && !loaded.current.has("")) void startRequest("", false);
@@ -97,6 +100,15 @@ export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
       active.current = false;
     };
   }, [startRequest]);
+
+  // A folder read fails at once while its environment is unreachable; read it again once a new
+  // session is up rather than leaving the error until someone retries by hand.
+  const sessionGeneration = environmentCatalog.sessionGenerationAtom(environmentId);
+  // A listener alone does not compute the atom, so nothing would follow the connection.
+  useAtomMount(sessionGeneration);
+  useAtomSubscribe(sessionGeneration, () => {
+    for (const path of errors.keys()) void load(path);
+  });
 
   const entries: ProjectEntry[] = [];
   const visit = (path: string) => {

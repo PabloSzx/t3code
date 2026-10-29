@@ -231,6 +231,9 @@ describe("Treehouse worktrees", () => {
     (ref) =>
       Effect.gen(function* () {
         const f = yield* fixture();
+        if (ref === "origin/main") {
+          yield* f.git({ args: ["remote", "add", "origin", f.cwd] });
+        }
         const created = yield* f.driver.createWorktree({
           cwd: f.cwd,
           refName: ref === "commit" ? f.parentSha : ref,
@@ -250,6 +253,15 @@ describe("Treehouse worktrees", () => {
           yield* f.fs.readFileString(f.path.join(f.slot, "file")),
           ref === "HEAD~1" ? "main\n" : "parent\n",
         );
+        if (ref === "origin/main") {
+          assert.strictEqual(
+            yield* f.git({
+              cwd: f.slot,
+              args: ["rev-parse", "--symbolic-full-name", "@{upstream}"],
+            }),
+            "refs/remotes/origin/main",
+          );
+        }
         assert.deepEqual(yield* f.fs.readDirectory(f.path.join(f.root, "pool")), [
           "1",
           "treehouse-state.json",

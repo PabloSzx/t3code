@@ -71,7 +71,6 @@ export const fixture = Effect.fn("TreehouseTest.fixture")(function* (
       command: "git",
       args: input.args,
       cwd: input.cwd ?? cwd,
-      stdin: "",
     });
     assert.strictEqual(result.code, 0, result.stderr);
     return result.stdout.trim();

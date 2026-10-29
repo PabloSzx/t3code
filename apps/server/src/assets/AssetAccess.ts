@@ -46,7 +46,6 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -233,17 +232,6 @@ function decodeRelativePath(value: string): string | null {
   }
 }
 
-const optionOnNotFound = <A, R>(
-  effect: Effect.Effect<A, PlatformError.PlatformError, R>,
-): Effect.Effect<Option.Option<A>, PlatformError.PlatformError, R> =>
-  effect.pipe(
-    Effect.asSome,
-    Effect.catchTags({
-      PlatformError: (error) =>
-        error.reason._tag === "NotFound" ? Effect.succeed(Option.none<A>()) : Effect.fail(error),
-    }),
-  );
-
 export const readMcpAppHtml = Effect.fn("AssetAccess.readMcpAppHtml")(function* (filePath: string) {
   const fileSystem = yield* FileSystem.FileSystem;
   // Allow space for stored CSP tags, but bound reads if the attachment grows after minting.
@@ -298,10 +286,12 @@ const resolveCanonicalFile = Effect.fn("AssetAccess.resolveCanonicalFile")(funct
   filePath: string,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
-  const canonicalFile = yield* optionOnNotFound(fileSystem.realPath(filePath));
+  const canonicalFile = yield* ProjectFaviconResolver.optionOnNotFound(
+    fileSystem.realPath(filePath),
+  );
   if (Option.isNone(canonicalFile)) return null;
 
-  const info = yield* optionOnNotFound(fileSystem.stat(canonicalFile.value));
+  const info = yield* ProjectFaviconResolver.optionOnNotFound(fileSystem.stat(canonicalFile.value));
   return Option.isSome(info) && info.value.type === "File" ? canonicalFile.value : null;
 });
 
@@ -318,8 +308,8 @@ const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWor
     if (Option.isNone(resolved)) return null;
 
     const [canonicalRoot, canonicalFile] = yield* Effect.all([
-      optionOnNotFound(fileSystem.realPath(input.workspaceRoot)),
-      optionOnNotFound(fileSystem.realPath(resolved.value.absolutePath)),
+      ProjectFaviconResolver.optionOnNotFound(fileSystem.realPath(input.workspaceRoot)),
+      ProjectFaviconResolver.optionOnNotFound(fileSystem.realPath(resolved.value.absolutePath)),
     ]);
     if (Option.isNone(canonicalRoot) || Option.isNone(canonicalFile)) return null;
 
@@ -327,7 +317,9 @@ const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWor
     const relative = path.relative(canonicalRoot.value, canonicalFile.value);
     if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return null;
 
-    const info = yield* optionOnNotFound(fileSystem.stat(canonicalFile.value));
+    const info = yield* ProjectFaviconResolver.optionOnNotFound(
+      fileSystem.stat(canonicalFile.value),
+    );
     return Option.isSome(info) && info.value.type === "File" ? canonicalFile.value : null;
   },
 );
@@ -1065,7 +1057,9 @@ const resolveClaims = Effect.fn("AssetAccess.resolveClaims")(function* ({
     });
     if (!attachmentPath) return null;
     const fileSystem = yield* FileSystem.FileSystem;
-    const info = yield* optionOnNotFound(fileSystem.stat(attachmentPath)).pipe(
+    const info = yield* ProjectFaviconResolver.optionOnNotFound(
+      fileSystem.stat(attachmentPath),
+    ).pipe(
       Effect.tapError((cause) =>
         Effect.logError("Failed to inspect attachment asset.", {
           attachmentId: claims.attachmentId,

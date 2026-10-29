@@ -86,6 +86,7 @@ const fixture = Effect.fn("WorkspaceActionsTest.fixture")(function* () {
     snapshot: Effect.succeed({ projects: [project], updatedAt: project.updatedAt }),
     getShell: unexpected,
     listShells: unexpected,
+    listPage: unexpected,
     create: unexpected,
     bootstrap: unexpected,
     update: unexpected,

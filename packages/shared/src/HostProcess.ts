@@ -36,6 +36,12 @@ export const HomeDirectory = Context.Reference<string>(
   },
 );
 
+/** The macOS system applications folder; tests replace it so host-installed apps stay out. */
+export const SystemApplicationsDirectory = Context.Reference<string>(
+  "@t3tools/shared/HostProcess/SystemApplicationsDirectory",
+  { defaultValue: () => "/Applications" },
+);
+
 export const Environment = Context.Reference<NodeJS.ProcessEnv>(
   "@t3tools/shared/HostProcess/Environment",
   {

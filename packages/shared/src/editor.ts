@@ -49,7 +49,10 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
   const candidates: string[] = [];
 
   if (platform === "darwin") {
-    const roots = [...(home ? [path.join(home, "Applications")] : []), "/Applications"];
+    const roots = [
+      ...(home ? [path.join(home, "Applications")] : []),
+      yield* HostProcess.SystemApplicationsDirectory,
+    ];
     for (const root of roots) {
       // JetBrains Toolbox appends versions to bundle names; accept exact and versioned names.
       const entries = yield* fs.readDirectory(root).pipe(Effect.orElseSucceed(() => []));

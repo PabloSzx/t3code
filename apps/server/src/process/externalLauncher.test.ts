@@ -134,6 +134,8 @@ const layerTest = (input: {
       ),
     ),
     Layer.succeed(HostProcess.Platform, input.platform),
+    // Editor discovery must not see apps installed on the machine running the tests.
+    Layer.succeed(HostProcess.SystemApplicationsDirectory, "/nonexistent/t3-test-applications"),
     Layer.succeed(
       SpawnExecutableResolution,
       (command) => input.resolveExecutable?.(command) ?? command,

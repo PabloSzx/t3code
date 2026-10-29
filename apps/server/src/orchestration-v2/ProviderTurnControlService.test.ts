@@ -210,6 +210,9 @@ it.effect(
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
+          getContextBudgetRecoveryCandidates: Effect.die(
+            "unused getContextBudgetRecoveryCandidates",
+          ),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           listActiveSubagentThreadIds: () => Effect.die("unused listActiveSubagentThreadIds"),
           listOlderSettledThreads: () => Effect.die("unused listOlderSettledThreads"),

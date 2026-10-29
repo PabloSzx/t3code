@@ -231,27 +231,32 @@ def copy_tree(source, target):
     run(['/usr/bin/ditto', '--rsrc', '--extattr', source, target])
 
 
+class Unstable(Exception):
+    """The source changed while it was being copied."""
+
+
 def snapshot(source, target):
     """Copies source into target and returns the verified inventory summary."""
+    if target.exists():
+        # Only this in-progress backup's own superseded copy; never a completed backup.
+        shutil.rmtree(target)
     copy_tree(source, target)
     expected = inventory(source)
     if inventory(target) != expected:
-        raise Stop(f'Backup verification failed for {source}.')
+        raise Unstable(source)
     return summary(expected)
 
 
-def refresh_snapshot(source, target):
-    """Replaces a backup that no longer matches live data, after T3 wrote while it was reopened."""
-    if inventory(source) == inventory(target):
-        return None
-    fresh = target.with_name(target.name + '.refresh')
-    if fresh.exists():
-        shutil.rmtree(fresh)
-    result = snapshot(source, fresh)
-    # The superseded copy belongs to this in-progress backup and was never a completed backup.
-    shutil.rmtree(target)
-    fresh.rename(target)
-    return result
+def stable_snapshot(source, target, watched, assume_yes):
+    """Copies source once nothing has it open, retrying when it changes during the copy."""
+    for _ in range(SYNC_ATTEMPTS):
+        wait_until_closed(watched, assume_yes)
+        check_data_roots()
+        try:
+            return snapshot(source, target)
+        except Unstable:
+            say(f'{source.name} changed while it was copied; copying it again.')
+    raise Stop(f'{source} kept changing during the backup. Quit T3 and run this again.')
 
 
 def verify_databases(backup):
@@ -331,10 +336,6 @@ def install(build, check_only, assume_yes, accept_unknown):
         write_json(backup / 'installation.json', receipt)
 
     save()
-    say('Backing up userdata, the Electron profile and the current app. Live files are only read.')
-    sources = ((USERDATA, 'userdata'), (PROFILE, 'electron-profile'), (APP, 'T3 Code (Nightly).app'))
-    verification = {name: snapshot(path, backup / name) for path, name in sources}
-
     stage = APP.parent / f'.T3-Code-Nightly-{stamp}.staging.app'
     previous = APP.parent / f'.T3-Code-Nightly-{stamp}.previous.app'
     if stage.exists() or previous.exists():
@@ -344,24 +345,28 @@ def install(build, check_only, assume_yes, accept_unknown):
         raise Stop(f'Staging verification failed. The staged copy is kept at {stage}.')
     verify_candidate(stage, version, asar)
 
-    # T3 can reopen while copying. Wait for it again, refresh any backup it changed, and swap
-    # only after a final check finds nothing open.
+    say('Backing up userdata, the Electron profile and the current app. Live files are only read.')
+    sources = ((USERDATA, 'userdata'), (PROFILE, 'electron-profile'), (APP, 'T3 Code (Nightly).app'))
+    verification = {}
     checked_databases = None
+    # Every pass waits for T3 to close and recopies anything that changed since the last pass.
+    # The swap happens only after a pass in which nothing changed and nothing reopened.
     for attempt in range(SYNC_ATTEMPTS):
-        wait_until_closed(watched, assume_yes)
-        refreshed = {}
-        for path, name in sources[:2]:
-            result = refresh_snapshot(path, backup / name)
-            if result is not None:
-                refreshed[name] = result
-        verification.update(refreshed)
-        if checked_databases is None or 'userdata' in refreshed:
+        changed = False
+        for path, name in sources:
+            target = backup / name
+            if name in verification and inventory(path) == inventory(target):
+                continue
+            verification[name] = stable_snapshot(path, target, watched, assume_yes)
+            changed = True
+            if name == 'userdata':
+                checked_databases = None
+        if checked_databases is None:
             checked_databases = verify_databases(backup)
         if app_identity(APP)['asarSha256'] != base['asarSha256']:
             raise Stop('The installed app changed during the backup. Run this again.')
-        if inventory(APP) != inventory(backup / 'T3 Code (Nightly).app'):
-            raise Stop('The installed app no longer matches its backup. Run this again.')
-        if not open_pids(watched):
+        check_data_roots()
+        if not changed and not open_pids(watched):
             break
         if attempt == SYNC_ATTEMPTS - 1:
             raise Stop('T3 kept reopening during the backup. Quit it and run this again.')
@@ -380,24 +385,46 @@ def install(build, check_only, assume_yes, accept_unknown):
         if stage.exists() and stage.stat().st_ino == original_inode:
             exchange_directories(APP, stage)
         raise
-    os.rename(stage, previous)
-    receipt.update(status='installed', installed=True, userVerificationPending=True)
-    save()
-    record.update(installed=True, installedAt=datetime.now(timezone.utc).isoformat(), backup=str(backup),
-                  installationReceipt=str(backup / 'installation.json'))
-    write_json(build / 'build.json', record)
+    # Committed: the new app is in place. Later steps only report problems as warnings.
+    finish(build, record, receipt, save, stage, previous, version, backup)
 
-    # Installation is complete. Launching is a convenience and never turns success into failure.
-    if app_running():
-        receipt['launch'] = 'already-running'
-        say(f'Installed {version}. T3 is already running the new app.')
-    else:
-        launched = subprocess.run(['/usr/bin/open', str(APP)], capture_output=True, text=True).returncode == 0
-        receipt['launch'] = 'requested' if launched else 'not-started'
-        say(f'Installed {version}.' + (' Opening T3.' if launched else ' Open T3 from /Applications.'))
-    save()
+
+def warn(message):
+    print(f'Warning: {message}', file=sys.stderr, flush=True)
+
+
+def finish(build, record, receipt, save, stage, previous, version, backup):
+    kept = stage
+    try:
+        os.rename(stage, previous)
+        kept = previous
+    except OSError as error:
+        warn(f'The previous app is still at {stage}: {error}')
+    receipt.update(status='installed', installed=True, userVerificationPending=True, previousBundle=str(kept))
+    try:
+        save()
+    except OSError as error:
+        warn(f'Could not update the installation receipt: {error}')
+    try:
+        record.update(installed=True, installedAt=datetime.now(timezone.utc).isoformat(), backup=str(backup),
+                      installationReceipt=str(backup / 'installation.json'))
+        write_json(build / 'build.json', record)
+    except OSError as error:
+        warn(f'Could not mark the build as installed: {error}')
+    try:
+        if app_running():
+            receipt['launch'] = 'already-running'
+            say(f'Installed {version}. T3 is already running the new app.')
+        else:
+            launched = subprocess.run(['/usr/bin/open', str(APP)], capture_output=True, text=True).returncode == 0
+            receipt['launch'] = 'requested' if launched else 'not-started'
+            say(f'Installed {version}.' + (' Opening T3.' if launched else ' Open T3 from /Applications.'))
+        save()
+    except (OSError, Stop) as error:
+        say(f'Installed {version}. Open T3 from /Applications.')
+        warn(f'Could not open T3: {error}')
     say('Check your projects, conversations, attachments and sign-in. Keychain approval may be needed.')
-    say(f'The previous app is kept at {previous}. Keep the backup until the new app works.')
+    say(f'The previous app is kept at {kept}. Keep the backup until the new app works.')
 
 
 def main():
@@ -412,7 +439,9 @@ def main():
     try:
         install(args.build.resolve(), args.check, args.yes, args.accept_unknown_base)
     except KeyboardInterrupt:
-        say('\nCancelled. The installed app was not replaced.')
+        replaced = app_identity(APP)['asarSha256'] == json.loads(
+            (args.build.resolve() / 'build.json').read_text()).get('asarSha256')
+        say('\nCancelled. ' + ('The new app was already installed.' if replaced else 'The installed app was not replaced.'))
         sys.exit(130)
     except Stop as error:
         print(f'STOP: {error}', file=sys.stderr)

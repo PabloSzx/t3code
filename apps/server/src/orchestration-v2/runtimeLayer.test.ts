@@ -6737,6 +6737,104 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
     }),
   );
+
+  it.effect.each(["current", "stopped", "settled", "newer-send"] as const)(
+    "admits a context-budget compaction only while its failed run is still current: %s",
+    (scenario) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make(`budget:${scenario}`);
+        const projectId = ProjectId.make(`budget:project:${scenario}`);
+        yield* seedProject({
+          projectId,
+          title: "Budget project",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`budget:create:${scenario}`),
+          threadId,
+          projectId,
+          title: "Full thread",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`budget:message:${scenario}`),
+          threadId,
+          messageId: MessageId.make(`budget:message:${scenario}`),
+          text: "Explain the deploy preview.",
+          attachments: [],
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        const now = yield* DateTime.now;
+        yield* events.write({
+          commandId: CommandId.make(`budget:failure:${scenario}`),
+          events: [
+            {
+              id: EventId.make(`budget:run:${scenario}`),
+              type: "run.updated",
+              threadId,
+              occurredAt: now,
+              payload: { ...run, status: "failed", completedAt: now },
+            },
+          ],
+        });
+        if (scenario === "stopped")
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make(`budget:stop:${scenario}`),
+            threadId,
+          });
+        if (scenario === "settled")
+          yield* orchestrator.dispatch({
+            type: "thread.settle",
+            commandId: CommandId.make(`budget:settle:${scenario}`),
+            threadId,
+          });
+        if (scenario === "newer-send")
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`budget:newer:${scenario}`),
+            threadId,
+            messageId: MessageId.make(`budget:newer:${scenario}`),
+            text: "Actually, do something else.",
+            attachments: [],
+            dispatchMode: { type: "defer_start" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const before = (yield* orchestrator.getThreadProjection(threadId)).runs.length;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`context-budget-compact:${run.id}`),
+          messageId: MessageId.make(`context-budget-compact:${run.id}`),
+          threadId,
+          text: "/compact",
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "server",
+          idleCompaction: "onReturn",
+          contextBudgetRecoveryOfRunId: run.id,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.runs.length, scenario === "current" ? before + 1 : before);
+        if (scenario === "settled") assert.equal(after.thread.settledOverride, "settled");
+      }),
+  );
 });
 
 const queueResumeDisabledInstanceProjectId = ProjectId.make(

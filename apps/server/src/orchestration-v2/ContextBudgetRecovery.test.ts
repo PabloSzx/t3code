@@ -123,6 +123,7 @@ describe("contextBudgetRecoveryCommand", () => {
       createdBy: "agent",
       creationSource: "server",
       idleCompaction: "onReturn",
+      contextBudgetRecoveryOfRunId: failed.id,
     });
     if (compact?.type !== "message.dispatch") throw new Error("expected a compaction dispatch");
 
@@ -137,8 +138,11 @@ describe("contextBudgetRecoveryCommand", () => {
     expect(resend).toMatchObject({
       type: "message.dispatch",
       text: "Explain the deploy preview",
-      createdBy: "user",
+      // T3 sends the copy; the user's original message keeps their attribution.
+      createdBy: "agent",
+      creationSource: "server",
       modelSelection,
+      contextBudgetRecoveryOfRunId: failed.id,
     });
     if (resend?.type !== "message.dispatch") throw new Error("expected a resend dispatch");
 
@@ -159,6 +163,20 @@ describe("contextBudgetRecoveryCommand", () => {
           ],
         }),
       ),
+    ).toBeNull();
+  });
+
+  it("leaves settled threads alone", () => {
+    const base = records({
+      runs: [failed],
+      messages: [original],
+      turnItems: [failure(failed, CONTEXT_HANDOFF_BUDGET_FAILURE_CODE)],
+    });
+    expect(
+      contextBudgetRecoveryCommand({
+        ...base,
+        thread: { ...base.thread, settledOverride: "settled" },
+      }),
     ).toBeNull();
   });
 

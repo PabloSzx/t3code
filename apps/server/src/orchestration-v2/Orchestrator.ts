@@ -47,6 +47,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
+  IDLE_COMPACTION_TEXT,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadShellSnapshot,
@@ -5004,6 +5005,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: "This thread can no longer be resumed from that run.",
         });
+      }
+    }
+    if (command.contextBudgetRecoveryOfRunId !== undefined) {
+      // Checked under the thread lock: a Stop, settle, archive, newer send or pending question
+      // since recovery read the thread supersedes it. The stale step is dropped, not failed.
+      const latest = latestExecutedRun(projection.runs);
+      const source = projection.runs.find((run) => run.id === command.contextBudgetRecoveryOfRunId);
+      const compacting = command.text === IDLE_COMPACTION_TEXT;
+      const current =
+        source !== undefined &&
+        latest !== null &&
+        (compacting
+          ? latest.id === source.id && source.status === "failed"
+          : latest.status === "completed" && latest.ordinal === source.ordinal + 1);
+      if (
+        !current ||
+        projection.runs.some(isBlockingRun) ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null ||
+        projection.thread.settledOverride === "settled" ||
+        projection.runtimeRequests.some((request) => request.status === "pending") ||
+        (yield* stopReachedRun(command, command.threadId, latest.id))
+      ) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: yield* DateTime.now,
+          payload: projection.thread,
+        });
+        return;
       }
     }
     if (command.usageLimitContinuationOfRunId !== undefined) {

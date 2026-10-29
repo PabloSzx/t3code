@@ -50,4 +50,21 @@ describe("providerStderr", () => {
     expect(excerpt).not.toContain("dXNlcjpwYXNz");
     expect(excerpt).not.toContain("ant-api-key-value");
   });
+
+  it("redacts prefixed environment and JSON credential assignments", () => {
+    const excerpt = sanitizeProviderStderrExcerpt(
+      [
+        "T3_MCP_BEARER_TOKEN=fixture-private-1",
+        "OPENAI_API_KEY=fixture-private-2",
+        'config: {"apiKey": "fixture-private-3", "github_token":"fixture-private-4"}',
+        "DB_PASSWORD='fixture-private-5'",
+        "No version is set for command node",
+      ].join("\n"),
+      "/Users/ada",
+      {},
+    );
+    expect(excerpt).not.toContain("fixture-private");
+    expect(excerpt).toContain("T3_MCP_BEARER_TOKEN=[redacted]");
+    expect(excerpt).toContain("No version is set for command node");
+  });
 });

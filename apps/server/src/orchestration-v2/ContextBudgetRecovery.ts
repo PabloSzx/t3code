@@ -34,6 +34,7 @@ export function contextBudgetRecoveryCommand(
 ): OrchestrationV2Command | null {
   const { thread, runs, messages, turnItems, runtimeRequests } = records;
   if (thread.deletedAt !== null || thread.archivedAt !== null) return null;
+  if (thread.settledOverride === "settled") return null;
   if (runtimeRequests.some((request) => request.status === "pending")) return null;
   const run = latestRun(runs);
   if (run === null) return null;
@@ -55,6 +56,7 @@ export function contextBudgetRecoveryCommand(
       createdBy: "agent",
       creationSource: "server",
       idleCompaction: "onReturn",
+      contextBudgetRecoveryOfRunId: run.id,
       dispatchMode: { type: "start_immediately" },
     };
   }
@@ -74,9 +76,11 @@ export function contextBudgetRecoveryCommand(
       text: original.text,
       ...(original.context === undefined ? {} : { context: original.context }),
       attachments: original.attachments,
-      createdBy: original.createdBy,
+      // T3 sends this copy itself; the original keeps the user's attribution.
+      createdBy: "agent",
       creationSource: "server",
       modelSelection: failedRun.modelSelection,
+      contextBudgetRecoveryOfRunId: failedRun.id,
       dispatchMode: { type: "start_immediately" },
     };
   }

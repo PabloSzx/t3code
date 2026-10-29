@@ -102,15 +102,17 @@ with tempfile.TemporaryDirectory(prefix='t3-installer-test-') as temporary:
              str(installer.USERDATA / 'settings.json')]
         )
         snapshots = []
-        real_snapshot = installer.snapshot
 
-        def snapshot(source, target):
-            result = real_snapshot(source, target)
-            if source == installer.USERDATA and not snapshots:
-                (installer.USERDATA / 'settings.json').write_text('{"written":"while copying"}')
-            snapshots.append(source)
-            return result
-        installer.snapshot = snapshot
+        real_copy = installer.copy_tree
+
+        def copy_tree(source, target):
+            real_copy(source, target)
+            # T3 writes after this file was copied but before the copy is verified.
+            if Path(source).resolve() == installer.USERDATA.resolve():
+                snapshots.append(source)
+                if len(snapshots) == 1:
+                    (installer.USERDATA / 'settings.json').write_text('{"written":"while copying"}')
+        installer.copy_tree = copy_tree
         waits = []
         real_wait = installer.wait_until_closed
 
@@ -124,9 +126,10 @@ with tempfile.TemporaryDirectory(prefix='t3-installer-test-') as temporary:
         installer.WAIT_INTERVAL_SECONDS = 0.2
         installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
         holder.wait()
-        installer.snapshot = real_snapshot
+        installer.copy_tree = real_copy
         installer.wait_until_closed = real_wait
         assert waits, 'expected the installer to wait for the open file'
+        assert len(snapshots) == 2, 'expected userdata to be copied again after it changed'
         assert asar(installer.APP) == b'candidate'
         record = json.loads((build / 'build.json').read_text())
         receipt = json.loads(Path(record['installationReceipt']).read_text())
@@ -140,6 +143,42 @@ with tempfile.TemporaryDirectory(prefix='t3-installer-test-') as temporary:
         # Running it again after a successful install is a no-op, not an error.
         installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
         assert len(launches) == 1
+
+        # A link to data outside userdata, added while the candidate is staged, is refused.
+        build = fixture(root / 'late-link')
+        outside = root / 'late-link/outside-attachment.txt'
+        outside.write_text('outside')
+        real_copy = installer.copy_tree
+
+        def copy_with_link(source, target):
+            real_copy(source, target)
+            if Path(source) == build / 'artifacts/T3 Code (Nightly).app':
+                (installer.USERDATA / 'attachment-link').symlink_to(outside)
+        installer.copy_tree = copy_with_link
+        try:
+            installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
+        except installer.Stop as error:
+            assert 'External data link' in str(error), error
+        else:
+            raise AssertionError('expected a late external link to be refused')
+        finally:
+            installer.copy_tree = real_copy
+        assert asar(installer.APP) == b'base'
+
+        # Bookkeeping that fails after the swap is a warning, not a failed install.
+        build = fixture(root / 'late-bookkeeping')
+        real_write = installer.write_json
+
+        def write_json(path, value):
+            if path.name == 'build.json':
+                raise OSError('read-only build directory')
+            real_write(path, value)
+        installer.write_json = write_json
+        try:
+            installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
+        finally:
+            installer.write_json = real_write
+        assert asar(installer.APP) == b'candidate'
 
         # An app this machine never built is refused unless explicitly accepted.
         build = fixture(root / 'unknown')

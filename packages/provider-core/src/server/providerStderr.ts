@@ -6,8 +6,10 @@ const SIGN_IN_URL_PATTERN = /https?:\/\/accounts\.google\.com[^\s]*/gi;
 const BEARER_TOKEN_PATTERN = /\bBearer\s+[A-Za-z0-9._\-+=/]+/gi;
 const BASIC_AUTH_PATTERN = /\bAuthorization:\s*Basic\s+\S+/gi;
 const API_KEY_HEADER_PATTERN = /\bx-api-key:\s*\S+/gi;
+// Whole names ending in a sensitive word, such as OPENAI_API_KEY or T3_MCP_BEARER_TOKEN, optionally
+// quoted as JSON property names.
 const SECRET_ASSIGNMENT_PATTERN =
-  /(\b(?:access[_-]?token|api[_-]?key|credential|password|secret|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+  /((?:["'])?[A-Za-z0-9_.-]*(?:access[_-]?token|api[_-]?key|credential|password|passwd|secret|token|auth)(?:["'])?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
 const SECRET_TOKEN_PATTERN =
   /\b(?:sk-[A-Za-z0-9][A-Za-z0-9-]{7,}|ghp_[A-Za-z0-9]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/g;
 

@@ -1,4 +1,5 @@
 import { pendingGuestMessageCount } from "@t3tools/contracts";
+import { CONTEXT_HANDOFF_BUDGET_FAILURE_CODE } from "@t3tools/provider-core/server/failure";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -506,6 +507,11 @@ export interface ProjectionStoreV2Shape {
     readonly autoResume: boolean;
     readonly snooze: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  /** Threads that may have a context-budget recovery step left after a restart. */
+  readonly getContextBudgetRecoveryCandidates: Effect.Effect<
+    ReadonlyArray<ThreadId>,
+    ProjectionStoreV2Error
+  >;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
@@ -3970,6 +3976,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
+    const getContextBudgetRecoveryCandidates = Effect.fn(
+      "ProjectionStore.getContextBudgetRecoveryCandidates",
+    )(
+      function* () {
+        // Coarse prefilter; the recovery helper decides whether a step is still due.
+        const rows = yield* sql<{ readonly thread_id: string }>`
+        SELECT DISTINCT thread_id FROM orchestration_v2_projection_turn_items
+        WHERE type = 'error' AND status = 'failed'
+          AND json_extract(payload_json, '$.failure.code') = ${CONTEXT_HANDOFF_BUDGET_FAILURE_CODE}
+      `;
+        return rows.map((row) => ThreadId.make(row.thread_id));
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
     const getRecoveryThreadIds = Effect.fn("ProjectionStore.getRecoveryThreadIds")(
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
@@ -6805,6 +6826,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan: readOnReader(getPlan),
       getProviderControlContext: readOnReader(getProviderControlContext),
       getLimitRecoveryCandidates: readOnReader(getLimitRecoveryCandidates),
+      getContextBudgetRecoveryCandidates: getContextBudgetRecoveryCandidates().pipe(
+        NodeSqliteClient.readOnly,
+      ),
       getRecoveryThreadIds: readOnReader(getRecoveryThreadIds),
       getUnreadableThreadIds: readOnReader(getUnreadableThreadIds),
       getThreadSnapshot: readOnReader(getThreadSnapshot),
@@ -7102,6 +7126,20 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               .toSorted((left, right) => left.id.localeCompare(right.id)),
           ),
         ),
+      getContextBudgetRecoveryCandidates: Ref.get(replayState).pipe(
+        Effect.map((state) =>
+          [...state.projections.values()]
+            .filter((projection) =>
+              projection.turnItems.some(
+                (item) =>
+                  item.type === "error" &&
+                  item.status === "failed" &&
+                  item.failure.code === CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
+              ),
+            )
+            .map((projection) => projection.thread.id),
+        ),
+      ),
       getRecoveryThreadIds: Effect.fn("ProjectionStore.getRecoveryThreadIds")(function* (kind) {
         const projections = (yield* Ref.get(replayState)).projections;
         return [...projections.values()]

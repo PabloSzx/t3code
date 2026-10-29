@@ -63,6 +63,8 @@ export class TreehouseWorktrees extends Context.Service<
 const isGitError = Schema.is(GitCommandError);
 const isLeaseError = Schema.is(TreehouseLeaseError);
 const isSpawnError = Schema.is(ProcessRunner.ProcessSpawnError);
+const isTimeoutError = Schema.is(ProcessRunner.ProcessTimeoutError);
+const TREEHOUSE_COMMAND_TIMEOUT = "15 minutes";
 const decodeLease = Schema.decodeEffect(Schema.fromJsonString(TreehouseLease));
 
 const make = Effect.gen(function* () {
@@ -83,7 +85,7 @@ const make = Effect.gen(function* () {
     const output = yield* runner.run({
       ...input,
       ...(input.command === "git" ? {} : { stdin: "" }),
-      timeout: "15 minutes",
+      timeout: TREEHOUSE_COMMAND_TIMEOUT,
       maxOutputBytes: 1024 * 1024,
     });
     if (output.code !== 0 || output.stdoutTruncated || output.stderrTruncated) {
@@ -109,7 +111,9 @@ const make = Effect.gen(function* () {
             ? input.cause.message
             : isSpawnError(input.cause)
               ? "Cannot start Treehouse on this environment. Install a compatible CLI on the host or set its absolute binary path in Settings. No native Git fallback is performed."
-              : "Cannot verify Treehouse worktree ownership. No native Git fallback is performed.",
+              : isTimeoutError(input.cause)
+                ? `${input.cause.command === "git" ? "Git" : "Treehouse"} did not finish within ${TREEHOUSE_COMMAND_TIMEOUT}. The worktree pool may be busy with other allocations; retry once it settles. No native Git fallback is performed.`
+                : "Cannot verify Treehouse worktree ownership. No native Git fallback is performed.",
           cause: input.cause,
         });
 

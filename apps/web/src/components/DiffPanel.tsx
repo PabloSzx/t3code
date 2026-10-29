@@ -29,7 +29,6 @@ import { type DraftId } from "../composerDraftStore";
 import { openDiffFilePrimaryAction } from "../diffFileActions";
 import { toolCallDiff } from "../lib/toolCallDiff";
 import { useCheckpointDiff, useTurnItemDetail } from "~/state/queries";
-import { revisionedQuery } from "~/state/revisionedQuery";
 import { cn } from "~/lib/utils";
 import {
   resolveToolCallDiffTarget,
@@ -363,14 +362,12 @@ export default function DiffPanel({
   // mounted while hidden, so a mutation made then is already reflected when it shows.
   const branchDiffPreview = useEnvironmentQuery(
     branchDiffPreviewInput && activeThread
-      ? revisionedQuery(
-          reviewEnvironment.diffPreview({
-            environmentId: activeThread.environmentId,
-            input: branchDiffPreviewInput,
-          }),
-          canRefreshGitDiff ? workspaceMutationId : undefined,
-        )
+      ? reviewEnvironment.diffPreview({
+          environmentId: activeThread.environmentId,
+          input: branchDiffPreviewInput,
+        })
       : null,
+    canRefreshGitDiff ? workspaceMutationId : undefined,
   );
   const activeThreadRefreshKey = routeThreadRef
     ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}`

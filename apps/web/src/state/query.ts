@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useContext } from "react";
 import { useScopedWorkspaceQuery } from "../workspaceContext";
+import { revisionedQuery } from "./revisionedQuery";
 
 const EMPTY_ASYNC_RESULT_ATOM = Atom.make(AsyncResult.initial<never, never>(false)).pipe(
   Atom.withLabel("web-environment-query:empty"),
@@ -34,11 +35,14 @@ function queryUpdatedAt(result: AsyncResult.AsyncResult<unknown, unknown>): numb
       : 0;
 }
 
+/** `revision` (a workspace mutation id) wraps the workspace-scoped atom, so a new one refetches it. */
 export function useEnvironmentQuery<A, E>(
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>> | null,
+  revision?: string | null,
 ): EnvironmentQueryView<A, E> {
   const scopedAtom = useScopedWorkspaceQuery(atom);
-  const selectedAtom = scopedAtom ?? EMPTY_ASYNC_RESULT_ATOM;
+  const selectedAtom =
+    scopedAtom === null ? EMPTY_ASYNC_RESULT_ATOM : revisionedQuery(scopedAtom, revision);
   const result = useAtomValue(selectedAtom);
   const refresh = useAtomRefresh(selectedAtom);
   return {

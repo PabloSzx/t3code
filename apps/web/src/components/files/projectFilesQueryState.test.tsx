@@ -107,10 +107,13 @@ vi.mock("~/state/projects", () => ({
   projectEnvironment: projectMocks,
 }));
 
+const workspaceMocks = vi.hoisted(() => ({
+  scope: (atom: unknown): unknown => atom,
+}));
 vi.mock("~/workspaceContext", () => ({
   useWorkspaceSource: () => null,
   useWorkspaceAvailability: () => null,
-  useScopedWorkspaceQuery: (atom: unknown) => atom,
+  useScopedWorkspaceQuery: (atom: unknown) => workspaceMocks.scope(atom),
 }));
 
 vi.mock("~/state/queries", () => ({
@@ -155,6 +158,7 @@ describe("project query refresh", () => {
     projectMocks.optimisticFile.mockReset();
     projectMocks.readFile.mockReset();
     reactHooks.reset();
+    workspaceMocks.scope = (atom) => atom;
   });
 
   it("does not query or expose optimistic file contents without read permission", () => {
@@ -258,6 +262,25 @@ describe("project query refresh", () => {
       expect(renderedContents).toBe("fresh");
     } finally {
       unmount();
+      registry.dispose();
+      atomHooks.registry = null;
+    }
+  });
+
+  it("exposes the workspace-scoped read so mutation refreshes reach what the editor shows", () => {
+    const unscoped = Atom.make(AsyncResult.success(file("unscoped")));
+    const scoped = Atom.make(AsyncResult.success(file("scoped")));
+    projectMocks.readFile.mockReturnValue(unscoped);
+    projectMocks.optimisticFile.mockReturnValue(Atom.make(null));
+    workspaceMocks.scope = (atom) => (atom === unscoped ? scoped : atom);
+    const registry = AtomRegistry.make();
+    atomHooks.registry = registry;
+    try {
+      reactHooks.beginRender();
+      const query = useProjectFileQuery(environmentId, "/repo", "src/preview.ts");
+      expect(query.data?.contents).toBe("scoped");
+      expect(query.query).toBe(scoped);
+    } finally {
       registry.dispose();
       atomHooks.registry = null;
     }

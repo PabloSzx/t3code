@@ -183,6 +183,8 @@ interface ProjectQueryState<A> {
 }
 
 interface ProjectFileQueryState extends ProjectQueryState<ProjectReadFileResult> {
+  /** The workspace-scoped read this state shows; mutation refreshes must target it. */
+  readonly query: Atom.Atom<AsyncResult.AsyncResult<ProjectReadFileResult, unknown>> | null;
   readonly readError: ProjectReadFileError | null;
   readonly isNotFile: boolean;
   readonly isFile: boolean;
@@ -410,6 +412,7 @@ export function useProjectFileQuery(
   const isNotFile = readError?.failure === "path_not_file";
 
   return {
+    query: enabled && canReadFiles ? scoped : null,
     data,
     error:
       !isQueryEnabled || fileAccess.isPending

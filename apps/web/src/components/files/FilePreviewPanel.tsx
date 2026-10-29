@@ -119,7 +119,7 @@ import {
 } from "./filePreviewMode";
 import { changeFileSaveSession, useFileSaveSession } from "./fileSaveSessions";
 import { revisionedQuery } from "~/state/revisionedQuery";
-import { getProjectFileQueryAtom, useProjectFileQuery } from "./projectFilesQueryState";
+import { useProjectFileQuery } from "./projectFilesQueryState";
 
 const NO_FILE_REVISION_ATOM = Atom.make(null);
 
@@ -1149,11 +1149,9 @@ export default function FilePreviewPanel({
       relativePath !== null &&
       // Skip mutation reads for media and documents; folders still detect conversion to files.
       (isFolder || (!isMedia && !isPdf && !isDocument)) &&
-      !selectedFilePending
-      ? revisionedQuery(
-          getProjectFileQueryAtom(environmentId, cwd, relativePath),
-          workspaceMutationId,
-        )
+      !selectedFilePending &&
+      file.query !== null
+      ? revisionedQuery(file.query, workspaceMutationId)
       : NO_FILE_REVISION_ATOM,
   );
 

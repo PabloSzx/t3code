@@ -143,6 +143,7 @@ describe("contextBudgetRecoveryCommand", () => {
       creationSource: "server",
       modelSelection,
       contextBudgetRecoveryOfRunId: failed.id,
+      contextBudgetRecoveryOfUserMessage: true,
     });
     if (resend?.type !== "message.dispatch") throw new Error("expected a resend dispatch");
 
@@ -164,6 +165,32 @@ describe("contextBudgetRecoveryCommand", () => {
         }),
       ),
     ).toBeNull();
+  });
+
+  it("does not mark a resent monitor or scheduled input as the user's", () => {
+    const compactId = "context-budget-compact:run-1";
+    for (const automated of [
+      {
+        ...original,
+        createdBy: "agent" as const,
+        creationSource: "server" as const,
+        notification: { source: { kind: "monitor" } },
+      },
+      { ...original, scheduledTaskId: "scheduled-task" },
+    ]) {
+      const resend = contextBudgetRecoveryCommand(
+        records({
+          runs: [failed, run(2, compactId, "completed")],
+          messages: [automated as never, message(compactId, "/compact", "run-2")],
+          turnItems: [failure(failed, CONTEXT_HANDOFF_BUDGET_FAILURE_CODE)],
+        }),
+      );
+      expect(resend).toMatchObject({
+        type: "message.dispatch",
+        text: "Explain the deploy preview",
+      });
+      expect(resend).not.toHaveProperty("contextBudgetRecoveryOfUserMessage");
+    }
   });
 
   it("leaves settled threads alone", () => {

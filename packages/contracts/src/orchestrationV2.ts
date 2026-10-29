@@ -3013,6 +3013,11 @@ export const OrchestrationV2Command = Schema.Union([
      * while that run, or its compaction, is still the latest work and nobody has stopped it.
      */
     contextBudgetRecoveryOfRunId: Schema.optional(RunId),
+    /**
+     * Set only by recovery, on a resend of a message that a user sent, so the resend reports
+     * to a delegating parent like the original did.
+     */
+    contextBudgetRecoveryOfUserMessage: Schema.optional(Schema.Boolean),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),

@@ -81,8 +81,19 @@ export function contextBudgetRecoveryCommand(
       creationSource: "server",
       modelSelection: failedRun.modelSelection,
       contextBudgetRecoveryOfRunId: failedRun.id,
+      // Only a user's own message reports to a delegating parent; automated inputs such as
+      // monitor notifications and scheduled prompts keep their original exclusions.
+      ...(isPlainUserMessage(original) ? { contextBudgetRecoveryOfUserMessage: true } : {}),
       dispatchMode: { type: "start_immediately" },
     };
   }
   return null;
+}
+
+function isPlainUserMessage(message: ContextBudgetRecoveryRecords["messages"][number]): boolean {
+  return (
+    message.createdBy === "user" &&
+    message.notification === undefined &&
+    message.scheduledTaskId === undefined
+  );
 }

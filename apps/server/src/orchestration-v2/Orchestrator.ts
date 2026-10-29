@@ -605,7 +605,17 @@ function mayStartSubagentFollowup(
   if (command.scheduledTaskId !== undefined || command.restartContinuationOfRunId !== undefined)
     return false;
   if (command.notification !== undefined) return command.notification.source.kind !== "monitor";
-  return command.createdBy === "user" || command.creationSource === "mcp";
+  return isUserInitiated(command) || command.creationSource === "mcp";
+}
+
+// A context-budget resend is T3's copy of a user's message, so it reports to the parent like one.
+function isUserInitiated(
+  command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+): boolean {
+  return (
+    command.createdBy === "user" ||
+    (command.contextBudgetRecoveryOfRunId !== undefined && command.text !== IDLE_COMPACTION_TEXT)
+  );
 }
 
 function isBlockingRun(run: OrchestrationV2Run): boolean {
@@ -7460,7 +7470,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       child.lineage.relationshipToParent !== "subagent" ||
       parentThreadId === null ||
       (command.notification === undefined &&
-        command.createdBy !== "user" &&
+        !isUserInitiated(command) &&
         command.senderThreadId !== parentThreadId)
     )
       return;

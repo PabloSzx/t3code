@@ -1,4 +1,6 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
+import { contextBudgetRecoveryCommand } from "./ContextBudgetRecovery.ts";
+import { CONTEXT_HANDOFF_BUDGET_FAILURE_CODE } from "@t3tools/provider-core/server/failure";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -16,6 +18,7 @@ import {
   NodeId,
   RuntimeRequestId,
   TurnItemId,
+  type OrchestrationV2DomainEvent,
   type ModelSelection,
   type OrchestrationV2Run,
   ProjectId,
@@ -6735,6 +6738,218 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.equal(resumed.runs[2]?.status, "starting");
         assert.isFalse(resumed.runs[2]?.queueHeld);
       }
+    }),
+  );
+
+  it.effect("delivers a recovered child follow-up's answer to the parent task", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      let serial = 0;
+      const write = (threadId: ThreadId, payloads: ReadonlyArray<Record<string, unknown>>) =>
+        Effect.gen(function* () {
+          const occurredAt = yield* DateTime.now;
+          yield* events.write({
+            commandId: CommandId.make(`budget-child:write:${++serial}`),
+            events: payloads.map(
+              (event) =>
+                ({
+                  id: EventId.make(`budget-child:event:${++serial}`),
+                  threadId,
+                  occurredAt,
+                  ...event,
+                }) as unknown as OrchestrationV2DomainEvent,
+            ),
+          });
+        });
+      const parentId = ThreadId.make("budget-child:parent");
+      const projectId = ProjectId.make("budget-child:project");
+      yield* seedProject({
+        projectId,
+        title: "Budget child project",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(yield* DateTime.now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("budget-child:create"),
+        threadId: parentId,
+        projectId,
+        title: "Parent",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("budget-child:parent-message"),
+        threadId: parentId,
+        messageId: MessageId.make("budget-child:parent-message"),
+        text: "Delegate this.",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const parentRun = (yield* orchestrator.getThreadProjection(parentId)).runs[0]!;
+      yield* write(parentId, [
+        { type: "run.updated", payload: { ...parentRun, status: "running", completedAt: null } },
+      ]);
+      yield* orchestrator.dispatch({
+        type: "delegated_task.request",
+        commandId: CommandId.make("budget-child:delegate"),
+        parentThreadId: parentId,
+        parentRunId: parentRun.id,
+        parentNodeId: parentRun.rootNodeId!,
+        task: "Original child task",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      const task = (yield* projections.getThreadProjection(parentId)).subagents[0]!;
+      const childId = task.childThreadId!;
+      const originalRun = (yield* projections.getThreadProjection(childId)).runs[0]!;
+      const finished = yield* DateTime.now;
+      yield* write(parentId, [
+        {
+          type: "subagent.updated",
+          payload: {
+            ...task,
+            status: "completed",
+            result: "Done",
+            completedAt: finished,
+            updatedAt: finished,
+          },
+        },
+      ]);
+      yield* write(childId, [
+        {
+          type: "run.updated",
+          payload: {
+            ...originalRun,
+            status: "completed",
+            startedAt: finished,
+            completedAt: finished,
+          },
+        },
+      ]);
+      yield* orchestrator.recoverDelegatedTask(childId, originalRun.id);
+      // The user follows up in the child; that follow-up fails because its history no longer fits.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("budget-child:followup"),
+        threadId: childId,
+        messageId: MessageId.make("budget-child:followup"),
+        text: "One more question",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+        dispatchMode: { type: "start_immediately" },
+      });
+      const followup = (yield* projections.getThreadProjection(childId)).runs.find(
+        (run) => run.userMessageId === "budget-child:followup",
+      )!;
+      const failedAt = yield* DateTime.now;
+      yield* write(childId, [
+        {
+          type: "run.updated",
+          payload: { ...followup, status: "failed", startedAt: failedAt, completedAt: failedAt },
+        },
+        {
+          type: "turn-item.updated",
+          payload: {
+            id: TurnItemId.make("budget-child:followup-error"),
+            type: "error",
+            threadId: childId,
+            runId: followup.id,
+            nodeId: followup.rootNodeId,
+            providerThreadId: followup.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 100,
+            status: "failed",
+            title: "Provider failure",
+            startedAt: failedAt,
+            completedAt: failedAt,
+            updatedAt: failedAt,
+            failure: {
+              class: "provider_error",
+              message: "Insufficient context.",
+              code: CONTEXT_HANDOFF_BUDGET_FAILURE_CODE,
+              retryable: null,
+            },
+          },
+        },
+      ]);
+      yield* orchestrator.recoverDelegatedTask(childId, followup.id);
+      const compact = contextBudgetRecoveryCommand(yield* projections.getThreadProjection(childId));
+      assert.isNotNull(compact);
+      yield* orchestrator.dispatch(compact!);
+      const compactRun = (yield* projections.getThreadProjection(childId)).runs.at(-1)!;
+      const compactedAt = yield* DateTime.now;
+      yield* write(childId, [
+        {
+          type: "run.updated",
+          payload: {
+            ...compactRun,
+            status: "completed",
+            startedAt: compactedAt,
+            completedAt: compactedAt,
+          },
+        },
+      ]);
+      const resend = contextBudgetRecoveryCommand(yield* projections.getThreadProjection(childId));
+      assert.isNotNull(resend);
+      // T3 sends the copy; it is still the user's follow-up as far as the parent is concerned.
+      assert.equal(resend?.type === "message.dispatch" ? resend.createdBy : null, "agent");
+      yield* orchestrator.dispatch(resend!);
+      const resent = (yield* projections.getThreadProjection(childId)).runs.at(-1)!;
+      assert.isDefined(resent.delegatedTaskId);
+      const answeredAt = yield* DateTime.now;
+      yield* write(childId, [
+        {
+          type: "message.updated",
+          payload: {
+            id: MessageId.make("budget-child:answer"),
+            threadId: childId,
+            runId: resent.id,
+            nodeId: resent.rootNodeId,
+            role: "assistant",
+            text: "Recovered follow-up answer",
+            attachments: [],
+            streaming: false,
+            createdBy: "agent",
+            creationSource: "provider",
+            createdAt: answeredAt,
+            updatedAt: answeredAt,
+          },
+        },
+        {
+          type: "run.updated",
+          payload: {
+            ...resent,
+            status: "completed",
+            startedAt: answeredAt,
+            completedAt: answeredAt,
+          },
+        },
+      ]);
+      yield* orchestrator.recoverDelegatedTask(childId, resent.id);
+      const parent = yield* projections.getThreadProjection(parentId);
+      assert.isTrue(
+        parent.subagents.some((candidate) =>
+          candidate.result?.includes("Recovered follow-up answer"),
+        ),
+      );
     }),
   );
 

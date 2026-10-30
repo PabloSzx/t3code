@@ -33,8 +33,8 @@ it.live("refuses recycled live review reads before detecting a repository", () =
     yield* f.git({ cwd: f.slot, args: ["restore", "file"] });
     yield* f.recycle;
     for (const read of [
-      review.getDiffPreview({ cwd: f.slot }),
-      review.getBranchCommits({ cwd: f.slot }),
+      review.getDiffPreview({ cwd: f.slot }).pipe(Effect.asVoid),
+      review.getBranchCommits({ cwd: f.slot }).pipe(Effect.asVoid),
     ]) {
       const result = yield* read.pipe(
         Effect.provideService(WorkspaceOperation, f.context),

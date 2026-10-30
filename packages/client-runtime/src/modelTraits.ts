@@ -156,11 +156,12 @@ export function buildTraitsTriggerDisplay(input: {
         ? "Ultrathink"
         : descriptor.type === "boolean"
           ? `${descriptor.label} ${descriptor.currentValue === true ? "On" : "Off"}`
-          : getProviderOptionCurrentLabel(
+          : (getProviderOptionCurrentLabel(
               descriptor,
               input.modelSelection,
               input.reportedModelSelection,
-            );
+            ) ??
+            (descriptor.id === input.primarySelectDescriptorId ? descriptor.label : undefined));
     if (typeof label === "string" && label.length > 0) {
       if (
         reasoningLabelIndex === -1 &&

@@ -67,4 +67,17 @@ describe("providerStderr", () => {
     expect(excerpt).toContain("T3_MCP_BEARER_TOKEN=[redacted]");
     expect(excerpt).toContain("No version is set for command node");
   });
+
+  it("redacts the whole key when its body contains underscores", () => {
+    const excerpt = sanitizeProviderStderrExcerpt(
+      [
+        "anthropic=sk-ant-api03-AbCdEf_GhIjKlMnOpQr-StUvWx_yz0123456789-AA",
+        "openai=sk-proj-AbCdEfGhIj_KlMnOpQrStUv-WxYz_0123456789",
+      ].join("\n"),
+      "/Users/ada",
+      {},
+    );
+
+    expect(excerpt).toBe("anthropic=[redacted]\nopenai=[redacted]");
+  });
 });

@@ -391,11 +391,31 @@ export const make = Effect.gen(function* () {
     (effect, input) => guard(effect, input.cwd),
   );
 
+  // A refresh that started after a request saw every change that request could mean, so queued
+  // callers share it instead of each running git status again.
+  const localRefreshLocks = yield* KeyedLock.make<string>();
+  const localRefreshRequests = new Map<string, number>();
+  const localRefreshResults = new Map<
+    string,
+    { readonly startedAt: number; readonly local: VcsStatusLocalResult }
+  >();
   const refreshLocalStatusCore = Effect.fn("VcsStatusBroadcaster.refreshLocalStatusCore")(
     function* (cwd: string) {
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus({ cwd });
-      return yield* updateCachedLocalStatus(cwd, local, { publish: true });
+      const key = yield* statusKey(cwd);
+      const requestedAt = (localRefreshRequests.get(key) ?? 0) + 1;
+      localRefreshRequests.set(key, requestedAt);
+      return yield* localRefreshLocks.withLock(
+        key,
+        Effect.gen(function* () {
+          const shared = localRefreshResults.get(key);
+          if (shared !== undefined && shared.startedAt >= requestedAt) return shared.local;
+          const startedAt = localRefreshRequests.get(key) ?? requestedAt;
+          yield* workflow.invalidateLocalStatus(cwd);
+          const local = yield* workflow.localStatus({ cwd });
+          localRefreshResults.set(key, { startedAt, local });
+          return yield* updateCachedLocalStatus(cwd, local, { publish: true });
+        }),
+      );
     },
   );
 

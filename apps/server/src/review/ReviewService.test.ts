@@ -26,13 +26,24 @@ it.live("refuses recycled live review reads before detecting a repository", () =
       .getDiffPreview({ cwd: f.slot })
       .pipe(Effect.provideService(WorkspaceOperation, f.context));
     assert.isTrue(preview.sources.some((source) => source.diff.includes("review A")));
+    const commits = yield* review
+      .getBranchCommits({ cwd: f.slot, baseRef: "main" })
+      .pipe(Effect.provideService(WorkspaceOperation, f.context));
+    assert.equal(commits.commits[0]?.subject, "parent");
     yield* f.git({ cwd: f.slot, args: ["restore", "file"] });
     yield* f.recycle;
-    const result = yield* review
-      .getDiffPreview({ cwd: f.slot })
-      .pipe(Effect.provideService(WorkspaceOperation, f.context), Effect.result);
-    assert.equal(result._tag, "Failure");
-    if (result._tag === "Failure") assert.equal(result.failure._tag, "VcsRepositoryDetectionError");
+    for (const read of [
+      review.getDiffPreview({ cwd: f.slot }),
+      review.getBranchCommits({ cwd: f.slot }),
+    ]) {
+      const result = yield* read.pipe(
+        Effect.provideService(WorkspaceOperation, f.context),
+        Effect.result,
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure")
+        assert.equal(result.failure._tag, "VcsRepositoryDetectionError");
+    }
     assert.isArray((yield* review.getDiffPreview({ cwd: f.cwd })).sources);
   }).pipe(
     Effect.provide(

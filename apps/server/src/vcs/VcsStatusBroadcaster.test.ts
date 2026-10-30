@@ -1,4 +1,4 @@
-import { SourceControlProviderKind, WorkspaceOperation } from "@t3tools/contracts";
+import { SourceControlProviderKind, ThreadId, WorkspaceOperation } from "@t3tools/contracts";
 import { accessFixture, testLayer as treehouseLayer } from "./TreehouseWorktrees.testkit.ts";
 import { assert, it, describe } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -77,6 +77,7 @@ function layerTestFor(state: {
   backgroundWorkEnabled?: boolean;
   automaticFetchInterval?: Effect.Effect<Duration.Duration>;
   beforeRemoteStatus?: Effect.Effect<void>;
+  beforeLocalStatus?: Effect.Effect<void>;
   fileSystem?: FileSystem.FileSystem;
   pullCurrentBranch?: GitWorkflowService.GitWorkflowService["Service"]["pullCurrentBranch"];
 }) {
@@ -96,9 +97,11 @@ function layerTestFor(state: {
     Layer.provide(
       Layer.mock(GitWorkflowService.GitWorkflowService)({
         localStatus: () =>
-          Effect.sync(() => {
+          Effect.suspend(() => {
             state.localStatusCalls += 1;
-            return state.currentLocalStatus;
+            return (state.beforeLocalStatus ?? Effect.void).pipe(
+              Effect.as(state.currentLocalStatus),
+            );
           }),
         currentBranch: () => Effect.sync(() => state.currentLocalStatus.refName),
         remoteStatus: (_input, options) =>
@@ -216,6 +219,65 @@ it.effect(
 );
 
 describe("VcsStatusBroadcaster", () => {
+  it.effect("refreshes queued behind a running one share the next git status read", () => {
+    const state: Parameters<typeof layerTestFor>[0] = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+      fileSystem: FileSystem.makeNoop({ realPath: (cwd) => Effect.succeed(cwd) }),
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const otherWorkspace = { threadId: ThreadId.make("other-workspace"), generation: null };
+      assert.isFalse(
+        (yield* broadcaster
+          .getStatus({ cwd: "/repo" })
+          .pipe(Effect.provideService(WorkspaceOperation, otherWorkspace))).hasWorkingTreeChanges,
+      );
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      state.beforeLocalStatus = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+      );
+      const running = yield* broadcaster
+        .refreshLocalStatus("/repo")
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(started);
+      // Requested while the first read runs, so that read may predate their change.
+      state.currentLocalStatus = { ...baseLocalStatus, hasWorkingTreeChanges: true };
+      const queued = yield* Effect.all(
+        [
+          broadcaster.refreshLocalStatus("/repo"),
+          broadcaster.refreshLocalStatus("/repo"),
+          broadcaster
+            .refreshLocalStatus("/repo")
+            .pipe(Effect.provideService(WorkspaceOperation, otherWorkspace)),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.succeed(release, undefined);
+
+      assert.isFalse((yield* Fiber.join(running)).hasWorkingTreeChanges);
+      const [second, third, scoped] = yield* Fiber.join(queued);
+      assert.isTrue(second.hasWorkingTreeChanges);
+      assert.isTrue(third.hasWorkingTreeChanges);
+      assert.isTrue(scoped.hasWorkingTreeChanges);
+      assert.isTrue(
+        (yield* broadcaster
+          .getStatus({ cwd: "/repo" })
+          .pipe(Effect.provideService(WorkspaceOperation, otherWorkspace))).hasWorkingTreeChanges,
+      );
+      assert.strictEqual(state.localStatusCalls, 4);
+
+      yield* broadcaster.refreshLocalStatus("/repo");
+      assert.strictEqual(state.localStatusCalls, 5);
+    }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
+  });
+
   it.effect("publishes a terminal branch switch without reading remote status", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,

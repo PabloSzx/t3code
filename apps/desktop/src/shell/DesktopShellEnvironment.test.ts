@@ -2,6 +2,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
@@ -29,14 +31,20 @@ function envOutput(values: Readonly<Record<string, string>>): string {
     .join("\n");
 }
 
-function makeProcess(output: string, exitCode = 0): ChildProcessSpawner.ChildProcessHandle {
-  const stdout = output.length === 0 ? Stream.empty : Stream.make(textEncoder.encode(output));
+function makeProcess(input: {
+  readonly output: string;
+  readonly exitCode?: number;
+  readonly keepStdoutOpen?: boolean;
+}): ChildProcessSpawner.ChildProcessHandle {
+  const chunks = [input.output.slice(0, -5), input.output.slice(-5)].filter(Boolean);
+  const output = Stream.fromIterable(chunks.map((chunk) => textEncoder.encode(chunk)));
+  const stdout = input.keepStdoutOpen ? Stream.concat(output, Stream.never) : output;
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
     stdout,
     stderr: Stream.empty,
     all: stdout,
-    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.exitCode ?? 0)),
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
     stdin: Sink.drain,
@@ -70,7 +78,7 @@ function runShellEnvironment(input: {
   readonly userShell?: string;
   readonly handler: (
     command: ChildProcess.Command,
-  ) => string | { output: string; exitCode: number };
+  ) => string | { output: string; exitCode: number; keepStdoutOpen?: boolean };
   readonly failure?: PlatformError.PlatformError;
 }) {
   const layerEnvironment = Layer.succeed(
@@ -85,9 +93,7 @@ function runShellEnvironment(input: {
       if (input.failure !== undefined) return Effect.fail(input.failure);
       const result = input.handler(command);
       return Effect.succeed(
-        typeof result === "string"
-          ? makeProcess(result)
-          : makeProcess(result.output, result.exitCode),
+        typeof result === "string" ? makeProcess({ output: result }) : makeProcess(result),
       );
     }),
   );
@@ -118,6 +124,52 @@ function runShellEnvironment(input: {
 }
 
 describe("DesktopShellEnvironment", () => {
+  it.effect.each(["darwin", "linux", "win32"] as const)(
+    "captures a successful shell environment on %s while background output stays open",
+    (platform) =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/inherited/bin" };
+        const fiber = yield* runShellEnvironment({
+          env,
+          platform,
+          handler: (command) =>
+            command._tag === "StandardCommand" && command.command === "/bin/launchctl"
+              ? ""
+              : {
+                  output: envOutput({
+                    PATH: "/shell/bin",
+                    ...(platform === "win32"
+                      ? { FNM_MULTISHELL_PATH: "/fnm/multishell" }
+                      : { __MISE_DIFF: "mise-diff" }),
+                  }),
+                  exitCode: 0,
+                  keepStdoutOpen: true,
+                },
+        }).pipe(Effect.provide(Logger.layer([])), Effect.forkChild({ startImmediately: true }));
+
+        yield* TestClock.adjust("20 seconds");
+        assert.isTrue(yield* Fiber.join(fiber));
+        assert.include(env.PATH, "/shell/bin");
+        assert.include(env.PATH, "/inherited/bin");
+      }),
+  );
+
+  it.effect.each(["darwin", "linux"] as const)(
+    "leaves %s preparation incomplete when every shell fails",
+    (platform) =>
+      Effect.gen(function* () {
+        const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
+        const prepared = yield* runShellEnvironment({
+          env,
+          platform,
+          handler: () => ({ output: envOutput({ PATH: "/failed/bin" }), exitCode: 7 }),
+        }).pipe(Effect.provide(Logger.layer([])));
+
+        assert.isFalse(prepared);
+        assert.equal(env.PATH, "/usr/bin");
+      }),
+  );
+
   it.effect("rejects PATH output from a failed shell and tries the next candidate", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = { SHELL: "/bin/failing", PATH: "/usr/bin" };
@@ -267,7 +319,7 @@ describe("DesktopShellEnvironment", () => {
       };
       const commands: string[] = [];
 
-      yield* runShellEnvironment({
+      const prepared = yield* runShellEnvironment({
         env,
         platform: "darwin",
         handler: (command) => {
@@ -277,6 +329,7 @@ describe("DesktopShellEnvironment", () => {
         },
       });
 
+      assert.isFalse(prepared);
       assert.deepEqual(commands, ["/opt/homebrew/bin/nu", "/bin/zsh", "/bin/launchctl"]);
       assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin");
     }),

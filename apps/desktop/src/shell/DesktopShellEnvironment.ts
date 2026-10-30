@@ -10,6 +10,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -245,6 +246,7 @@ const runCommandOutput = Effect.fn("desktop.shellEnvironment.runCommandOutput")(
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly timeout: Duration.Duration;
+  readonly completionMarker?: string;
   readonly shell?: boolean;
 }): Effect.fn.Return<string, never, ChildProcessSpawner.ChildProcessSpawner> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -255,14 +257,26 @@ const runCommandOutput = Effect.fn("desktop.shellEnvironment.runCommandOutput")(
           shell: input.shell ?? false,
           stdin: "ignore",
           stdout: "pipe",
-          stderr: "pipe",
+          stderr: "ignore",
           killSignal: "SIGTERM",
           forceKillAfter: PROCESS_TERMINATE_GRACE,
         }),
       );
-      return yield* Effect.all([Stream.mkString(Stream.decodeText(child.stdout)), child.exitCode], {
-        concurrency: 2,
-      });
+      const stdout = Stream.decodeText(child.stdout);
+      const completionMarker = input.completionMarker;
+      // Shell startup jobs can retain stdout after the shell exits; the final frame completes capture.
+      const output =
+        completionMarker === undefined
+          ? Stream.mkString(stdout)
+          : Stream.run(
+              stdout,
+              Sink.fold(
+                () => "",
+                (captured) => !captured.includes(completionMarker),
+                (captured, chunk: string) => Effect.succeed(captured + chunk),
+              ),
+            );
+      return yield* Effect.all([output, child.exitCode], { concurrency: 2 });
     }),
   ).pipe(
     Effect.mapError(
@@ -308,15 +322,18 @@ const runCommandOutput = Effect.fn("desktop.shellEnvironment.runCommandOutput")(
 const readLoginShellEnvironment = (
   shell: string,
   names: ReadonlyArray<string>,
-): Effect.Effect<EnvironmentPatch, never, ChildProcessSpawner.ChildProcessSpawner> =>
-  names.length === 0
+): Effect.Effect<EnvironmentPatch, never, ChildProcessSpawner.ChildProcessSpawner> => {
+  const lastName = names.at(-1);
+  return lastName === undefined
     ? Effect.succeed({})
     : runCommandOutput({
         probe: "login-shell",
         command: shell,
         args: ["-ilc", buildEnvironmentCaptureCommand(shell, names)],
         timeout: LOGIN_SHELL_TIMEOUT,
+        completionMarker: endMarker(lastName),
       }).pipe(Effect.map((output) => extractEnvironment(output, names)));
+};
 
 const readLaunchctlPath = runCommandOutput({
   probe: "launchctl-path",
@@ -330,7 +347,8 @@ const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEn
     names: ReadonlyArray<string>,
     options: WindowsProbeOptions,
   ): Effect.fn.Return<EnvironmentPatch, never, ChildProcessSpawner.ChildProcessSpawner> {
-    if (names.length === 0) return {};
+    const lastName = names.at(-1);
+    if (lastName === undefined) return {};
 
     const args = [
       "-NoLogo",
@@ -346,6 +364,7 @@ const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEn
         command,
         args,
         timeout: LOGIN_SHELL_TIMEOUT,
+        completionMarker: endMarker(lastName),
       });
       const environment = extractEnvironment(output, names);
       if (Object.keys(environment).length > 0) {
@@ -392,7 +411,7 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
   function* (
     config: ShellEnvironmentConfig,
   ): Effect.fn.Return<
-    void,
+    boolean,
     never,
     ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem
   > {
@@ -491,6 +510,7 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
         }
       }
     }
+    return Boolean(shellEnvironment.PATH);
   },
 );
 
@@ -505,7 +525,7 @@ const installShellEnvironment = (
     return installWindowsEnvironment(config);
   }
   if (config.platform === "darwin" || config.platform === "linux") {
-    return installPosixEnvironment(config).pipe(Effect.as(true));
+    return installPosixEnvironment(config);
   }
   return Effect.succeed(false);
 };

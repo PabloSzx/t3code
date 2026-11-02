@@ -87,8 +87,8 @@ const WINDOW: UsageSummaryInput = {
 };
 
 const setup = Effect.gen(function* () {
-  const home = yield* Effect.promise(() =>
-    NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "usage-service-test-")),
+  const home = yield* Effect.promise(async () =>
+    NodeFSP.realpath(await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "usage-service-test-"))),
   );
   yield* Effect.addFinalizer(() =>
     Effect.promise(() => NodeFSP.rm(home, { recursive: true, force: true })),
@@ -2540,6 +2540,7 @@ describe("UsageService", () => {
 
   it.live("reports saved usage of a removed directory only for windows it reaches", () =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-08-02T10:00:00Z"));
       const { transcript, settings, home } = yield* setup;
       yield* Effect.promise(async () => {
         await NodeFSP.writeFile(transcript, claudeLine(1, 5));
@@ -2566,7 +2567,7 @@ describe("UsageService", () => {
       assert.deepStrictEqual(later.buckets, []);
       assert.strictEqual(later.sources[0]?.status, "missing");
       assert.strictEqual(later.sources[0]?.scannedFiles, 0);
-    }).pipe(Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
   it.live("does not share an in-flight scan after custom prices change", () =>

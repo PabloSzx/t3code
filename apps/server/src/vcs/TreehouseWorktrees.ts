@@ -81,9 +81,11 @@ const make = Effect.gen(function* () {
     cwd: string;
     command: string;
     args: ReadonlyArray<string>;
+    trimOutput?: boolean;
   }) {
+    const { trimOutput = true, ...command } = input;
     const output = yield* runner.run({
-      ...input,
+      ...command,
       ...(input.command === "git" ? {} : { stdin: "" }),
       timeout: TREEHOUSE_COMMAND_TIMEOUT,
       maxOutputBytes: 1024 * 1024,
@@ -98,7 +100,7 @@ const make = Effect.gen(function* () {
         cause: output,
       });
     }
-    return output.stdout.trim();
+    return trimOutput ? output.stdout.trim() : output.stdout;
   });
   const mapError = (input: { cwd: string; cause: unknown }) =>
     isGitError(input.cause)
@@ -282,19 +284,30 @@ const make = Effect.gen(function* () {
                 retained !== head
               )
                 return "repository, branch, or commit changed since check";
-              // Treehouse return may reset/clean a slot. Never apply native cleanup's discard policy here.
+              // Treehouse keeps ignored dependencies; all other local files still block its reset.
               const changes = yield* run({
                 cwd: input.path,
                 command: "git",
                 args: [
                   "status",
                   "--porcelain=v1",
-                  "--untracked-files=all",
-                  "--ignored",
+                  "-z",
+                  "--untracked-files=normal",
+                  "--ignored=matching",
                   "--ignore-submodules=none",
                 ],
+                trimOutput: false,
               });
-              if (changes !== "") return "Treehouse slot has local or ignored files";
+              if (
+                changes
+                  .split("\0")
+                  .some(
+                    (entry) =>
+                      entry !== "" &&
+                      !(entry.startsWith("!! ") && /(^|\/)node_modules\/$/.test(entry.slice(3))),
+                  )
+              )
+                return "Treehouse slot has local or ignored files";
               const index = yield* run({
                 cwd: input.path,
                 command: "git",

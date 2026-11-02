@@ -257,7 +257,11 @@ function normalizeThreadRequest(frame: unknown, ignoredConfigKeys: ReadonlySet<s
   if (typeof config !== "object" || config === null) return { ...record, params };
   const owned = Object.fromEntries(
     Object.entries(config as Record<string, unknown>).filter(
-      ([key]) => key !== "mcp_servers" && !key.startsWith("mcp_servers."),
+      ([key]) =>
+        key !== "mcp_servers" &&
+        !key.startsWith("mcp_servers.") &&
+        key !== "shell_environment_policy.set.T3_MCP_URL" &&
+        key !== "shell_environment_policy.set.T3_MCP_BEARER_TOKEN",
     ),
   );
   for (const key of ignoredConfigKeys) delete owned[key];

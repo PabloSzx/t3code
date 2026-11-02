@@ -2138,8 +2138,14 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fs.readFileString(`${worktree}/tracked.txt`)).toBe("original\n");
         yield* fs.remove(`${index.trim()}.lock`);
         const gitFile = yield* fs.readFileString(`${worktree}/.git`);
-        yield* fs.writeFileString(`${worktree}/.git`, "gitdir: /missing-git-directory\n");
+        // A valid gitdir reaches the branch comparison without version-specific corrupt-link diagnostics.
+        yield* fs.writeFileString(`${worktree}/.git`, `gitdir: ${repo}/.git\n`);
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
+        yield* fs.writeFileString(`${worktree}/.git`, "gitdir: /missing-git-directory\n");
+        const corrupt = (yield* service.runNow).entries[0];
+        expect(["kept", "failed"]).toContain(corrupt?.outcome);
+        expect(corrupt).toMatchObject({ path: worktree, bytes: null });
+        expect(yield* fs.readFileString(`${worktree}/tracked.txt`)).toBe("original\n");
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);

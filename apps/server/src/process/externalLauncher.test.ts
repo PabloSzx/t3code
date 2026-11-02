@@ -21,7 +21,7 @@ import { resolveEditorCommand } from "@t3tools/shared/editor";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as ExternalLauncher from "./externalLauncher.ts";
-import { WorkspaceOperation } from "@t3tools/contracts";
+import { WorkspaceOperation, WorkspaceUnavailableError } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import {
   accessFixture,
@@ -34,29 +34,36 @@ it.live("refuses recycled editor targets below the transport before spawning", (
     const bin = f.path.join(f.root, "bin");
     yield* f.fs.makeDirectory(bin);
     yield* f.fs.writeFileString(f.path.join(bin, "code"), "#!/bin/sh\n", { mode: 0o755 });
+    const env = { PATH: bin, DISPLAY: ":0" };
     const spawned: ChildProcess.StandardCommand[] = [];
-    const launcher = yield* ExternalLauncher.ExternalLauncher.pipe(
+    yield* Effect.gen(function* () {
+      const launcher = yield* ExternalLauncher.ExternalLauncher;
+      const next = yield* f.recycle;
+      for (const context of [undefined, f.context]) {
+        const result = yield* launcher
+          .launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` })
+          .pipe(Effect.provideService(WorkspaceOperation, context), Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+        if (Exit.isFailure(result)) {
+          assert.instanceOf(Cause.squash(result.cause), WorkspaceUnavailableError);
+        }
+      }
+      assert.equal(spawned.length, 0);
+      yield* launcher
+        .launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` })
+        .pipe(Effect.provideService(WorkspaceOperation, next));
+      assert.equal(spawned.length, 1);
+    }).pipe(
       Effect.provide(
         layerTest({
           platform: "linux",
-          env: { PATH: bin },
+          env,
           onSpawn: (command) => spawned.push(command),
           config: yield* ServerConfig.ServerConfig,
         }),
       ),
+      Effect.provideService(HostProcess.Environment, env),
     );
-    const next = yield* f.recycle;
-    for (const context of [undefined, f.context]) {
-      const result = yield* launcher
-        .launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` })
-        .pipe(Effect.provideService(WorkspaceOperation, context), Effect.exit);
-      assert.isTrue(Exit.isFailure(result));
-    }
-    assert.equal(spawned.length, 0);
-    yield* launcher
-      .launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` })
-      .pipe(Effect.provideService(WorkspaceOperation, next));
-    assert.equal(spawned.length, 1);
   }).pipe(Effect.provide(treehouseTestLayer)),
 );
 

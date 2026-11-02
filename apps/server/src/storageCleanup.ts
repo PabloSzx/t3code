@@ -845,7 +845,11 @@ const make = Effect.gen(function* () {
           return keep("not a linked worktree");
         if (yield* branchChanged(worktreePath, thread.branch))
           return keep("repository or branch changed");
-        const changes = yield* localChangesReason(worktreePath, settings);
+        // Pooled returns retain ignored files; native removal still protects local artifacts.
+        const changes = yield* localChangesReason(
+          worktreePath,
+          pooled ? { ...settings, worktreeKeepWhen: "uncommitted-changes" } : settings,
+        );
         if (changes !== null) return keep(changes);
         if (
           group.some(

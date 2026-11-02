@@ -1641,8 +1641,15 @@ describe("storage cleanup reports and local file policies", () => {
     "returns an eligible owned pool lease without removing history, branch, or pool bytes",
     () =>
       Effect.gen(function* () {
-        const f = yield* pooledCleanupFixture();
+        const f = yield* pooledCleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: 1,
+          worktreeKeepWhen: "any-local-files",
+        });
         const { leases } = f;
+        yield* f.fs.makeDirectory(`${f.worktree}/dist`);
+        yield* f.fs.writeFileString(`${f.worktree}/dist/output`, "retained build cache");
+        yield* f.fs.writeFileString(`${f.worktree}/.env`, "synthetic configuration");
         const report = yield* f.service.runNow;
         expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
           reason: expect.stringMatching(/^Returned Treehouse slot: inactive for \d+ days$/),
@@ -1651,6 +1658,10 @@ describe("storage cleanup reports and local file policies", () => {
         });
         expect(report.bytesFreed).toBe(0);
         expect(report.returnedCount).toBe(1);
+        expect(yield* f.fs.readFileString(`${f.worktree}/.env`)).toBe("synthetic configuration");
+        expect(yield* f.fs.readFileString(`${f.worktree}/dist/output`)).toBe(
+          "retained build cache",
+        );
         expect(
           (yield* f.command(f.repo, ["rev-parse", "refs/heads/feature"])).stdout.trim(),
         ).not.toBe("");

@@ -364,6 +364,19 @@ describe("Treehouse worktrees", () => {
           path: null,
         });
         const original = yield* f.leases.read(f.slot);
+        yield* f.fs.writeFileString(
+          f.path.join(f.cwd, ".git", "info", "exclude"),
+          "node_modules/\n",
+        );
+        const dependencies = [
+          "node_modules/package/index.js",
+          'packages/a "quoted"\npackage/node_modules/package/index.js',
+        ];
+        for (const dependency of dependencies) {
+          const file = f.path.join(f.slot, dependency);
+          yield* f.fs.makeDirectory(f.path.dirname(file), { recursive: true });
+          yield* f.fs.writeFileString(file, "cached dependency\n");
+        }
         for (const threadId of ["parent-thread", "child-thread"])
           yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 1 });
         assert.isNull(
@@ -376,6 +389,11 @@ describe("Treehouse worktrees", () => {
             recheck: Effect.succeed(null),
           }),
         );
+        for (const dependency of dependencies)
+          assert.strictEqual(
+            yield* f.fs.readFileString(f.path.join(f.slot, dependency)),
+            "cached dependency\n",
+          );
         if (location === "different slot") {
           yield* f.driver.createWorktree({
             cwd: f.cwd,
@@ -434,6 +452,9 @@ describe("Treehouse worktrees", () => {
     "another thread",
     "untracked",
     "ignored",
+    "unignored node_modules",
+    "ignored node_modules lookalike",
+    "ignored node_modules symlink",
     "tracked",
     "branch",
     "repository",
@@ -467,6 +488,27 @@ describe("Treehouse worktrees", () => {
           "ignored-file\n",
         );
         yield* f.fs.writeFileString(f.path.join(f.slot, "ignored-file"), "keep ignored\n");
+      }
+      if (
+        protection === "unignored node_modules" ||
+        protection === "ignored node_modules lookalike"
+      ) {
+        const directory =
+          protection === "unignored node_modules" ? "node_modules" : " node_modules";
+        if (protection === "ignored node_modules lookalike")
+          yield* f.fs.writeFileString(
+            f.path.join(f.cwd, ".git", "info", "exclude"),
+            `${directory}/\n`,
+          );
+        yield* f.fs.makeDirectory(f.path.join(f.slot, directory));
+        yield* f.fs.writeFileString(f.path.join(f.slot, directory, "notes"), "keep notes\n");
+      }
+      if (protection === "ignored node_modules symlink") {
+        yield* f.fs.writeFileString(
+          f.path.join(f.cwd, ".git", "info", "exclude"),
+          "node_modules\n",
+        );
+        yield* f.fs.symlink(f.cwd, f.path.join(f.slot, "node_modules"));
       }
       if (protection === "branch")
         yield* f.git({ cwd: f.slot, args: ["switch", "-c", "user-branch"] });

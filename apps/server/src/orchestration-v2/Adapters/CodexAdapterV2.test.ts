@@ -1401,6 +1401,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
       const currentConfig = {
         "tools.update_plan.enabled": true,
+        "shell_environment_policy.set.T3_MCP_URL": "http://127.0.0.1:42000/mcp",
+        "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "current-token",
         "mcp_servers.t3-code": {
           url: "http://127.0.0.1:42000/mcp",
           http_headers: { Authorization: "Bearer current-token" },
@@ -1410,6 +1412,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       for (const recordedMcp of [
         { mcp_servers: { "t3-code": recordedServer } },
         { "mcp_servers.t3-code": recordedServer, "mcp_servers.extra.command": "echo" },
+        {
+          "mcp_servers.t3-code": recordedServer,
+          "shell_environment_policy.set.T3_MCP_URL": "http://127.0.0.1:41000/mcp",
+          "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "recorded-token",
+        },
       ]) {
         const entries = codexReplayPreamble({
           nativeThreadId: "replayed-mcp-thread",

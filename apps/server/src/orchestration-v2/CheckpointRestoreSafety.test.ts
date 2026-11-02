@@ -94,7 +94,9 @@ it.effect.each([
       Layer.provide(
         Layer.mergeAll(
           NodeServices.layer,
-          Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
+          ServerConfig.layerTest(cwd, path.join(parent, "config")).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
           ServerSettings.layerTest(),
           ThreadCommandExecutor.layer,
           IdAllocator.layer,

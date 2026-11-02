@@ -59,6 +59,7 @@ const PoolState = Schema.Struct({
       lease_id: Schema.optional(Schema.String),
       lease_holder: Schema.optional(Schema.String),
       destroying: Schema.optional(Schema.Boolean),
+      seeded_paths: Schema.optional(Schema.Array(Schema.String)),
       recovery_error: Schema.optional(Schema.String),
       recovery_reason: Schema.optional(Schema.String),
     }),
@@ -719,6 +720,14 @@ const make = Effect.gen(function* () {
           return yield* new TreehouseLeaseError({
             path: input.owned.record.lease.path,
             reason: "unknown-lease",
+          });
+        // Treehouse removes its trusted seed inventory on return. Automatic
+        // cleanup must retain those files until their owner handles them.
+        const slot = yield* inspect(owned.record.lease.path);
+        if (slot?.seeded_paths?.length)
+          return yield* new TreehouseLeaseError({
+            path: owned.record.lease.path,
+            reason: "metadata",
           });
         yield* assertUnused({ owned, allowedThreadIds: input.release.threadIds });
         for (const threadId of input.release.threadIds) {

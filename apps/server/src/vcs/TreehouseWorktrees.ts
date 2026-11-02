@@ -284,7 +284,7 @@ const make = Effect.gen(function* () {
                 retained !== head
               )
                 return "repository, branch, or commit changed since check";
-              // Treehouse keeps ignored dependencies; all other local files still block its reset.
+              // Returning a pool slot retains ignored files for its next lease.
               const changes = yield* run({
                 cwd: input.path,
                 command: "git",
@@ -298,20 +298,21 @@ const make = Effect.gen(function* () {
                 ],
                 trimOutput: false,
               });
-              if (
-                changes
-                  .split("\0")
-                  .some(
-                    (entry) =>
-                      entry !== "" &&
-                      !(entry.startsWith("!! ") && /(^|\/)node_modules\/$/.test(entry.slice(3))),
-                  )
-              )
-                return "Treehouse slot has local or ignored files";
-              const index = yield* run({
+              const checkout = yield* fs.realPath(input.path);
+              for (const entry of changes.split("\0")) {
+                if (entry === "") continue;
+                if (!entry.startsWith("!! ")) return "Treehouse slot has local files";
+                const relative = entry.slice(3).replace(/\/$/, "");
+                if (
+                  (yield* fs.realPath(path.join(input.path, relative))) !==
+                  path.join(checkout, relative)
+                )
+                  return "Treehouse slot has ignored symbolic links";
+              }
+              const submodules = yield* run({
                 cwd: input.path,
                 command: "git",
-                args: ["ls-files", "--stage", "-z"],
+                args: ["submodule", "status"],
               });
               const admin = yield* run({
                 cwd: input.path,
@@ -319,7 +320,7 @@ const make = Effect.gen(function* () {
                 args: ["rev-parse", "--absolute-git-dir"],
               });
               if (
-                index.split("\0").some((entry) => entry.startsWith("160000 ")) ||
+                submodules !== "" ||
                 (yield* fs.exists(path.join(admin, "modules"))) ||
                 (yield* fs.exists(path.join(input.path, ".gitmodules")))
               )

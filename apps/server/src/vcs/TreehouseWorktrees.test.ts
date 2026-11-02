@@ -29,6 +29,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -366,13 +367,18 @@ describe("Treehouse worktrees", () => {
         const original = yield* f.leases.read(f.slot);
         yield* f.fs.writeFileString(
           f.path.join(f.cwd, ".git", "info", "exclude"),
-          "node_modules/\n",
+          "node_modules/\n.envrc-secrets\n*.keystore\n__pycache__/\ndist/\n node_modules/\n",
         );
-        const dependencies = [
+        const ignoredArtifacts = [
           "node_modules/package/index.js",
           'packages/a "quoted"\npackage/node_modules/package/index.js',
+          ".envrc-secrets",
+          "mobile/android/release.keystore",
+          "py/package/__pycache__/module.pyc",
+          "js/app/dist/bundle.js",
+          " node_modules/package/index.js",
         ];
-        for (const dependency of dependencies) {
+        for (const dependency of ignoredArtifacts) {
           const file = f.path.join(f.slot, dependency);
           yield* f.fs.makeDirectory(f.path.dirname(file), { recursive: true });
           yield* f.fs.writeFileString(file, "cached dependency\n");
@@ -389,7 +395,7 @@ describe("Treehouse worktrees", () => {
             recheck: Effect.succeed(null),
           }),
         );
-        for (const dependency of dependencies)
+        for (const dependency of ignoredArtifacts)
           assert.strictEqual(
             yield* f.fs.readFileString(f.path.join(f.slot, dependency)),
             "cached dependency\n",
@@ -445,22 +451,72 @@ describe("Treehouse worktrees", () => {
       }).pipe(provide),
   );
 
+  it.live("returns a clean slot when tracked-path output exceeds the process budget", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "long-paths",
+        path: null,
+      });
+      const blob = yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD:file"] });
+      const paths = Array.from(
+        { length: 5_000 },
+        (_, index) => `${index}-${"long-name-".repeat(20)}`,
+      );
+      const runner = yield* ProcessRunner.ProcessRunner;
+      // A sparse checkout keeps the large tracked index without materializing thousands of files.
+      for (const input of [
+        {
+          args: ["update-index", "-z", "--index-info"],
+          stdin: paths.map((file) => `100644 ${blob}\t${file}\0`).join(""),
+        },
+        {
+          args: ["update-index", "-z", "--skip-worktree", "--stdin"],
+          stdin: paths.join("\0") + "\0",
+        },
+      ]) {
+        const result = yield* runner.run({ command: "git", cwd: f.slot, ...input });
+        assert.strictEqual(result.code, 0, result.stderr);
+      }
+      yield* f.git({ cwd: f.slot, args: ["commit", "-qm", "tracked files"] });
+      const headSha = yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] });
+      const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+        Effect.provide(TreehouseWorktrees.layer),
+      );
+      assert.isNull(
+        yield* treehouse.returnIdle({
+          cwd: f.cwd,
+          path: f.slot,
+          branch: "long-paths",
+          headSha,
+          threadIds: [],
+          recheck: Effect.succeed(null),
+        }),
+      );
+      assert.isTrue(Result.isFailure(yield* f.leases.read(f.slot).pipe(Effect.result)));
+    }).pipe(provide),
+  );
+
   it.live.each([
     "provider",
     "terminal",
     "preparation",
     "another thread",
     "untracked",
-    "ignored",
+    "ignored file symlink",
+    "seeded ignored files",
     "unignored node_modules",
-    "ignored node_modules lookalike",
     "ignored node_modules symlink",
     "tracked",
+    "submodule",
     "branch",
     "repository",
   ] as const)("retains an idle lease protected by %s", (protection) =>
     Effect.gen(function* () {
       const f = yield* fixture();
+      let retainedHead = f.parentSha;
       const scope = yield* Scope.make();
       yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
       yield* f.driver.createWorktree(
@@ -480,26 +536,49 @@ describe("Treehouse worktrees", () => {
         yield* f.leases.bindThread({ path: f.slot, threadId: "other", sequence: 2 });
       if (protection === "tracked")
         yield* f.fs.writeFileString(f.path.join(f.slot, "file"), "keep edits\n");
+      if (protection === "submodule") {
+        yield* f.fs.makeDirectory(f.path.join(f.slot, "module"));
+        yield* f.git({
+          cwd: f.slot,
+          args: ["update-index", "--add", "--cacheinfo", `160000,${f.baseSha},module`],
+        });
+        yield* f.git({
+          cwd: f.slot,
+          args: ["commit", "-m", "gitlink without module configuration"],
+        });
+        retainedHead = yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] });
+        assert.strictEqual(
+          yield* f.git({
+            cwd: f.slot,
+            args: ["status", "--porcelain=v1", "--ignore-submodules=none"],
+          }),
+          "",
+        );
+      }
       if (protection === "untracked")
         yield* f.fs.writeFileString(f.path.join(f.slot, "notes"), "keep notes\n");
-      if (protection === "ignored") {
+      if (protection === "seeded ignored files") {
+        const owned = yield* f.leases.read(f.slot);
+        assert.isNotNull(owned);
+        yield* f.fs.writeFileString(
+          f.path.join(f.root, "pool", "treehouse-state.json"),
+          JSON.stringify({
+            version: 4,
+            worktrees: [{ ...owned!.record.lease, leased: true, seeded_paths: [".env"] }],
+          }),
+        );
+        yield* f.fs.writeFileString(f.path.join(f.cwd, ".git", "info", "exclude"), ".env\n");
+        yield* f.fs.writeFileString(f.path.join(f.slot, ".env"), "retained seeded configuration\n");
+      }
+      if (protection === "ignored file symlink") {
         yield* f.fs.writeFileString(
           f.path.join(f.cwd, ".git", "info", "exclude"),
           "ignored-file\n",
         );
-        yield* f.fs.writeFileString(f.path.join(f.slot, "ignored-file"), "keep ignored\n");
+        yield* f.fs.symlink(f.path.join(f.cwd, "file"), f.path.join(f.slot, "ignored-file"));
       }
-      if (
-        protection === "unignored node_modules" ||
-        protection === "ignored node_modules lookalike"
-      ) {
-        const directory =
-          protection === "unignored node_modules" ? "node_modules" : " node_modules";
-        if (protection === "ignored node_modules lookalike")
-          yield* f.fs.writeFileString(
-            f.path.join(f.cwd, ".git", "info", "exclude"),
-            `${directory}/\n`,
-          );
+      if (protection === "unignored node_modules") {
+        const directory = "node_modules";
         yield* f.fs.makeDirectory(f.path.join(f.slot, directory));
         yield* f.fs.writeFileString(f.path.join(f.slot, directory, "notes"), "keep notes\n");
       }
@@ -520,7 +599,7 @@ describe("Treehouse worktrees", () => {
           cwd: protection === "repository" ? f.slot : f.cwd,
           path: f.slot,
           branch: "feature",
-          headSha: f.parentSha,
+          headSha: retainedHead,
           threadIds: ["owner"],
           recheck: Effect.succeed(null),
         })

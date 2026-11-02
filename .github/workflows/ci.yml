@@ -502,7 +502,8 @@ jobs:
     name: Mobile Native Static Analysis
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.mobile_native != 'false' }}
-    runs-on: ${{ github.repository == 'PabloSzx/t3code' && 'macos-26' || 'blacksmith-6vcpu-macos-26' }}
+    # Keep fork lint off the capacity-constrained hosted arm64 pool.
+    runs-on: ${{ github.repository == 'PabloSzx/t3code' && 'macos-26-intel' || 'blacksmith-6vcpu-macos-26' }}
     timeout-minutes: 10
     steps:
       - name: Checkout

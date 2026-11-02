@@ -53,6 +53,10 @@ vi.mock("../../../state/use-selected-thread-git-actions", () => ({
 }));
 vi.mock("../../../state/query", () => ({ useEnvironmentQuery: () => ({ data: null }) }));
 vi.mock("../../../state/vcs", () => ({ vcsEnvironment: { status: () => null } }));
+vi.mock("../../../state/workspace-access", () => ({
+  useWorkspaceSource: () => null,
+  useWorkspaceAvailability: () => null,
+}));
 
 import { GitBranchesSheet } from "./GitBranchesSheet";
 

@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /** Uses the managed worktree folder; handoff detaches the provider, ending this turn and resuming there next run. */
 export const WorktreeMcpHandoffInput = Schema.Struct({
@@ -84,6 +84,28 @@ export const WorktreeMcpStatusResult = Schema.Struct({
   }),
 });
 export type WorktreeMcpStatusResult = typeof WorktreeMcpStatusResult.Type;
+
+export const WorktreeMcpReconcileBranchInput = Schema.Struct({
+  threadId: ThreadId,
+  expected: Schema.Struct({
+    worktreePath: TrimmedNonEmptyString,
+    recordedBranch: TrimmedNonEmptyString,
+    branch: TrimmedNonEmptyString,
+    headSha: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)),
+    leaseId: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
+    threadIds: Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+  }),
+});
+export type WorktreeMcpReconcileBranchInput = typeof WorktreeMcpReconcileBranchInput.Type;
+
+export const WorktreeMcpReconcileBranchResult = Schema.Struct({
+  worktreePath: TrimmedNonEmptyString,
+  branch: TrimmedNonEmptyString,
+  headSha: Schema.String,
+  threadIds: Schema.Array(ThreadId),
+  updatedThreadIds: Schema.Array(ThreadId),
+});
+export type WorktreeMcpReconcileBranchResult = typeof WorktreeMcpReconcileBranchResult.Type;
 
 export class WorktreeMcpFailure extends Schema.TaggedError<WorktreeMcpFailure>()(
   "WorktreeMcpFailure",

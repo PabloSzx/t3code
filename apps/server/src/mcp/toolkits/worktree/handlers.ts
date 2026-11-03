@@ -58,6 +58,15 @@ const handlers = {
       return yield* service.handoff(scope, input);
     }),
   ),
+  t3_worktree_reconcile_branch: McpToolAccess.writesThreads(
+    (input) => input.expected.threadIds,
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* WorktreeMcpService.WorktreeMcpService;
+        return yield* service.reconcileBranch({ scope, input });
+      }),
+  ),
   t3_worktree_status: McpToolAccess.readsAsCaller(() =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

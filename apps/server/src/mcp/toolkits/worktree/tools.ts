@@ -7,6 +7,8 @@ import {
   WorktreeMcpHandoffInput,
   WorktreeMcpHandoffResult,
   WorktreeMcpStatusResult,
+  WorktreeMcpReconcileBranchInput,
+  WorktreeMcpReconcileBranchResult,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -19,6 +21,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
+import * as ProcessRunner from "../../../processRunner.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -42,6 +45,21 @@ const WorktreeHandoffTool = Tool.make("t3_worktree_handoff", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, false)
   .annotate(Tool.OpenWorld, true);
+
+const WorktreeReconcileBranchTool = Tool.make("t3_worktree_reconcile_branch", {
+  description:
+    "Reconcile a user-approved, inspected Treehouse root and its settled shared subagents to the actual Git branch. Metadata only; no checkout, reset, slot return or session stop. Inspect the full family, branch/HEAD and lease first. Identity or activity changes block requests. Failure may leave partial metadata: inspect before retrying. Normal cleanup guards remain.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    ...WorktreeMcpReconcileBranchInput.fields,
+  }),
+  success: WorktreeMcpReconcileBranchResult,
+  failure: WorktreeToolFailure,
+  failureMode: "return",
+  dependencies: [...dependencies, ProcessRunner.ProcessRunner],
+})
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true);
 
 const WorktreeStatusTool = Tool.make("t3_worktree_status", {
   description:
@@ -89,6 +107,7 @@ const WorktreeListTool = Tool.make("t3_worktree_list", {
   .annotate(Tool.Destructive, false);
 export const WorktreeToolkit = Toolkit.make(
   WorktreeHandoffTool,
+  WorktreeReconcileBranchTool,
   WorktreeStatusTool,
   WorktreeListTool,
 );

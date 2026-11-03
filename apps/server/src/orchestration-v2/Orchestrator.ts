@@ -3045,6 +3045,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} branch changed before the metadata update could be applied.`,
       });
     }
+    if (command.type === "thread.metadata.update" && command.expectedSequence !== undefined) {
+      const sequence = yield* eventSink
+        .latestSequence({ threadId: command.threadId })
+        .pipe(mapDispatchError(command));
+      if (sequence > command.expectedSequence)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} changed after the metadata inspection.`,
+        });
+    }
     if (command.type === "thread.metadata.update" && command.expectedEmpty === true) {
       const records = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])

@@ -199,6 +199,10 @@ export class TreehouseLeaseStore extends Context.Service<
       input: TreehouseOperationOptions,
     ) => Effect.Effect<Effect.Effect<void>, TreehouseLeaseError>;
     readonly assertReturnable: (owned: Owned) => Effect.Effect<void, TreehouseLeaseError>;
+    readonly assertUnused: (input: {
+      readonly owned: Owned;
+      readonly allowedThreadIds: readonly string[];
+    }) => Effect.Effect<void, TreehouseLeaseError>;
     readonly releasedThread: (
       input: TreehouseReleasedThreadOptions,
     ) => Effect.Effect<Owned | null, TreehouseLeaseError>;
@@ -437,40 +441,49 @@ const make = Effect.gen(function* () {
     });
     return fs.remove(pin, { recursive: true }).pipe(Effect.ignoreCause({ log: true }));
   });
-  const assertUnused = Effect.fn("TreehouseLeases.assertUnused")(function* (input: {
-    owned: Owned;
-    allowedThreadIds: readonly string[];
-  }) {
-    const { owned } = input;
-    const root = yield* location();
-    const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
-      Effect.catchIf(
-        (error) => error.reason._tag === "NotFound",
-        () => Effect.succeed([]),
+  const assertUnused = Effect.fn("TreehouseLeases.assertUnused")(
+    function* (input: { owned: Owned; allowedThreadIds: readonly string[] }) {
+      const { owned } = input;
+      const root = yield* location();
+      const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed([]),
+        ),
+      );
+      const allowed = new Set(input.allowedThreadIds.map((id) => `${Base64Url.encode(id)}.json`));
+      for (const name of threads) {
+        const binding = yield* fs
+          .readFileString(path.join(root, "threads", name))
+          .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
+        if (binding.active && binding.leaseId === owned.record.lease.lease_id && !allowed.has(name))
+          return yield* new TreehouseLeaseError({
+            path: owned.record.lease.path,
+            reason: "in-use",
+          });
+      }
+      const uses = yield* fs.readDirectory(path.join(root, "uses")).pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed([]),
+        ),
+      );
+      for (const name of uses) {
+        const use = yield* fs
+          .readFileString(path.join(root, "uses", name, "use.json"))
+          .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))));
+        if (use.leaseId === owned.record.lease.lease_id)
+          return yield* new TreehouseLeaseError({
+            path: owned.record.lease.path,
+            reason: "in-use",
+          });
+      }
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) => metadataError({ path: input.owned.record.lease.path, cause })),
       ),
-    );
-    const allowed = new Set(input.allowedThreadIds.map((id) => `${Base64Url.encode(id)}.json`));
-    for (const name of threads) {
-      const binding = yield* fs
-        .readFileString(path.join(root, "threads", name))
-        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
-      if (binding.active && binding.leaseId === owned.record.lease.lease_id && !allowed.has(name))
-        return yield* new TreehouseLeaseError({ path: owned.record.lease.path, reason: "in-use" });
-    }
-    const uses = yield* fs.readDirectory(path.join(root, "uses")).pipe(
-      Effect.catchIf(
-        (error) => error.reason._tag === "NotFound",
-        () => Effect.succeed([]),
-      ),
-    );
-    for (const name of uses) {
-      const use = yield* fs
-        .readFileString(path.join(root, "uses", name, "use.json"))
-        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))));
-      if (use.leaseId === owned.record.lease.lease_id)
-        return yield* new TreehouseLeaseError({ path: owned.record.lease.path, reason: "in-use" });
-    }
-  });
+  );
   const operationTarget = Effect.fn("TreehouseLeases.operationTarget")(function* (target: string) {
     const absolute = path.isAbsolute(target) && path.sep !== "\\" ? target : path.resolve(target);
     if (isNetworkPath(absolute)) return path.sep === "/" ? absolute : path.resolve(absolute);
@@ -895,6 +908,7 @@ const make = Effect.gen(function* () {
       (effect, input) =>
         effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
     ),
+    assertUnused,
     assertReturnable: Effect.fn("TreehouseLeases.assertReturnable")(
       function* (owned) {
         yield* assertUnused({ owned, allowedThreadIds: [] });

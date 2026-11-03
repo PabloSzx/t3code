@@ -1488,6 +1488,61 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("conditional metadata cannot overwrite a thread changed after inspection", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:conditional-workspace-metadata");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-conditional-workspace-metadata"),
+      threadId,
+      projectId: ProjectId.make("project:conditional-workspace-metadata"),
+      title: "Inspected workspace",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "feature/temporary",
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const inspected = yield* orchestrator.getShellSnapshot({ threadIds: [threadId] });
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("rename-after-inspection"),
+      threadId,
+      title: "Newer user state",
+    });
+    const stale = yield* orchestrator
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("stale-workspace-reconciliation"),
+        threadId,
+        expectedBranch: "feature/temporary",
+        expectedWorktreePath: null,
+        expectedSequence: inspected.snapshotSequence,
+        branch: "feature/review",
+      })
+      .pipe(Effect.result);
+    assert.isTrue(Result.isFailure(stale));
+    assert.equal((yield* projections.getThread(threadId)).branch, "feature/temporary");
+    const current = yield* orchestrator.getShellSnapshot({ threadIds: [threadId] });
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("current-workspace-reconciliation"),
+      threadId,
+      expectedBranch: "feature/temporary",
+      expectedWorktreePath: null,
+      expectedSequence: current.snapshotSequence,
+      branch: "feature/review",
+    });
+    const repaired = yield* projections.getThread(threadId);
+    assert.equal(repaired.branch, "feature/review");
+    assert.equal(repaired.title, "Newer user state");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("dispatch records the command outcome and its duration", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

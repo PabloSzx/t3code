@@ -20,6 +20,7 @@ import {
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { ThreadLaunchService } from "../orchestration-v2/ThreadLaunchService.ts";
+import { ProcessRunner } from "../processRunner.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { ThreadSearch } from "../orchestration-v2/ThreadSearch.ts";
 import { PeerForwarding } from "../peer/PeerForwarding.ts";
@@ -72,6 +73,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ServerSettingsService)({}),
   Layer.mock(SourceControlRepositoryService)({}),
   Layer.mock(ThreadLaunchService)({}),
+  Layer.mock(ProcessRunner)({}),
   Layer.mock(ThreadManagementService)({}),
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),

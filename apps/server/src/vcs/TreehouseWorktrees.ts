@@ -1,4 +1,5 @@
 import { GitCommandError, type VcsCreateWorktreeInput } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
@@ -33,6 +34,9 @@ export interface TreehouseIdleReturnOptions {
   readonly threadIds: readonly string[];
   readonly recheck: Effect.Effect<string | null, GitCommandError>;
 }
+export interface TreehouseIdleDestroyOptions extends TreehouseIdleReturnOptions {
+  readonly leaseId: string;
+}
 export interface TreehouseResumeOptions {
   readonly cwd: string;
   readonly path: string;
@@ -49,6 +53,9 @@ export class TreehouseWorktrees extends Context.Service<
     ) => Effect.Effect<string | null, GitCommandError>;
     readonly returnIdle: (
       input: TreehouseIdleReturnOptions,
+    ) => Effect.Effect<string | null, GitCommandError>;
+    readonly destroyIdle: (
+      input: TreehouseIdleDestroyOptions,
     ) => Effect.Effect<string | null, GitCommandError>;
     readonly resume: (
       input: TreehouseResumeOptions,
@@ -346,6 +353,89 @@ const make = Effect.gen(function* () {
                 ],
               });
               yield* leases.markReturned(releasing);
+              return null;
+            }),
+          }),
+        );
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError((cause) => mapError({ cwd: input.cwd, cause })),
+        ),
+    ),
+    destroyIdle: Effect.fn("TreehouseWorktrees.destroyIdle")(
+      function* (input) {
+        if (yield* HostProcess.isWindows)
+          return "Treehouse expiry deletion needs a junction-safe Windows backend";
+        return yield* withWorkspaceLease(
+          path.resolve(input.path),
+          leases.withLock({
+            path: input.path,
+            effect: Effect.gen(function* () {
+              const owned = yield* leases.read(input.path);
+              if (owned === null || owned.record.lease.lease_id !== input.leaseId)
+                return "Treehouse lease generation changed since check";
+              const checkout = yield* fs.realPath(input.path);
+              if (checkout !== input.path || checkout === (yield* fs.realPath(input.cwd)))
+                return "worktree path is not a canonical linked checkout";
+              const blocked = yield* input.recheck;
+              if (blocked !== null) return blocked;
+              const commonArgs = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+              const repository = yield* run({ cwd: input.cwd, command: "git", args: commonArgs });
+              const actual = yield* run({ cwd: input.path, command: "git", args: commonArgs });
+              const head = yield* run({
+                cwd: input.path,
+                command: "git",
+                args: ["rev-parse", "HEAD"],
+              });
+              if (
+                (yield* fs.realPath(repository)) !== (yield* fs.realPath(actual)) ||
+                head !== input.headSha
+              )
+                return "repository or commit changed since check";
+              const help = yield* run({
+                cwd: input.cwd,
+                command: owned.record.binary,
+                args: ["destroy", "--help"],
+              });
+              if (!help.includes("--if-lease-id"))
+                return "recorded Treehouse binary needs lease-checked destroy support";
+              const releasing = yield* leases.beginCleanupReturn({
+                owned,
+                discardLocalFiles: true,
+                release: {
+                  projectPath: yield* fs.realPath(input.cwd),
+                  repository: yield* fs.realPath(repository),
+                  branch: input.branch,
+                  headSha: head,
+                  threadIds: [...input.threadIds],
+                },
+              });
+              const destroyed = yield* Effect.gen(function* () {
+                yield* run({
+                  cwd: input.cwd,
+                  command: owned.record.binary,
+                  args: [
+                    "destroy",
+                    owned.record.lease.path,
+                    "--yes",
+                    "--include-leased",
+                    "--include-unlanded",
+                    "--if-lease-id",
+                    input.leaseId,
+                  ],
+                });
+                yield* leases.markReturned(releasing);
+              }).pipe(Effect.result);
+              if (destroyed._tag === "Failure") {
+                if (yield* fs.exists(input.path))
+                  yield* leases
+                    .cancelCleanupReturn(releasing)
+                    .pipe(Effect.ignoreCause({ log: true }));
+                return yield* destroyed.failure;
+              }
               return null;
             }),
           }),

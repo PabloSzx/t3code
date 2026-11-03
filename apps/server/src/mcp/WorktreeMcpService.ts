@@ -15,10 +15,6 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as DateTime from "effect/DateTime";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -29,13 +25,8 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
-import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
-import * as ProcessRunner from "../processRunner.ts";
-import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
-import { storageCleanupThreadIdle } from "../storageCleanup.ts";
+import * as WorktreeBranchReconciliation from "../workspace/WorktreeBranchReconciliation.ts";
 import type { McpInvocationScope, McpThreadInvocationScope } from "./McpInvocationContext.ts";
-
-const isWorktreeMcpFailure = Schema.is(WorktreeMcpFailure);
 
 interface ReconcileWorktreeBranchOptions {
   readonly scope: McpInvocationScope;
@@ -51,11 +42,7 @@ export class WorktreeMcpService extends Context.Service<
     ) => Effect.Effect<WorktreeMcpHandoffResult, WorktreeMcpFailure>;
     readonly reconcileBranch: (
       options: ReconcileWorktreeBranchOptions,
-    ) => Effect.Effect<
-      WorktreeMcpReconcileBranchResult,
-      WorktreeMcpFailure,
-      ProcessRunner.ProcessRunner
-    >;
+    ) => Effect.Effect<WorktreeMcpReconcileBranchResult, WorktreeMcpFailure>;
     readonly status: (
       scope: McpInvocationScope,
     ) => Effect.Effect<WorktreeMcpStatusResult, WorktreeMcpFailure>;
@@ -88,11 +75,7 @@ const make = Effect.gen(function* () {
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
   const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(Effect.provide(WorkspaceAccess.layer));
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
-    Effect.provide(TreehouseLeases.layer),
-  );
+  const branchReconciliation = yield* WorktreeBranchReconciliation.WorktreeBranchReconciliation;
 
   // Serialize handoffs per thread to avoid creating two worktrees and orphaning one.
   const handoffThreadsInFlight = new Set<string>();
@@ -449,224 +432,34 @@ const make = Effect.gen(function* () {
 
   const reconcileBranch: WorktreeMcpService["Service"]["reconcileBranch"] = Effect.fn(
     "WorktreeMcpService.reconcileBranch",
-  )(
-    function* ({ scope: callerScope, input }) {
-      yield* requireCapability(callerScope);
-      const scope = yield* requireThreadScope(callerScope);
-      if (!callerScope.capabilities.has("orchestration"))
-        return yield* failure(
-          "capability_denied",
-          "Branch reconciliation requires orchestration capabilities.",
-        );
-      const expected = input.expected;
-      if (
-        !path.isAbsolute(expected.worktreePath) ||
-        new Set(expected.threadIds).size !== expected.threadIds.length
-      )
-        return yield* failure(
-          "invalid_request",
-          "Inspect the canonical checkout and its complete thread family first.",
-        );
-      const runner = yield* ProcessRunner.ProcessRunner;
-      const readGit = Effect.fn("WorktreeMcpService.reconcileBranch.readGit")(function* (options: {
-        readonly cwd: string;
-        readonly args: readonly string[];
-      }) {
-        const output = yield* runner.run({
-          command: "git",
-          cwd: options.cwd,
-          args: ["--no-optional-locks", ...options.args],
-          timeout: "30 seconds",
-          maxOutputBytes: 1024 * 1024,
-        });
-        if (output.code !== 0 || output.stdoutTruncated || output.stderrTruncated)
-          return yield* failure(
-            "operation_failed",
-            "Git inspection failed; no checkout or reset is performed.",
-          );
-        return output.stdout.trim();
-      });
-      const inspect = Effect.fn("WorktreeMcpService.reconcileBranch.inspect")(function* () {
-        const snapshot = yield* threadManagement.getShellSnapshot({
-          worktreePath: expected.worktreePath,
-        });
-        const members = [...snapshot.threads, ...snapshot.archivedThreads];
-        const ids = new Set(members.map((thread) => thread.id));
-        const owner = members.find((thread) => thread.id === input.threadId);
-        if (
-          !owner ||
-          owner.lineage.parentThreadId !== null ||
-          owner.lineage.rootThreadId !== owner.id ||
-          members.length !== expected.threadIds.length ||
-          expected.threadIds.some((id) => !ids.has(id))
-        )
-          return yield* failure(
-            "invalid_request",
-            "The inspected root thread family changed or has another owner.",
-          );
-        const now = DateTime.toEpochMillis(yield* DateTime.now);
-        const byId = new Map(members.map((thread) => [thread.id, thread]));
-        for (const member of members) {
-          if (
-            member.archivedAt !== null ||
-            member.settledAt === null ||
-            !storageCleanupThreadIdle(member, now) ||
-            (member.branch !== expected.recordedBranch && member.branch !== expected.branch)
-          )
-            return yield* failure(
-              "invalid_request",
-              "Every shared thread must remain settled, idle and on an inspected branch.",
-            );
-          let current = member;
-          const visited = new Set<string>();
-          while (current.id !== owner.id) {
-            if (
-              visited.has(current.id) ||
-              current.lineage.relationshipToParent !== "subagent" ||
-              current.lineage.rootThreadId !== owner.lineage.rootThreadId
-            )
-              return yield* failure(
-                "invalid_request",
-                "The checkout is not one owned subagent family.",
-              );
-            visited.add(current.id);
-            const parent =
-              current.lineage.parentThreadId === null
-                ? undefined
-                : byId.get(current.lineage.parentThreadId);
-            if (!parent)
-              return yield* failure(
-                "invalid_request",
-                "A shared thread has an uninspected parent.",
-              );
-            current = parent;
-          }
-          const generation = yield* leases.operationGeneration({
-            path: expected.worktreePath,
-            threadId: member.id,
-          });
-          if (generation !== expected.leaseId)
-            return yield* failure("invalid_request", "The Treehouse lease generation changed.");
-        }
-        const owned = yield* leases.read(expected.worktreePath);
-        if (
-          !owned ||
-          owned.record.lease.lease_id !== expected.leaseId ||
-          owned.record.lease.path !== expected.worktreePath
-        )
-          return yield* failure(
-            "invalid_request",
-            "The current T3 lease does not match the inspection.",
-          );
-        yield* leases.assertUnused({ owned, allowedThreadIds: expected.threadIds });
-        const project = yield* loadProject(scope, owner.projectId);
-        if ((yield* fs.realPath(expected.worktreePath)) !== expected.worktreePath)
-          return yield* failure("invalid_request", "The worktree path is not canonical.");
-        const commonArgs = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-        const common = yield* readGit({ cwd: expected.worktreePath, args: commonArgs });
-        const projectCommon = yield* readGit({ cwd: project.workspaceRoot, args: commonArgs });
-        const branch = yield* readGit({
-          cwd: expected.worktreePath,
-          args: ["symbolic-ref", "--short", "HEAD"],
-        });
-        const head = yield* readGit({ cwd: expected.worktreePath, args: ["rev-parse", "HEAD"] });
-        const retained = yield* readGit({
-          cwd: project.workspaceRoot,
-          args: [
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            `refs/heads/${expected.branch}^{commit}`,
-          ],
-        });
-        const changes = yield* readGit({
-          cwd: expected.worktreePath,
-          args: [
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-          ],
-        });
-        if (
-          (yield* fs.realPath(common)) !== (yield* fs.realPath(projectCommon)) ||
-          branch !== expected.branch ||
-          head !== expected.headSha ||
-          retained !== head ||
-          changes !== ""
-        )
-          return yield* failure(
-            "invalid_request",
-            "Repository, branch, commit or local changes differ from the inspection.",
-          );
-        return { snapshotSequence: snapshot.snapshotSequence, members, owner };
-      });
-      let dispatchAttempted = false;
-      return yield* withWorkspaceLease(
-        expected.worktreePath,
-        Effect.gen(function* () {
-          const initial = yield* inspect();
-          const updatedThreadIds: (typeof input.expected.threadIds)[number][] = [];
-          const ordered = [
-            initial.owner,
-            ...initial.members.filter((thread) => thread.id !== input.threadId),
-          ];
-          for (const member of ordered) {
-            const checked = yield* inspect();
-            const current = checked.members.find((thread) => thread.id === member.id)!;
-            if (current.branch === expected.branch) continue;
-            dispatchAttempted = true;
-            yield* threadManagement.dispatch({
-              type: "thread.metadata.update",
-              commandId: CommandId.make(
-                `worktree-reconcile:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
-              ),
-              threadId: member.id,
-              branch: expected.branch,
-              expectedBranch: expected.recordedBranch,
-              expectedWorktreePath: expected.worktreePath,
-              expectedSequence: initial.snapshotSequence,
-            });
-            updatedThreadIds.push(member.id);
-          }
-          const final = yield* inspect();
-          if (final.members.some((member) => member.branch !== expected.branch))
-            return yield* failure(
-              "operation_failed",
-              "Thread branch synchronization is incomplete; no checkout or return was performed.",
-            );
-          return {
-            worktreePath: expected.worktreePath,
-            branch: expected.branch,
-            headSha: expected.headSha,
-            threadIds: expected.threadIds,
-            updatedThreadIds,
-          };
-        }),
-      ).pipe(
+  )(function* ({ scope, input }) {
+    yield* requireCapability(scope);
+    yield* requireThreadScope(scope);
+    if (!scope.capabilities.has("orchestration"))
+      return yield* failure(
+        "capability_denied",
+        "Branch reconciliation requires orchestration capabilities.",
+      );
+    return yield* branchReconciliation
+      .reconcile({
+        threadId: input.threadId,
+        expected: {
+          ...input.expected,
+          members: input.expected.threadIds.map((threadId) => ({
+            threadId,
+            branch: input.expected.recordedBranch,
+          })),
+        },
+      })
+      .pipe(
         Effect.mapError((cause) =>
-          dispatchAttempted
-            ? failure(
-                "operation_failed",
-                "Reconciliation stopped after metadata dispatch. Family records may be partially synchronized; inspect before retrying. No checkout, reset or return was performed.",
-              )
-            : cause,
+          failure(
+            cause.reason === "changed" ? "invalid_request" : "operation_failed",
+            cause.message,
+          ),
         ),
       );
-    },
-    Effect.catchTags({
-      TreehouseLeaseError: (cause) => Effect.fail(failure("invalid_request", cause.message)),
-    }),
-    Effect.mapError((cause) =>
-      isWorktreeMcpFailure(cause)
-        ? cause
-        : failure(
-            "operation_failed",
-            "Reconciliation stopped. Git files and branches are unchanged; inspect thread metadata before retrying a partially completed family update.",
-          ),
-    ),
-  );
+  });
 
   const status: WorktreeMcpService["Service"]["status"] = Effect.fn("WorktreeMcpService.status")(
     function* (callerScope) {

@@ -34,6 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
+import * as WorktreeBranchReconciliation from "../workspace/WorktreeBranchReconciliation.ts";
 
 const environmentId = EnvironmentId.make("environment-worktree-test");
 const threadId = ThreadId.make("thread-worktree-test");
@@ -291,6 +292,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
   const layer = WorktreeMcpService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Layer.mock(WorktreeBranchReconciliation.WorktreeBranchReconciliation)({}),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch,
           getThreadRecords,

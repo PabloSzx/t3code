@@ -645,13 +645,13 @@ export function WorktreeCleanupSection() {
                 <SettingsRow
                   {...searchableSetting("storage-worktree-keep-when")}
                   status={ruleStatus("worktreeKeepWhen")}
-                  description={
+                  description={`${
                     settings.worktreeKeepWhen === "any-local-files"
                       ? "Includes ignored files, except node_modules."
                       : settings.worktreeKeepWhen === "tracked-changes"
                         ? "Deletes untracked and ignored files, including .env."
                         : "Keeps edits and untracked files. Deletes ignored files, including .env."
-                  }
+                  } Applies to native Git worktrees only. Expired Treehouse checkouts are deleted in full.`}
                   serverScoped={!isProjectScope}
                   control={
                     <Select

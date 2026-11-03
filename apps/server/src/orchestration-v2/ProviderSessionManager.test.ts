@@ -1443,6 +1443,12 @@ it.effect(
           modelSelection,
           runtimePolicy,
         });
+        assert.isFalse(
+          yield* manager.releaseIdleForThreads({
+            providerSessionId,
+            threadIds: [stopping],
+          }),
+        );
         const providerThreadOf = (threadId: ThreadId) =>
           makeProviderThread({
             idAllocator,
@@ -1471,6 +1477,12 @@ it.effect(
           modelSelection,
           runtimePolicy,
         });
+        assert.isFalse(
+          yield* manager.releaseIdleForThreads({
+            providerSessionId,
+            threadIds: [stopping, sibling],
+          }),
+        );
         const release = (own: ThreadId) =>
           manager.releaseUnlessBusy({
             providerSessionId,
@@ -1518,8 +1530,79 @@ it.effect(
           runtimePolicy,
         });
         assert.equal((yield* startOnReleasedRuntime)._tag, "ProviderAdapterTurnStartError");
-        assert.isTrue(yield* release(sibling));
+        assert.isTrue(
+          yield* manager.releaseIdleForThreads({
+            providerSessionId,
+            threadIds: [stopping, sibling],
+          }),
+        );
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60 * 60_000 })));
+    }),
+);
+
+it.effect.each(["native-pending", "native-probe-failed", "new-attachment", "replacement"] as const)(
+  "ProviderSessionManagerV2 preserves unfinished or changed runtimes during task retirement (%s)",
+  (change) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const events = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("finished-task");
+        const sibling = ThreadId.make("unrelated-task");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        yield* events.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: sibling, now }),
+          ],
+        });
+        const open = (id: ThreadId) =>
+          manager.open({
+            threadId: id,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+        yield* open(threadId);
+        const retirement = yield* manager
+          .releaseIdleForThreads({
+            providerSessionId,
+            threadIds: [threadId],
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        if (change === "new-attachment") yield* open(sibling);
+        if (change === "replacement") {
+          yield* manager.release({ providerSessionId, reason: "manual_shutdown" });
+          yield* open(threadId);
+        }
+        const closedBefore = (yield* Ref.get(state)).closeCount;
+        yield* Deferred.succeed(resume, undefined);
+        assert.isFalse(yield* Fiber.join(retirement));
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+        assert.equal((yield* Ref.get(state)).closeCount, closedBefore);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60 * 60_000,
+            hasPendingBackgroundWork: Effect.gen(function* () {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(resume);
+              if (change === "native-probe-failed")
+                return yield* Effect.die(new Error("synthetic probe failure"));
+              return change === "native-pending";
+            }),
+          }),
+        ),
+      );
     }),
 );
 

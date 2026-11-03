@@ -382,6 +382,7 @@ export interface ProjectionTimelinePage {
 }
 
 export interface ShellSnapshotOptions {
+  readonly includeDeleted?: boolean;
   readonly location?: "active" | "archive";
   readonly projectId?: ProjectId;
   readonly unsettledOnly?: boolean;
@@ -5784,6 +5785,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         location,
         projectId,
         unsettledOnly = false,
+        includeDeleted = false,
         familyOf,
         worktreePath,
         threadIds,
@@ -5967,7 +5969,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 candidate.ordinal DESC, candidate.run_id DESC
               LIMIT 1
             ) AND blocked.status = 'failed'
-            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
+            WHERE ${includeDeleted ? sql`1 = 1` : sql`t.deleted_at IS NULL`}${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`
             }${
               location === "active"

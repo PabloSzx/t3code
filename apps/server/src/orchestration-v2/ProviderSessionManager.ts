@@ -202,6 +202,10 @@ export interface ProviderSessionManagerV2Shape {
     readonly reason: ProviderSessionReleaseReason;
     readonly detail?: string;
   }) => Effect.Effect<boolean, ProviderSessionManagerV2Error>;
+  readonly releaseIdleForThreads: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly threadIds: ReadonlyArray<ThreadId>;
+  }) => Effect.Effect<boolean, ProviderSessionManagerV2Error>;
   /**
    * Other threads with a run or background work on this session's shared process; empty when
    * it serves one thread.
@@ -927,6 +931,8 @@ export const layerWithOptions = (
         function* (input: {
           readonly providerSessionId: ProviderSessionId;
           readonly onlyIfIdleGeneration?: number;
+          readonly onlyIfRuntime?: LiveSessionEntry["runtime"];
+          readonly onlyAttachedThreadIds?: ReadonlyArray<ThreadId>;
           readonly keepIfBusyOtherThan?: ReadonlyArray<ProviderThreadId>;
         }): Effect.fn.Return<readonly [Option.Option<LiveSessionEntry>, DateTime.Utc]> {
           const key = sessionKey(input.providerSessionId);
@@ -947,6 +953,14 @@ export const layerWithOptions = (
               ) {
                 return ["kept", current] as const;
               }
+              const allowedThreads = input.onlyAttachedThreadIds;
+              if (
+                (input.onlyIfRuntime !== undefined && existing.runtime !== input.onlyIfRuntime) ||
+                (allowedThreads !== undefined &&
+                  (existing.attachedThreadIds.size === 0 ||
+                    [...existing.attachedThreadIds].some((id) => !allowedThreads.includes(id))))
+              )
+                return ["kept", current] as const;
               const own = input.keepIfBusyOtherThan;
               if (
                 own !== undefined &&
@@ -1014,6 +1028,8 @@ export const layerWithOptions = (
         readonly detachedThreadId?: ThreadId;
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
+        readonly onlyIfRuntime?: LiveSessionEntry["runtime"];
+        readonly onlyAttachedThreadIds?: ReadonlyArray<ThreadId>;
         readonly keepIfBusyOtherThan?: ReadonlyArray<ProviderThreadId>;
         readonly gracefulSubscribers?: boolean;
       }) =>
@@ -2403,6 +2419,34 @@ export const layerWithOptions = (
           // Identity, not presence: open can install a replacement under the same id meanwhile.
           return before !== undefined && (yield* Ref.get(sessions)).get(key) !== before;
         }),
+        releaseIdleForThreads: Effect.fn("ProviderSessionManager.releaseIdleForThreads")(
+          function* (input) {
+            const key = sessionKey(input.providerSessionId);
+            const before = (yield* Ref.get(sessions)).get(key);
+            if (before === undefined) return true;
+            if (
+              before.busyTurns.size > 0 ||
+              before.attachedThreadIds.size === 0 ||
+              [...before.attachedThreadIds].some((id) => !input.threadIds.includes(id))
+            )
+              return false;
+            const pending =
+              before.runtime.hasPendingBackgroundWork === undefined
+                ? false
+                : yield* before.runtime.hasPendingBackgroundWork.pipe(
+                    Effect.catchCause(() => Effect.succeed(true)),
+                  );
+            if (pending) return false;
+            yield* releaseEntry({
+              providerSessionId: input.providerSessionId,
+              reason: "idle_timeout",
+              onlyIfRuntime: before.runtime,
+              onlyIfIdleGeneration: before.idleGeneration,
+              onlyAttachedThreadIds: input.threadIds,
+            });
+            return !(yield* Ref.get(sessions)).has(key);
+          },
+        ),
         otherWorkingThreads: Effect.fn("ProviderSessionManager.otherWorkingThreads")(
           function* (input) {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId));

@@ -15,6 +15,7 @@ import {
   type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as CheckpointService from "../orchestration-v2/CheckpointService.ts";
@@ -623,6 +624,94 @@ describe("Treehouse worktrees", () => {
     }).pipe(provide),
   );
 
+  it.live.each([
+    "delete",
+    "reacquired",
+    "wrong-generation",
+    "old-binary",
+    "failed-command",
+    "windows",
+  ] as const)("destroys only the expired acquisition and retains retry evidence (%s)", (state) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "expired",
+        path: null,
+      });
+      yield* f.leases.bindThread({ path: f.slot, threadId: "owner", sequence: 1 });
+      const owned = yield* f.leases.read(f.slot);
+      if (owned === null) return assert.fail("Fixture must own its lease");
+      yield* f.fs.writeFileString(f.path.join(f.slot, ".env"), "synthetic expired private data");
+      if (state === "old-binary")
+        yield* f.fs.writeFileString(f.path.join(f.root, "old-destroy"), "");
+      if (state === "failed-command")
+        yield* f.fs.writeFileString(f.path.join(f.root, "fail-destroy"), "");
+      if (state === "reacquired")
+        yield* f.fs.writeFileString(f.path.join(f.root, "reacquire-after-destroy"), "");
+      const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+        Effect.provide(TreehouseWorktrees.layer),
+      );
+      const request = {
+        cwd: f.cwd,
+        path: f.slot,
+        branch: "expired",
+        headSha: f.parentSha,
+        threadIds: ["owner"],
+        leaseId: state === "wrong-generation" ? "f".repeat(32) : owned.record.lease.lease_id,
+        recheck: Effect.succeed(null),
+      };
+      const result = yield* treehouse
+        .destroyIdle(request)
+        .pipe(
+          state === "windows"
+            ? Effect.provideService(HostProcess.Platform, "win32")
+            : (effect) => effect,
+          Effect.result,
+        );
+      if (state === "delete" || state === "reacquired") {
+        assert.isTrue(Result.isSuccess(result) && result.success === null);
+        assert.isTrue(
+          (yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" }))?.record.returned,
+        );
+        if (state === "reacquired") {
+          assert.equal(
+            yield* f.fs.readFileString(f.path.join(f.slot, "new-owner-work")),
+            "keep replacement acquisition",
+          );
+          assert.isNull(yield* f.leases.read(f.slot));
+        } else {
+          assert.isFalse(yield* f.fs.exists(f.slot));
+          const resumed = yield* treehouse.resume({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "expired",
+            threadId: "owner",
+            preparationScope: yield* Effect.scope,
+          });
+          assert.isNotNull(resumed);
+          assert.equal(yield* f.fs.readFileString(f.path.join(resumed!, "file")), "parent\n");
+          assert.isFalse(yield* f.fs.exists(f.path.join(resumed!, ".env")));
+        }
+      } else {
+        assert.isTrue(Result.isFailure(result) || result.success !== null);
+        assert.equal(
+          yield* f.fs.readFileString(f.path.join(f.slot, ".env")),
+          "synthetic expired private data",
+        );
+        assert.isUndefined((yield* f.leases.read(f.slot))?.record.release);
+        if (state === "old-binary" || state === "failed-command") {
+          yield* f.fs.remove(
+            f.path.join(f.root, state === "old-binary" ? "old-destroy" : "fail-destroy"),
+          );
+          assert.isNull(yield* treehouse.destroyIdle(request));
+          assert.isFalse(yield* f.fs.exists(f.slot));
+        }
+      }
+    }).pipe(provide),
+  );
+
   it.live.each(["external return", "durable marking"] as const)(
     "blocks retry and resume after an uncertain %s",
     (failure) =>
@@ -682,7 +771,7 @@ describe("Treehouse worktrees", () => {
           ),
         );
         const evidence = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
-        assert.isFalse(evidence!.record.returned);
+        assert.equal(evidence!.record.returned, failure === "durable marking");
         const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
         assert.strictEqual(
           calls.split("\n").filter((line) => line.startsWith("return ")).length,

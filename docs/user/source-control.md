@@ -183,23 +183,31 @@ runs the project's T3 setup on that checkout. Treehouse may run its own hooks on
 before T3 selects the requested ref. Keep shared provisioning in one place to avoid running it
 twice, and leave branch-specific setup in T3. T3 does not add a fetch, rebase, or forced reset.
 
-The existing Storage cleanup rules also apply to T3-owned Treehouse slots, including inactivity,
-settlement, merged or unchanged branches, and deleted threads. No rule is enabled automatically.
-Eligible idle slots return to the pool without deleting the conversation or branch. Shared children
-must also be idle, and settlement cleanup waits for every sharing thread to settle. Open providers,
-terminals, setup work, pending effects, local files, and unverified ownership block return. Pooled
-cleanup never discards untracked or ignored files, even when native cleanup permits that.
+Storage cleanup applies the configured inactivity, settlement, merge and deletion rules to
+T3-owned Treehouse checkouts. Expired checkouts are deleted in full to recover disk space,
+including unpublished edits, untracked files, ignored files, `.env` and local signing files.
+There is no archive. The local-file protection setting applies to native Git worktrees, not
+expired Treehouse checkouts. Conversations and existing branch refs remain.
+
+Finished isolated child tasks use the configured settled retention period without requiring manual
+settlement. Sharing children must be idle but need not be individually settled. T3 can close idle
+providers owned by the finished family; active or shared providers, terminals, pending work,
+unknown ownership and changed lease generations block deletion. Expiry deletion requires
+`treehouse destroy --if-lease-id` support. Automatic pooled deletion is unavailable on Windows
+hosts because this deletion path does not yet protect external junction targets.
 
 Sending another message acquires a new identified lease, checks out the retained branch, and
 updates the conversation and its still-sharing children's checkout bindings before starting the provider. The old folder's existence is not proof of ownership; it may
 already belong to another lease. Existing returned conversations use their recorded Treehouse
-binary to resume, even after changing or disabling the setting for new worktrees.
+binary to resume, even after changing or disabling the setting for new worktrees. Deleted local
+files are not restored. If the project now points at a different repository, use the correct project
+rather than resuming the old branch in the new repository.
 
-The cleanup report distinguishes returned slots from removed worktrees. A returned slot is not a
-deleted pool directory and does not count its contents as recovered disk space. Explicit removal
-still refuses while any nondeleted thread references the checkout. All returns use the exact lease
-ID, never `--force`, and never fall back to Git removal. An interrupted or failed return or resume
-can require operator verification instead of an automatic retry.
+The cleanup report records removed checkouts and estimated recovered bytes for the current lease
+generation. A normal return does not delete the pool directory or recover its disk space. Explicit
+removal still refuses while a nondeleted thread references the checkout. Returns and expiry deletion
+check the exact lease ID, never override live processes, and never fall back to Git removal.
+Interrupted operations with unverified ownership still require operator verification.
 
 T3 keeps lease identities, thread bindings, and live-use pins under `treehouse-leases` in its
 userdata directory, never inside the Treehouse pool. Keep T3 home outside the pool and retain

@@ -124,7 +124,30 @@ with tempfile.TemporaryDirectory(prefix='t3-installer-test-') as temporary:
             assert holder.poll() is not None
         installer.wait_until_closed = wait
         installer.WAIT_INTERVAL_SECONDS = 0.2
-        installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
+        real_exchange = installer.exchange_directories
+        reader = None
+
+        def exchange_with_reader(left, right):
+            global reader
+            real_exchange(left, right)
+            # A background reader of the newly installed bundle is not a running app.
+            reader = subprocess.Popen(
+                [sys.executable, '-c',
+                 'import sys;f=open(sys.argv[1],"rb");print("ready",flush=True);sys.stdin.buffer.read()',
+                 str(installer.APP / 'Contents/Resources/app.asar')],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            )
+            assert reader.stdout.readline() == b'ready\n'
+        installer.exchange_directories = exchange_with_reader
+        try:
+            installer.install(build, check_only=False, assume_yes=False, accept_unknown=False)
+            assert str(reader.pid) in installer.open_pids([installer.APP]), 'file-use guard must still see the reader'
+        finally:
+            installer.exchange_directories = real_exchange
+            if reader is not None:
+                reader.stdin.close()
+                reader.wait()
+                reader.stdout.close()
         holder.wait()
         installer.copy_tree = real_copy
         installer.wait_until_closed = real_wait

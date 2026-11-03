@@ -1139,6 +1139,7 @@ export const StorageCleanupReportEntry = Schema.Struct({
   kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
   returned: Schema.optional(Schema.Boolean),
+  leaseId: Schema.optional(Schema.String),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
   projectPath: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),

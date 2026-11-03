@@ -13,7 +13,7 @@ import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 
 // Only the external allocator is a fixture. Revision selection and removal use real T3 + Git.
-const allocator = `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
+const allocator = `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -43,6 +43,23 @@ if (args[0] === "get") {
   state.worktrees = [...state.worktrees.filter(entry => entry.path !== slot), { ...lease, leased: true }];
   writeFileSync(stateFile, JSON.stringify(state));
   console.log(JSON.stringify(lease));
+} else if (args[0] === "destroy" && args[1] === "--help") {
+  console.log(existsSync(join(root, "old-destroy")) ? "destroy" : "destroy --if-lease-id");
+} else if (args[0] === "destroy") {
+  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+  const entry = state.worktrees.find(entry => entry.path === args[1]);
+  if (!entry?.leased || args.includes("--include-in-use") || !args.includes("--include-leased") || !args.includes("--include-unlanded") || !args.includes("--yes") || args[args.indexOf("--if-lease-id") + 1] !== entry.lease_id) process.exit(4);
+  if (existsSync(join(root, "fail-destroy"))) process.exit(5);
+  git(repo, ["worktree", "remove", "--force", "--", entry.path]);
+  rmSync(dirname(entry.path), { recursive: true });
+  state.worktrees = state.worktrees.filter(value => value !== entry);
+  if (existsSync(join(root, "reacquire-after-destroy"))) {
+    mkdirSync(dirname(entry.path), { recursive: true });
+    git(repo, ["worktree", "add", "--detach", entry.path, "main"]);
+    writeFileSync(join(entry.path, "new-owner-work"), "keep replacement acquisition");
+    state.worktrees.push({ ...entry, lease_id: randomBytes(16).toString("hex"), lease_holder: "replacement-owner", leased: true });
+  }
+  writeFileSync(stateFile, JSON.stringify(state));
 } else if (args[0] === "return") {
   const state = JSON.parse(readFileSync(stateFile, "utf8"));
   const entry = state.worktrees.find(entry => entry.path === args[1]);

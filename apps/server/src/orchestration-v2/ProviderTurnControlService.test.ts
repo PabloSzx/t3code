@@ -289,6 +289,7 @@ it.effect(
           detach: () => Effect.void,
           otherWorkingThreads: () => Effect.succeed([]),
           releaseUnlessBusy: () => Effect.succeed(true),
+          releaseIdleForThreads: () => Effect.die("unused task retirement"),
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(

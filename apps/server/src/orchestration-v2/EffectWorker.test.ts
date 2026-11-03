@@ -113,6 +113,7 @@ function layerExecutorFor(input: {
         detach: () => record("detach"),
         otherWorkingThreads: () => Effect.succeed([]),
         releaseUnlessBusy: () => Effect.succeed(true),
+        releaseIdleForThreads: () => Effect.die("unused task retirement"),
       }),
     ),
     Layer.succeed(

@@ -47,11 +47,11 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import { storageCleanupPullRequestMerged } from "./storageCleanup.ts";
 import {
-  storageCleanupActivityAt,
-  storageCleanupPullRequestMerged,
-  storageCleanupThreadIdle,
-} from "./storageCleanup.ts";
+  worktreeActivityAt as storageCleanupActivityAt,
+  worktreeThreadIdle as storageCleanupThreadIdle,
+} from "./workspace/worktreeThreads.ts";
 
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -317,11 +317,19 @@ const cleanupFixture = (
           ),
       } as unknown as ProjectStore.ProjectStoreV2["Service"]),
       Effect.provideService(ProjectionStore.ProjectionStoreV2, {
-        getShellSnapshot: (input?: { location?: string }) =>
+        getShellSnapshot: (input?: { location?: string; includeDeleted?: boolean }) =>
           Effect.sync(() => {
             snapshotReads++;
-            const visible = threads.filter((thread) => thread.deletedAt === null);
+            const visible = [
+              ...new Map(
+                [...threads, ...(input?.includeDeleted ? deletedThreads : [])].map((thread) => [
+                  thread.id,
+                  thread,
+                ]),
+              ).values(),
+            ].filter((thread) => input?.includeDeleted || thread.deletedAt === null);
             return {
+              snapshotSequence: 1,
               threads:
                 input?.location === "archive"
                   ? []
@@ -501,7 +509,23 @@ const pooledCleanupFixture = (settings?: StorageCleanupSettings) =>
     );
     yield* f.fs.writeFileString(
       binary,
-      `#!${process.execPath}\nimport { readFileSync, writeFileSync } from 'node:fs';\nconst state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));\nif (process.argv[2] !== 'return' || process.argv[3] !== ${JSON.stringify(f.worktree)} || process.argv[4] !== '--if-lease-id' || process.argv[5] !== state.worktrees[0].lease_id || process.argv.includes('--force')) process.exit(2);\nstate.worktrees[0].leased = false;\nwriteFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));\n`,
+      `#!${process.execPath}
+import { readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const args = process.argv.slice(2);
+const state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));
+if (args[0] === 'destroy' && args[1] === '--help') { console.log('destroy --if-lease-id'); process.exit(0); }
+const entry = state.worktrees.find(entry => entry.path === args[1]);
+if (!entry?.leased || args[args.indexOf('--if-lease-id') + 1] !== entry.lease_id || args.includes('--force') || args.includes('--include-in-use')) process.exit(2);
+if (args[0] === 'return') entry.leased = false;
+else if (args[0] === 'destroy' && args.includes('--yes') && args.includes('--include-leased') && args.includes('--include-unlanded')) {
+  const removed = spawnSync('git', ['worktree', 'remove', '--force', '--', entry.path], { cwd: ${JSON.stringify(f.repo)}, encoding: 'utf8' });
+  if (removed.status !== 0) { console.error(removed.stderr); process.exit(3); }
+  state.worktrees = state.worktrees.filter(value => value !== entry);
+} else process.exit(2);
+writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));
+`,
+
       { mode: 0o755 },
     );
     yield* leases.register({ lease, binary, pool: f.config.worktreesDir });
@@ -1637,44 +1661,132 @@ describe("orphan worktree reports", () => {
 });
 
 describe("storage cleanup reports and local file policies", () => {
-  it.live(
-    "returns an eligible owned pool lease without removing history, branch, or pool bytes",
-    () =>
-      Effect.gen(function* () {
-        const f = yield* pooledCleanupFixture({
-          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
-          worktreeAfterDays: 1,
-          worktreeKeepWhen: "any-local-files",
-        });
-        const { leases } = f;
-        yield* f.fs.makeDirectory(`${f.worktree}/dist`);
-        yield* f.fs.writeFileString(`${f.worktree}/dist/output`, "retained build cache");
-        yield* f.fs.writeFileString(`${f.worktree}/.env`, "synthetic configuration");
-        const report = yield* f.service.runNow;
-        expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
-          reason: expect.stringMatching(/^Returned Treehouse slot: inactive for \d+ days$/),
-          bytes: null,
-          returned: true,
-        });
-        expect(report.bytesFreed).toBe(0);
-        expect(report.returnedCount).toBe(1);
-        expect(yield* f.fs.readFileString(`${f.worktree}/.env`)).toBe("synthetic configuration");
-        expect(yield* f.fs.readFileString(`${f.worktree}/dist/output`)).toBe(
-          "retained build cache",
-        );
-        expect(
-          (yield* f.command(f.repo, ["rev-parse", "refs/heads/feature"])).stdout.trim(),
-        ).not.toBe("");
-        expect(yield* f.fs.exists(f.worktree)).toBe(true);
-        expect(
-          (yield* leases
-            .assertThread({ path: f.worktree, threadId: "thread-1" })
-            .pipe(Effect.result))._tag,
-        ).toBe("Failure");
-        expect((yield* f.service.runNow).entries.some((entry) => entry.outcome === "failed")).toBe(
-          false,
-        );
-      }).pipe(runCleanupTest),
+  it.live("removes expired owned checkout data without following ignored symlinks", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const outside = yield* fs.makeTempDirectoryScoped();
+      yield* fs.writeFileString(`${outside}/proof`, "external data");
+      const f = yield* pooledCleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: 1,
+        worktreeKeepWhen: "any-local-files",
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFileString: (target) =>
+            target.startsWith(outside)
+              ? Effect.die(new Error("Cleanup must not read an external link target"))
+              : fs.readFileString(target),
+        }),
+      );
+      const { leases } = f;
+      yield* f.fs.makeDirectory(`${f.worktree}/dist`);
+      yield* f.fs.writeFileString(`${f.worktree}/dist/output`, "retained build cache");
+      yield* f.fs.writeFileString(`${f.worktree}/.env`, "synthetic configuration");
+      yield* f.fs.writeFileString(`${f.worktree}/local-signing.key`, "synthetic signing input");
+      yield* f.command(f.worktree, ["commit", "--allow-empty", "-m", "unpublished expired commit"]);
+      const retainedHead = (yield* f.command(f.worktree, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* f.fs.writeFileString(`${f.worktree}/tracked.txt`, "discard unpublished edits");
+      yield* f.fs.symlink(outside, `${f.worktree}/node_modules`);
+      const report = yield* f.service.runNow;
+      expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
+        outcome: "removed",
+      });
+      expect(report.bytesFreed).toBeGreaterThan(0);
+      expect(report.returnedCount).toBe(0);
+      expect(report.counts.removed).toBe(1);
+      expect(yield* fs.readFileString(`${outside}/proof`)).toBe("external data");
+      expect((yield* f.command(f.repo, ["rev-parse", "refs/heads/feature"])).stdout.trim()).toBe(
+        retainedHead,
+      );
+      expect(yield* f.fs.exists(f.worktree)).toBe(false);
+      expect(
+        (yield* leases.assertThread({ path: f.worktree, threadId: "thread-1" }).pipe(Effect.result))
+          ._tag,
+      ).toBe("Failure");
+      expect((yield* f.service.runNow).entries.some((entry) => entry.outcome === "failed")).toBe(
+        false,
+      );
+    }).pipe(runCleanupTest),
+  );
+
+  it.live("retires a reused slot using its current owner, not retained history", () =>
+    Effect.gen(function* () {
+      const f = yield* pooledCleanupFixture();
+      const original = yield* f.leases.read(f.worktree);
+      const deletedChild = shell({
+        id: ThreadId.make("retired-child"),
+        branch: "feature",
+        worktreePath: f.worktree,
+        deletedAt: at(-DAY_MS),
+        settledAt: at(-3 * DAY_MS),
+        lineage: {
+          rootThreadId: ThreadId.make("thread-1"),
+          parentThreadId: ThreadId.make("thread-1"),
+          relationshipToParent: "subagent",
+        },
+      });
+      f.setDeletedThreads([deletedChild]);
+      yield* f.leases.bindThread({ path: f.worktree, threadId: deletedChild.id, sequence: 2 });
+      yield* f.leases.commitThread({
+        path: f.worktree,
+        threadId: deletedChild.id,
+        deleted: true,
+        sequence: 3,
+      });
+      expect((yield* f.service.runNow).counts.removed).toBe(1);
+      yield* f.command(f.repo, ["worktree", "add", "-b", "next-feature", f.worktree]);
+      const lease = {
+        ...original!.record.lease,
+        lease_id: "b".repeat(32),
+        lease_holder: "t3-code:next-owner",
+      };
+      yield* f.fs.writeFileString(
+        `${f.config.worktreesDir}/treehouse-state.json`,
+        JSON.stringify({ version: 4, worktrees: [{ ...lease, leased: true }] }),
+      );
+      yield* f.leases.register({
+        lease,
+        binary: original!.record.binary,
+        pool: f.config.worktreesDir,
+      });
+      const owner = shell({
+        id: ThreadId.make("next-owner"),
+        branch: "next-feature",
+        worktreePath: f.worktree,
+        lineage: {
+          rootThreadId: ThreadId.make("next-owner"),
+          parentThreadId: null,
+          relationshipToParent: null,
+        },
+      });
+      yield* f.leases.bindThread({ path: f.worktree, threadId: owner.id, sequence: 2 });
+      f.setThreads([
+        shell({ branch: "feature", worktreePath: f.worktree, status: "running" }),
+        owner,
+      ]);
+      const report = yield* f.service.runNow;
+      expect(report.counts.removed).toBe(1);
+      expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
+        threadId: owner.id,
+        leaseId: lease.lease_id,
+        outcome: "removed",
+      });
+      expect(
+        (yield* f.leases.releasedThread({ path: f.worktree, threadId: owner.id }))?.record.release,
+      ).toMatchObject({ branch: "next-feature", threadIds: [owner.id] });
+      expect(
+        (yield* f.leases.releasedThread({ path: f.worktree, threadId: "thread-1" }))?.record
+          .release,
+      ).toMatchObject({ branch: "feature", threadIds: ["thread-1", deletedChild.id] });
+      expect(
+        (yield* f.leases.releasedThread({ path: f.worktree, threadId: deletedChild.id }))?.record
+          .returned,
+      ).toBe(true);
+      expect((yield* f.command(f.repo, ["rev-parse", "refs/heads/feature"])).stdout.trim()).toBe(
+        (yield* f.command(f.repo, ["rev-parse", "refs/heads/next-feature"])).stdout.trim(),
+      );
+    }).pipe(runCleanupTest),
   );
 
   it.live.each([
@@ -1690,7 +1802,7 @@ describe("storage cleanup reports and local file policies", () => {
     Effect.gen(function* () {
       const f = yield* pooledCleanupFixture({
         ...DEFAULT_SERVER_SETTINGS.storageCleanup,
-        worktreeAfterDays: policy === "retention" ? 10000 : null,
+        worktreeAfterDays: policy === "retention" ? 3650 : null,
         worktreeOnDelete: policy === "deleted",
         worktreeSettledAfterDays:
           policy === "settled" || policy === "unsettled child" || policy === "active archived child"
@@ -1746,10 +1858,71 @@ describe("storage cleanup reports and local file policies", () => {
           } as GitManager.GitBranchPullRequest);
       }
       const report = yield* f.service.runNow;
-      const shouldReturn = ["settled", "unchanged", "merged", "deleted"].includes(policy);
-      expect(report.returnedCount).toBe(shouldReturn ? 1 : 0);
-      expect(yield* f.fs.exists(f.worktree)).toBe(true);
+      const shouldRemove = [
+        "settled",
+        "unchanged",
+        "merged",
+        "deleted",
+        "unsettled child",
+      ].includes(policy);
+      expect(report.counts.removed).toBe(shouldRemove ? 1 : 0);
+      expect(report.returnedCount).toBe(0);
+      expect(yield* f.fs.exists(f.worktree)).toBe(!shouldRemove);
     }).pipe(runCleanupTest),
+  );
+
+  it.effect(
+    "expires a settled checkout at its configured deadline without the deletion policy or hourly sweep",
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const f = yield* pooledCleanupFixture({
+          ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+          worktreeAfterDays: null,
+          worktreeSettledAfterDays: 1,
+          worktreeOnDelete: false,
+          worktreeOnMerge: false,
+          worktreeUnchanged: false,
+        });
+        const event = yield* Deferred.make<OrchestrationV2DomainEvent>();
+        const handled = yield* Deferred.make<void>();
+        yield* f.activate(
+          Stream.fromEffect(Deferred.await(event)).pipe(
+            Stream.ensuring(Deferred.succeed(handled, undefined)),
+          ),
+        );
+        yield* f.service.reports.pipe(
+          Stream.filter((report) => report !== null),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        yield* f.service.drain;
+        yield* TestClock.adjust(61_000);
+        const owner = shell({
+          branch: "feature",
+          worktreePath: f.worktree,
+          settledAt: at(61_000),
+          settledOverride: "settled",
+        });
+        f.setThreads([owner]);
+        yield* Deferred.succeed(event, {
+          id: EventId.make("settled-away-from-hourly-sweep"),
+          type: "thread.settled",
+          threadId: owner.id,
+          occurredAt: at(61_000),
+          payload: { ...owner, lastVisitedAt: owner.lastVisitedAt ?? null },
+        });
+        yield* Deferred.await(handled);
+        yield* f.service.drain;
+        yield* TestClock.adjust(DAY_MS - 1);
+        yield* f.service.drain;
+        expect(yield* f.fs.exists(f.worktree)).toBe(true);
+        yield* TestClock.adjust(1);
+        yield* f.service.drain;
+        expect(yield* f.fs.exists(f.worktree)).toBe(false);
+        const [report] = yield* f.service.reports.pipe(Stream.take(1), Stream.runCollect);
+        expect(report).toMatchObject({ trigger: "automatic", counts: { removed: 1, failed: 0 } });
+      }).pipe(runCleanupTest),
   );
 
   it.live.each(["settings", "activity", "family", "pending effects"] as const)(

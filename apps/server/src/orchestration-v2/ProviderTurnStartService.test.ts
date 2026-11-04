@@ -1256,6 +1256,96 @@ effectIt.effect(
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
+effectIt.effect.each(["current", "stopped", "replaced"] as const)(
+  "preserves workspace activation interrupts and retries, settling only the current attempt (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-activation-failure-" });
+      const worktreePath = path.join(root, "checkout");
+      yield* fs.makeDirectory(worktreePath);
+      let interrupt = true;
+      let finalFailure = false;
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        worktreePath,
+        stateDir: path.join(root, "state"),
+        fileSystem: {
+          ...fs,
+          realPath: (target) =>
+            Effect.gen(function* () {
+              if (target !== worktreePath) return yield* fs.realPath(target);
+              if (interrupt) return yield* Effect.interrupt;
+              if (finalFailure && state !== "current") {
+                const current = harness.projection();
+                const replacementId = RunAttemptId.make("replacement-workspace-attempt");
+                harness.setProjection({
+                  ...current,
+                  runs: current.runs.map((run) =>
+                    state === "stopped"
+                      ? { ...run, status: "interrupted" }
+                      : { ...run, activeAttemptId: replacementId },
+                  ),
+                  attempts:
+                    state === "replaced"
+                      ? [
+                          ...current.attempts,
+                          { ...current.attempts[0]!, id: replacementId, attemptOrdinal: 2 },
+                        ]
+                      : current.attempts,
+                });
+              }
+              return yield* PlatformError.systemError({
+                _tag: "PermissionDenied",
+                module: "FileSystem",
+                method: "realPath",
+                pathOrDescriptor: target,
+                cause: "private filesystem diagnostic",
+              });
+            }),
+        },
+      });
+      const interrupted = yield* Effect.exit(harness.start);
+      expect(interrupted._tag).toBe("Failure");
+      if (interrupted._tag === "Failure")
+        expect(Cause.hasInterruptsOnly(interrupted.cause)).toBe(true);
+      expect(harness.events).toEqual([]);
+      interrupt = false;
+      expect(yield* harness.startWithRetry.pipe(Effect.result)).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "ProviderTurnStartError" },
+      });
+      expect(harness.events).toEqual([]);
+      expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+
+      finalFailure = true;
+      yield* harness.start;
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+      const projection = harness.projection();
+      if (state === "current") {
+        expect(projection.runs.at(-1)).toMatchObject({ status: "failed", startedAt: null });
+        expect(projection.attempts[0]).toMatchObject({ status: "failed", startedAt: null });
+        expect(projection.nodes[0]).toMatchObject({ status: "failed", startedAt: null });
+        expect(projection.turnItems).toMatchObject([
+          {
+            type: "error",
+            title: "Couldn't activate thread workspace",
+            failure: { message: expect.stringContaining("(metadata)") },
+          },
+        ]);
+      } else {
+        expect(harness.events).toEqual([]);
+        expect(projection.runs.at(-1)?.status).toBe(
+          state === "stopped" ? "interrupted" : "starting",
+        );
+        expect(projection.attempts.every((attempt) => attempt.status === "pending")).toBe(true);
+      }
+      expect(JSON.stringify(harness.events)).not.toContain("private filesystem diagnostic");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 effectIt.live(
   "starts a returned conversation in its rebound lease, not its recycled old path",
   () =>
@@ -1474,11 +1564,16 @@ effectIt.effect.each(["missing", "recycled"])(
       });
       if (state === "missing") yield* fs.remove(worktreePath, { recursive: true });
       else yield* writeSnapshot("b".repeat(32));
-      const result = yield* harness.start.pipe(Effect.result);
-      expect(result).toMatchObject({
+      expect(yield* harness.startWithRetry.pipe(Effect.result)).toMatchObject({
         _tag: "Failure",
         failure: { _tag: "ProviderTurnStartError" },
       });
+      expect(harness.events).toEqual([]);
+      yield* harness.start;
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+      expect(harness.projection().turnItems).toMatchObject([
+        { type: "error", failure: { message: expect.stringContaining("Treehouse workspace") } },
+      ]);
       expect(harness.pruneWorktrees).not.toHaveBeenCalled();
       expect(harness.createWorktree).not.toHaveBeenCalled();
       expect(harness.open).not.toHaveBeenCalled();

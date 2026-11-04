@@ -91,6 +91,7 @@ const isSpawnError = Schema.is(ProcessRunner.ProcessSpawnError);
 const isTimeoutError = Schema.is(ProcessRunner.ProcessTimeoutError);
 const TREEHOUSE_COMMAND_TIMEOUT = "15 minutes";
 const decodeLease = Schema.decodeEffect(Schema.fromJsonString(TreehouseLease));
+const decodeInventoryLease = Schema.decodeUnknownEffect(TreehouseLease);
 const decodeAcquiredAt = Schema.decodeEffect(Schema.DateTimeUtcFromString);
 
 const make = Effect.gen(function* () {
@@ -148,7 +149,7 @@ const make = Effect.gen(function* () {
   const create = Effect.fn("TreehouseWorktrees.create")(
     function* (
       input: VcsCreateWorktreeInput,
-      options: TreehouseCreateOptions & { readonly resumeBinary?: string },
+      options: TreehouseCreateOptions & { readonly resume?: TreehouseLeases.OwnedTreehouseLease },
     ) {
       // Explicit paths are recovery requests, not permission to recreate a missing pooled checkout.
       if (
@@ -160,7 +161,7 @@ const make = Effect.gen(function* () {
         return yield* new TreehouseLeaseError({ path: input.path, reason: "missing" });
       }
       const current = yield* settings.getSettings;
-      if (options.resumeBinary === undefined && !current.treehouseWorktreesEnabled) return null;
+      if (options.resume === undefined && !current.treehouseWorktreesEnabled) return null;
       if (input.path != null)
         return yield* new GitCommandError({
           operation: "TreehouseWorktrees.create",
@@ -168,7 +169,7 @@ const make = Effect.gen(function* () {
           cwd: input.cwd,
           detail: "Treehouse chooses the pool path; an explicit worktree path is not supported.",
         });
-      const binary = options.resumeBinary ?? (current.treehouseBinaryPath || "treehouse");
+      const binary = options.resume?.record.binary ?? (current.treehouseBinaryPath || "treehouse");
       if (binary !== "treehouse" && !path.isAbsolute(binary))
         return yield* new GitCommandError({
           operation: "TreehouseWorktrees.create",
@@ -182,16 +183,57 @@ const make = Effect.gen(function* () {
         command: "git",
         args: ["rev-parse", "--verify", "--end-of-options", `${input.refName}^{commit}`],
       });
-      const holder = `t3-code:${Hex.encode(yield* random.randomBytes(16))}`;
-      // --base accepts branch names only. Acquire detached, then let Git interpret the exact caller ref.
-      const stdout = yield* run({
-        cwd: input.cwd,
-        command: binary,
-        args: ["get", "--lease", "--json", "--lease-holder", holder, "--no-fetch"],
+      const resume = options.resume?.record.release?.resume;
+      const holder = resume?.holder ?? `t3-code:${Hex.encode(yield* random.randomBytes(16))}`;
+      const lease = yield* Effect.gen(function* () {
+        if (resume?.allocationStarted) {
+          if (resume.lease === undefined)
+            return yield* new TreehouseLeaseError({
+              path: options.resume!.record.lease.path,
+              reason: "resume-incomplete",
+            });
+          const pool = options.resume?.record.pool;
+          if (pool === undefined)
+            return yield* new TreehouseLeaseError({ path: input.cwd, reason: "metadata" });
+          const inventory = yield* run({
+            cwd: input.cwd,
+            command: binary,
+            args: ["leases", "--json", "--pool", pool],
+          }).pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(LeaseInventory))));
+          const matches = inventory.filter((entry) => entry.lease_holder === holder);
+          const candidate = matches[0];
+          if (
+            matches.length !== 1 ||
+            candidate === undefined ||
+            candidate.quarantined ||
+            candidate.pool !== pool
+          )
+            return yield* new TreehouseLeaseError({
+              path: options.resume!.record.lease.path,
+              reason: "resume-incomplete",
+            });
+          return yield* decodeInventoryLease(candidate);
+        }
+        if (options.resume !== undefined)
+          yield* leases.withLock({
+            path: options.resume.record.lease.path,
+            effect: leases.startResumeAllocation(options.resume),
+          });
+        // --base accepts branch names only. Acquire detached, then let Git interpret the exact caller ref.
+        const stdout = yield* run({
+          cwd: input.cwd,
+          command: binary,
+          args: ["get", "--lease", "--json", "--lease-holder", holder, "--no-fetch"],
+        });
+        return yield* decodeLease(stdout);
       });
-      const lease = yield* decodeLease(stdout);
       if (lease.lease_holder !== holder || !path.isAbsolute(lease.path))
         return yield* new TreehouseLeaseError({ path: lease.path, reason: "unknown-lease" });
+      if (options.resume !== undefined && !resume?.allocationStarted)
+        yield* leases.withLock({
+          path: options.resume.record.lease.path,
+          effect: leases.finishResumeAllocation({ owned: options.resume, lease }),
+        });
       const pool = yield* treehousePoolForPath(lease.path);
       if (pool === null)
         return yield* new TreehouseLeaseError({ path: lease.path, reason: "metadata" });
@@ -204,6 +246,7 @@ const make = Effect.gen(function* () {
             binary,
             pool,
             preparationScope: options.preparationScope,
+            ...(options.resume === undefined ? {} : { resume: options.resume }),
           });
           yield* leases.read(canonical);
           // Validate repository identity before switching any checkout returned by the external allocator.
@@ -230,6 +273,24 @@ const make = Effect.gen(function* () {
               reason: "metadata",
               cause: local,
             });
+          if (resume?.allocationStarted) {
+            const branch = yield* runner.run({
+              command: "git",
+              args: ["symbolic-ref", "--quiet", "HEAD"],
+              cwd: canonical,
+            });
+            if (branch.code === 0 && branch.stdout.trim() === `refs/heads/${input.refName}`)
+              return canonical;
+            if (branch.code !== 1)
+              return yield* new TreehouseLeaseError({ path: canonical, reason: "stale-binding" });
+            const changes = yield* run({
+              cwd: canonical,
+              command: "git",
+              args: ["status", "--porcelain=v1", "--untracked-files=normal", "-z"],
+            });
+            if (changes !== "")
+              return yield* new TreehouseLeaseError({ path: canonical, reason: "in-use" });
+          }
           yield* run({
             cwd: canonical,
             command: "git",
@@ -731,13 +792,16 @@ const make = Effect.gen(function* () {
                 }
                 const resuming = yield* leases.withLock({
                   path: input.path,
-                  effect: leases.beginResume(released),
+                  effect: leases.beginResume({
+                    owned: released,
+                    holder: `t3-code:${Hex.encode(yield* random.randomBytes(16))}`,
+                  }),
                 });
                 const created = yield* create(
                   { cwd: input.cwd, refName: input.branch, path: null },
                   {
                     preparationScope: input.preparationScope,
-                    resumeBinary: released.record.binary,
+                    resume: resuming,
                   },
                 );
                 if (created === null)

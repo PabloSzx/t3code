@@ -306,6 +306,7 @@ function CleanupSection() {
       rules.worktreeOnDelete ||
       rules.worktreeUnchanged;
     return (
+      settings.storageCleanup.leaseHardExpiryDays === 7 ||
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
@@ -507,12 +508,19 @@ export function WorktreeCleanupSection() {
   return (
     <SettingsSection id="storage-worktrees" title="Cleanup">
       <>
+        {targets.some((entry) => entry.settings.storageCleanup.leaseHardExpiryDays === 7) && (
+          <SettingsRow
+            title="Hard Treehouse lease expiry"
+            status={ruleStatus("leaseHardExpiryDays")}
+            description="On enabled machines, every discovered Treehouse lease expires seven days after acquisition, even during active work. Checkout files are deleted; branch refs stay. Project cleanup overrides do not apply."
+          />
+        )}
         {isProjectScope && (
           <SettingsRow
             title="Automatic worktree cleanup"
             description={
               mode === "off"
-                ? "Keep this project's worktrees until you delete them manually."
+                ? "Disable this project's ordinary cleanup rules. Machine-wide lease expiry still applies."
                 : mode === "custom"
                   ? "Use these rules for this project."
                   : "Use each machine's worktree cleanup settings."

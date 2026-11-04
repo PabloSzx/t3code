@@ -1161,7 +1161,28 @@ export const StorageCleanupReport = Schema.Struct({
 });
 export type StorageCleanupReport = typeof StorageCleanupReport.Type;
 
+export const LeaseCleanupTask = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  leaseId: Schema.String,
+  path: Schema.String,
+  pool: Schema.String,
+  holder: Schema.String,
+  acquiredAt: Schema.NullOr(Schema.String),
+  dueAt: Schema.NullOr(Schema.String),
+  responsibleService: Schema.Literal("storage-cleanup"),
+  ownerThreadIds: Schema.Array(Schema.String),
+  lastOwnerActivityAt: Schema.NullOr(Schema.String),
+  state: Schema.Literals(["scheduled", "reclaiming", "blocked", "removed", "released"]),
+  reason: Schema.String,
+  attempts: Schema.Number,
+  updatedAt: Schema.String,
+  nextAttemptAt: Schema.NullOr(Schema.String),
+});
+export type LeaseCleanupTask = typeof LeaseCleanupTask.Type;
+
+const LeaseHardExpiryDays = Schema.NullOr(Schema.Literal(7));
 export const StorageCleanupSettings = Schema.Struct({
+  leaseHardExpiryDays: LeaseHardExpiryDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),
   ),
@@ -1560,6 +1581,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
+      leaseHardExpiryDays: Schema.optionalKey(LeaseHardExpiryDays),
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
       worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeSettledAfterDays: Schema.optionalKey(SettledWorktreeRetentionDays),

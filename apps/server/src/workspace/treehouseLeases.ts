@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
-import type * as DateTime from "effect/DateTime";
+import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as FileSystem from "effect/FileSystem";
@@ -60,6 +61,7 @@ const PoolState = Schema.Struct({
       leased: Schema.optional(Schema.Boolean),
       lease_id: Schema.optional(Schema.String),
       lease_holder: Schema.optional(Schema.String),
+      leased_at: Schema.optional(Schema.String),
       destroying: Schema.optional(Schema.Boolean),
       seeded_paths: Schema.optional(Schema.Array(Schema.String)),
       recovery_error: Schema.optional(Schema.String),
@@ -90,6 +92,7 @@ export const isTreehouseLeaseError = Schema.is(TreehouseLeaseError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeRelease = Schema.encodeEffect(Schema.fromJsonString(Release));
 const decodeLeaseId = Schema.decodeEffect(LeaseId);
+const decodeAcquiredAt = Schema.decodeEffect(Schema.DateTimeUtcFromString);
 const isLeaseId = Schema.is(LeaseId);
 const metadataError = (input: { path: string; cause: unknown }) =>
   isTreehouseLeaseError(input.cause)
@@ -149,6 +152,13 @@ export interface TreehouseCleanupReturnOptions {
   readonly owned: Owned;
   readonly release: typeof Release.Type;
   readonly discardLocalFiles?: boolean;
+}
+export interface TreehouseForcedExpiryOptions {
+  readonly lease: typeof TreehouseLease.Type;
+  readonly pool: string;
+  readonly binary: string;
+  readonly days: number;
+  readonly release: typeof Release.Type;
 }
 export interface TreehouseReleasedThreadOptions {
   readonly path: string;
@@ -235,6 +245,9 @@ export class TreehouseLeaseStore extends Context.Service<
     ) => Effect.Effect<Owned | null, TreehouseLeaseError>;
     readonly beginCleanupReturn: (
       input: TreehouseCleanupReturnOptions,
+    ) => Effect.Effect<Owned, TreehouseLeaseError>;
+    readonly reserveExpiry: (
+      input: TreehouseForcedExpiryOptions,
     ) => Effect.Effect<Owned, TreehouseLeaseError>;
     readonly beginResume: (owned: Owned) => Effect.Effect<Owned, TreehouseLeaseError>;
     readonly setReplacement: (input: {
@@ -819,6 +832,87 @@ const make = Effect.gen(function* () {
       (effect, input) =>
         effect.pipe(
           Effect.mapError((cause) => metadataError({ path: input.owned.record.lease.path, cause })),
+        ),
+    ),
+    reserveExpiry: Effect.fn("TreehouseLeases.reserveExpiry")(
+      function* (input) {
+        const slot = yield* inspect(input.lease.path);
+        const acquired = yield* decodeAcquiredAt(input.lease.leased_at);
+        const now = yield* Clock.currentTimeMillis;
+        if (
+          input.days <= 0 ||
+          slot?.lease_id !== input.lease.lease_id ||
+          slot.lease_holder !== input.lease.lease_holder ||
+          slot.leased_at !== input.lease.leased_at ||
+          DateTime.toEpochMillis(acquired) > now - input.days * 86400000 ||
+          (yield* treehousePoolForPath(input.lease.path)) !== input.pool
+        )
+          return yield* new TreehouseLeaseError({
+            path: input.lease.path,
+            reason: "unknown-lease",
+          });
+        const root = yield* location();
+        const recordPath = path.join(root, "leases", `${input.lease.lease_id}.json`);
+        const owned: Owned = (yield* fs.exists(recordPath))
+          ? yield* readRecord(input.lease.lease_id)
+          : {
+              recordPath,
+              record: {
+                lease: input.lease,
+                binary: input.binary,
+                pool: input.pool,
+                returned: false,
+              },
+            };
+        if (
+          owned.record.returned ||
+          owned.record.release?.resuming ||
+          owned.record.lease.path !== input.lease.path ||
+          owned.record.lease.lease_holder !== input.lease.lease_holder
+        )
+          return yield* new TreehouseLeaseError({
+            path: input.lease.path,
+            reason: "stale-binding",
+          });
+        const threadIds: string[] = [];
+        for (const threadId of input.release.threadIds) {
+          const binding = yield* readBinding(threadId);
+          if (binding?.path === input.lease.path && binding.leaseId === input.lease.lease_id)
+            threadIds.push(threadId);
+        }
+        const updated: Owned = {
+          ...owned,
+          record: { ...owned.record, pool: input.pool, release: { ...input.release, threadIds } },
+        };
+        const directory = path.join(root, "uses");
+        const names = yield* fs.readDirectory(directory).pipe(
+          Effect.catchIf(
+            (error) => error.reason._tag === "NotFound",
+            () => Effect.succeed([]),
+          ),
+        );
+        for (const name of names) {
+          const use = yield* fs.readFileString(path.join(directory, name, "use.json")).pipe(
+            Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))),
+            Effect.catchIf(
+              (error) => "reason" in error && error.reason._tag === "NotFound",
+              () => Effect.succeed(null),
+            ),
+          );
+          if (
+            use?.leaseId === input.lease.lease_id &&
+            (use.kind === "operation" || use.kind === "preparation")
+          )
+            return yield* new TreehouseLeaseError({ path: input.lease.path, reason: "in-use" });
+        }
+        yield* writeJson({ target: recordPath, value: updated.record });
+        return updated;
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError((cause) => metadataError({ path: input.lease.path, cause })),
         ),
     ),
     register: Effect.fn("TreehouseLeases.register")(

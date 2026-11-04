@@ -88,6 +88,7 @@ function setup() {
   state.settings = {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
+      leaseHardExpiryDays: null,
       worktreeKeepWhen: "uncommitted-changes",
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
@@ -113,12 +114,21 @@ const deleteButton = (container: HTMLElement) =>
     (button) => button.textContent === "Delete now",
   )!;
 
-it("keeps cleanup disabled when settled retention and all other rules are off", async () => {
-  setup();
-  await using screen = await render(panel());
-  const button = deleteButton(screen.container);
+it.each([null, 7] as const)(
+  "runs only the enabled hard lease policy when all ordinary rules are off: %s",
+  async (leaseHardExpiryDays) => {
+    setup();
+    state.settings = {
+      ...state.settings,
+      storageCleanup: { ...state.settings.storageCleanup, leaseHardExpiryDays },
+    };
+    state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
+    await using screen = await render(panel());
+    const button = deleteButton(screen.container);
 
-  expect(button.disabled).toBe(true);
-  await act(async () => button.click());
-  expect(state.run).not.toHaveBeenCalled();
-});
+    expect(button.disabled).toBe(leaseHardExpiryDays === null);
+    await act(async () => button.click());
+    if (leaseHardExpiryDays === null) expect(state.run).not.toHaveBeenCalled();
+    else expect(state.run).toHaveBeenCalledWith({ environmentId: "env", input: {} });
+  },
+);

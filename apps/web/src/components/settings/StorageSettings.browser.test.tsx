@@ -153,6 +153,7 @@ it.each([null, 7] as const)(
       ...state.settings,
       storageCleanup: { ...state.settings.storageCleanup, leaseHardExpiryDays },
     };
+    state.targets = state.targets.map((target) => ({ ...target, settings: state.settings }));
     state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
     await using screen = await render(panel());
     const button = deleteButton(screen.container);

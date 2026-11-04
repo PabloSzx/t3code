@@ -94,6 +94,16 @@ class WorktreeRecreateNoBaseError extends Schema.TaggedError<WorktreeRecreateNoB
   }
 }
 
+const workspaceFailureMessage = (error: WorkspaceAccess.WorkspaceAccessError): string => {
+  let cause: unknown = error;
+  for (let depth = 0; depth < 8; depth++) {
+    if (TreehouseLeases.isTreehouseLeaseError(cause)) return cause.message;
+    if (!Predicate.hasProperty(cause, "cause")) break;
+    cause = cause.cause;
+  }
+  return error.message;
+};
+
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 const isProviderAdapterOpenSessionError = Schema.is(
   ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -313,10 +323,14 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      readonly workspaceFailure?: {
+        readonly error: WorkspaceAccess.WorkspaceAccessError;
+        readonly attemptId: OrchestrationV2Run["activeAttemptId"];
+      };
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
-      if (projection.thread.worktreePath !== null)
+      if (projection.thread.worktreePath !== null && input.workspaceFailure === undefined)
         yield* leases.assertThread({
           path: projection.thread.worktreePath,
           threadId: input.threadId,
@@ -326,7 +340,11 @@ export const layer: Layer.Layer<
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
-      if (run.status !== "starting") {
+      if (
+        run.status !== "starting" ||
+        (input.workspaceFailure !== undefined &&
+          input.workspaceFailure.attemptId !== run.activeAttemptId)
+      ) {
         return;
       }
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
@@ -506,6 +524,15 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (input.workspaceFailure !== undefined) {
+        yield* settleStartFailure({
+          signal: "workspace-activation-failure",
+          title: "Couldn't activate thread workspace",
+          error: input.workspaceFailure.error,
+          message: workspaceFailureMessage(input.workspaceFailure.error),
+        });
+        return;
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -1547,11 +1574,19 @@ export const layer: Layer.Layer<
     return ProviderTurnStartServiceV2.of({
       start: Effect.fn("ProviderTurnStartService.start")(
         function* (input) {
-          const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
+          const { thread, runs } = yield* projectionStore.getThreadRecords(
+            input.threadId,
+            ["runs"],
+            {
+              runIds: [input.runId],
+            },
+          );
+          const run = runs.find((candidate) => candidate.id === input.runId);
+          if (run !== undefined && run.status !== "starting") return;
           const providerTurn = yield* Effect.scoped(
             Effect.gen(function* () {
               if (thread.worktreePath === null) return yield* start(input);
-              const workspace = yield* workspaceAccess
+              const activated = yield* workspaceAccess
                 .activate({ threadId: input.threadId })
                 .pipe(
                   Effect.provideService(EventSink.EventSinkV2, eventSink),
@@ -1559,7 +1594,16 @@ export const layer: Layer.Layer<
                   Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
                   Effect.provideService(ProjectService.ProjectService, projects),
                   Effect.provideService(ServerSettings.ServerSettingsService, settings),
+                  Effect.result,
                 );
+              if (activated._tag === "Failure") {
+                if (input.willRetry === true || run === undefined) return yield* activated.failure;
+                return yield* start({
+                  ...input,
+                  workspaceFailure: { error: activated.failure, attemptId: run.activeAttemptId },
+                });
+              }
+              const workspace = activated.success;
               return yield* withWorkspaceLease(path.resolve(workspace.cwd), start(input)).pipe(
                 Effect.provideService(WorkspaceOperation, workspace.context),
               );

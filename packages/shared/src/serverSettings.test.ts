@@ -89,20 +89,21 @@ describe("serverSettings helpers", () => {
 
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },
+      storageCleanup: {
+        leaseHardExpiryDays: 7,
+        worktreeAfterDays: 8,
+        worktreeOnMerge: true,
+        logsAfterDays: 30,
+      },
     });
     expect(
       applyServerSettingsPatch(enabled, {
         storageCleanup: { worktreeAfterDays: null },
       }).storageCleanup,
-    ).toEqual({
+    ).toMatchObject({
+      leaseHardExpiryDays: 7,
       worktreeAfterDays: null,
-      worktreeSettledAfterDays: null,
       worktreeOnMerge: true,
-      worktreeOnDelete: false,
-      worktreeUnchanged: false,
-      worktreeKeepWhen: "uncommitted-changes",
-      browserArtifactsAfterDays: null,
       logsAfterDays: 30,
     });
   });

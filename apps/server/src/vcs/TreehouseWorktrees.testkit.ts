@@ -43,12 +43,15 @@ if (args[0] === "get") {
   state.worktrees = [...state.worktrees.filter(entry => entry.path !== slot), { ...lease, leased: true }];
   writeFileSync(stateFile, JSON.stringify(state));
   console.log(JSON.stringify(lease));
+} else if (args[0] === "leases") {
+  const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : { worktrees: [] };
+  console.log(JSON.stringify(state.worktrees.filter(entry => entry.leased).map(entry => ({ ...entry, pool, removal_root: dirname(entry.path), quarantined: false }))));
 } else if (args[0] === "destroy" && args[1] === "--help") {
-  console.log(existsSync(join(root, "old-destroy")) ? "destroy" : "destroy --if-lease-id");
+  console.log(existsSync(join(root, "old-destroy")) ? "destroy" : "destroy --if-lease-id --expire-after --terminate-agent-sessions");
 } else if (args[0] === "destroy") {
   const state = JSON.parse(readFileSync(stateFile, "utf8"));
   const entry = state.worktrees.find(entry => entry.path === args[1]);
-  if (!entry?.leased || args.includes("--include-in-use") || !args.includes("--include-leased") || !args.includes("--include-unlanded") || !args.includes("--yes") || args[args.indexOf("--if-lease-id") + 1] !== entry.lease_id) process.exit(4);
+  if (!entry?.leased || (args.includes("--include-in-use") && (!args.includes("--expire-after") || !args.includes("--terminate-agent-sessions"))) || !args.includes("--include-leased") || !args.includes("--include-unlanded") || !args.includes("--yes") || args[args.indexOf("--if-lease-id") + 1] !== entry.lease_id) process.exit(4);
   if (existsSync(join(root, "fail-destroy"))) process.exit(5);
   git(repo, ["worktree", "remove", "--force", "--", entry.path]);
   rmSync(dirname(entry.path), { recursive: true });

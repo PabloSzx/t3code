@@ -44,6 +44,7 @@ describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
+      leaseHardExpiryDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -53,6 +54,21 @@ describe("storage cleanup settings", () => {
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
     });
+  });
+
+  it("accepts only seven days or disabled for hard lease expiry", () => {
+    for (const leaseHardExpiryDays of [7, null]) {
+      const input = { storageCleanup: { leaseHardExpiryDays } };
+      expect(decodeServerSettings(input).storageCleanup.leaseHardExpiryDays).toBe(
+        leaseHardExpiryDays,
+      );
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    }
+    for (const leaseHardExpiryDays of [-1, 0, 1, 8, 30]) {
+      const input = { storageCleanup: { leaseHardExpiryDays } };
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    }
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {

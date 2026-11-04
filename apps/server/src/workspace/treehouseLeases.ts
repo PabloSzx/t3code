@@ -11,6 +11,7 @@ import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as ServerConfig from "../config.ts";
+import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { withWorkspaceLease } from "./workspaceLease.ts";
 import { ThreadId, type WorkspaceOperationContext } from "@t3tools/contracts";
 import { isNetworkPath } from "@t3tools/shared/path";
@@ -25,6 +26,15 @@ export const TreehouseLease = Schema.Struct({
   leased_at: Schema.String,
   base_branch: Schema.optional(Schema.String),
 });
+const Resume = Schema.Struct({
+  holder: Schema.String.check(Schema.isPattern(/^t3-code:[a-f0-9]{32}$/)),
+  allocationStarted: Schema.Boolean,
+  lease: Schema.optional(TreehouseLease),
+  ownerPid: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 2_147_483_647 })),
+  ),
+  ownerId: Schema.optional(Schema.String),
+});
 const Release = Schema.Struct({
   projectPath: Schema.String,
   repository: Schema.String,
@@ -32,12 +42,9 @@ const Release = Schema.Struct({
   headSha: Schema.String,
   threadIds: Schema.Array(Schema.String),
   resuming: Schema.optional(Schema.Boolean),
-  resume: Schema.optional(
-    Schema.Struct({
-      holder: Schema.String.check(Schema.isPattern(/^t3-code:[a-f0-9]{32}$/)),
-      allocationStarted: Schema.Boolean,
-      lease: Schema.optional(TreehouseLease),
-    }),
+  resume: Schema.optional(Resume),
+  abandonedResumes: Schema.optional(
+    Schema.Array(Schema.Struct({ resume: Schema.optional(Resume), abandonedAt: Schema.String })),
   ),
   replacement: Schema.optional(Schema.Struct({ path: Schema.String, leaseId: LeaseId })),
 });
@@ -794,14 +801,49 @@ const make = Effect.gen(function* () {
             path: input.owned.record.lease.path,
             reason: "metadata",
           });
-        if (release.resuming) {
-          if (release.resume === undefined)
-            return yield* new TreehouseLeaseError({
-              path: input.owned.record.lease.path,
-              reason: "resume-incomplete",
-            });
-          if (release.resume.allocationStarted) return current;
-        }
+        const ownerPid = yield* HostProcess.ProcessId;
+        const runtime = Option.isSome(config)
+          ? yield* readPersistedServerRuntimeState(config.value.serverRuntimeStatePath).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+            )
+          : Option.none();
+        if (
+          Option.isSome(runtime) &&
+          runtime.value.pid !== ownerPid &&
+          isProcessAlive(runtime.value.pid)
+        )
+          return yield* new TreehouseLeaseError({
+            path: current.record.lease.path,
+            reason: "in-use",
+          });
+        const ownerId =
+          Option.isSome(runtime) && runtime.value.pid === ownerPid
+            ? runtime.value.ownerId
+            : undefined;
+        const previous = release.resume;
+        // A different server nonce proves the old owner exited: startup holds the exclusive home lock.
+        const previousServerExited =
+          ownerId !== undefined && previous?.ownerId !== undefined && ownerId !== previous.ownerId;
+        if (
+          previous?.ownerPid !== undefined &&
+          previous.ownerPid !== ownerPid &&
+          !previousServerExited &&
+          isProcessAlive(previous.ownerPid)
+        )
+          return yield* new TreehouseLeaseError({
+            path: current.record.lease.path,
+            reason: "in-use",
+          });
+        if (!(yield* leaseEnded(current)))
+          return yield* new TreehouseLeaseError({
+            path: current.record.lease.path,
+            reason: "unknown-lease",
+          });
+        yield* assertUnused({ owned: current, allowedThreadIds: release.threadIds });
+        const confirmed = previous?.allocationStarted && previous.lease !== undefined;
+        // The caller holds the per-release resume lease; a same-process attempt has already settled.
+        const abandoned = release.resuming && !confirmed && (previous?.allocationStarted ?? true);
+        const abandonedAt = abandoned ? DateTime.formatIso(yield* DateTime.now) : undefined;
         const updated = {
           ...current,
           record: {
@@ -809,7 +851,19 @@ const make = Effect.gen(function* () {
             release: {
               ...release,
               resuming: true,
-              resume: { holder: input.holder, allocationStarted: false },
+              ...(abandonedAt !== undefined
+                ? {
+                    abandonedResumes: [
+                      ...(release.abandonedResumes ?? []),
+                      { resume: previous, abandonedAt },
+                    ],
+                  }
+                : {}),
+              resume: {
+                ...(confirmed ? previous : { holder: input.holder, allocationStarted: false }),
+                ownerPid,
+                ownerId,
+              },
             },
           },
         };

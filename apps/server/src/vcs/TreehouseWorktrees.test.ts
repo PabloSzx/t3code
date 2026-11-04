@@ -1,4 +1,5 @@
 import { assert, describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import {
@@ -36,14 +37,27 @@ import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ServerConfig from "../config.ts";
-import { fixture, testLayer } from "./TreehouseWorktrees.testkit.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
+import * as ServerRuntimeState from "../serverRuntimeState.ts";
+import { accessFixture, fixture, testLayer } from "./TreehouseWorktrees.testkit.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 import { removeLinkedWorktree } from "./worktreeRemoval.ts";
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(Effect.provide(testLayer));
+const decodePoolSnapshot = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Number,
+      worktrees: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+    }),
+  ),
+);
 
 const historyLayer = EventSink.layer.pipe(
   Layer.provideMerge(
@@ -782,7 +796,7 @@ describe("Treehouse worktrees", () => {
   );
 
   it.live.each(["allocation failure", "interruption", "journal sync failure"] as const)(
-    "retries an interrupted reservation but never reallocates an uncertain acquisition (%s)",
+    "automatically retries an interrupted workspace resume (%s)",
     (failure) =>
       Effect.gen(function* () {
         const f = yield* fixture();
@@ -863,26 +877,21 @@ describe("Treehouse worktrees", () => {
           const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
           assert.strictEqual(calls.split("\n").filter((line) => line.startsWith("get ")).length, 1);
         }
-        if (failure === "allocation failure")
-          assert.isTrue(Result.isFailure(yield* original.resume(request).pipe(Effect.result)));
-        else {
-          assert.strictEqual(yield* original.resume(request), f.slot);
-          assert.strictEqual(
-            yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
-            "feature",
-          );
-          assert.strictEqual(
-            yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] }),
-            f.parentSha,
-          );
-        }
+        if (failure === "allocation failure") yield* f.fs.remove(f.path.join(f.root, "fail-get"));
+        assert.strictEqual(yield* original.resume(request), f.slot);
+        assert.strictEqual(
+          yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
+          "feature",
+        );
+        assert.strictEqual(yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] }), f.parentSha);
         const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
-        assert.strictEqual(calls.split("\n").filter((line) => line.startsWith("get ")).length, 2);
+        assert.strictEqual(
+          calls.split("\n").filter((line) => line.startsWith("get ")).length,
+          failure === "allocation failure" ? 3 : 2,
+        );
         const evidence = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
         assert.isTrue(evidence!.record.release!.resuming);
-        if (failure === "allocation failure")
-          assert.isUndefined(evidence!.record.release!.replacement);
-        else assert.strictEqual(evidence!.record.release!.replacement!.path, f.slot);
+        assert.strictEqual(evidence!.record.release!.replacement!.path, f.slot);
       }).pipe(provide),
   );
 
@@ -896,8 +905,6 @@ describe("Treehouse worktrees", () => {
     ["replacement", "foreign binding"],
     ["replacement", "changed generation"],
     ["replacement", "reused holder"],
-    ["allocation", "legacy reservation"],
-    ["allocation", "unconfirmed allocation"],
     ["allocation", "invalid reservation"],
   ] as const)(
     "recovers the same lease after resume stops during %s, protecting %s",
@@ -997,28 +1004,16 @@ describe("Treehouse worktrees", () => {
             ),
           );
         }
-        if (
-          blocker === "legacy reservation" ||
-          blocker === "unconfirmed allocation" ||
-          blocker === "invalid reservation"
-        ) {
+        if (blocker === "invalid reservation") {
           const released = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
-          const { resume, ...release } = released!.record.release!;
-          const { lease: _lease, ...unconfirmed } = resume!;
           yield* f.fs.writeFileString(
             released!.recordPath,
             JSON.stringify({
               ...released!.record,
-              release:
-                blocker === "legacy reservation"
-                  ? release
-                  : {
-                      ...release,
-                      resume:
-                        blocker === "invalid reservation"
-                          ? { ...resume, allocationStarted: false }
-                          : unconfirmed,
-                    },
+              release: {
+                ...released!.record.release,
+                resume: { ...released!.record.release!.resume, allocationStarted: false },
+              },
             }),
           );
         }
@@ -1071,6 +1066,183 @@ describe("Treehouse worktrees", () => {
           recovered!.record.lease.lease_id,
         );
       }).pipe(provide),
+  );
+
+  it.live.each([
+    "legacy",
+    "unconfirmed",
+    "failed attempt",
+    "dead owner",
+    "reused owner PID",
+    "live owner",
+    "unknown owner liveness",
+    "foreign server",
+    "occupied branch",
+  ] as const)("automatically recovers abandoned resumes while protecting %s", (state) =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      yield* f.release;
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.baseSha,
+        newRefName: "partial-owner",
+        path: null,
+      });
+      yield* f.fs.writeFileString(
+        f.path.join(f.slot, "keep-partial-work"),
+        "unverified local work",
+      );
+      if (state === "occupied branch")
+        yield* f.git({ cwd: f.slot, args: ["switch", "access-owner"] });
+      const partial = yield* f.leases.read(f.slot);
+      const config = yield* ServerConfig.ServerConfig;
+      const released = yield* f.leases.releasedThread({
+        path: f.slot,
+        threadId: f.context.threadId,
+      });
+      let ownerPid = process.pid;
+      if (
+        state === "live owner" ||
+        state === "unknown owner liveness" ||
+        state === "reused owner PID"
+      )
+        ownerPid = process.ppid;
+      if (state === "unknown owner liveness") {
+        const kill = process.kill;
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+              if (pid === process.ppid && signal === 0)
+                throw Object.assign(new Error("probe unavailable"), { code: "EIO" });
+              return kill(pid, signal);
+            }),
+          ),
+          (probe) => Effect.sync(() => probe.mockRestore()),
+        );
+      }
+      if (state === "dead owner") {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const child = yield* spawner.spawn(ChildProcess.make(process.execPath, ["-e", ""]));
+        yield* child.exitCode;
+        ownerPid = child.pid;
+      }
+      if (state === "reused owner PID") {
+        const owner = yield* ServerOwnership.acquireServerOwnership(
+          config.serverRuntimeStatePath,
+        ).pipe(
+          Effect.provideService(HostProcess.HomeDirectory, f.root),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+        yield* owner.publish(
+          yield* ServerRuntimeState.makePersistedServerRuntimeState({
+            config: { host: undefined, devUrl: undefined },
+            port: 1234,
+          }),
+        );
+      } else if (state === "foreign server")
+        yield* f.fs.writeFileString(
+          config.serverRuntimeStatePath,
+          JSON.stringify({
+            version: 1,
+            pid: process.ppid,
+            ownerId: "current-server-owner",
+            port: 1234,
+            origin: "http://127.0.0.1:1234",
+            startedAt: "2026-01-01T00:00:00Z",
+          }),
+        );
+      const previous =
+        state === "legacy"
+          ? undefined
+          : {
+              holder: partial!.record.lease.lease_holder,
+              allocationStarted: true,
+              ...(state === "unconfirmed" ? {} : { ownerPid }),
+              ...(state === "reused owner PID" ? { ownerId: "previous-server-owner" } : {}),
+            };
+      yield* f.fs.writeFileString(
+        released!.recordPath,
+        JSON.stringify({
+          ...released!.record,
+          release: { ...released!.record.release, resuming: true, resume: previous },
+        }),
+      );
+      const poolFile = f.path.join(f.root, "pool/treehouse-state.json");
+      let pool = yield* f.fs.readFileString(poolFile).pipe(Effect.flatMap(decodePoolSnapshot));
+      if (state === "legacy") {
+        pool = {
+          ...pool,
+          worktrees: pool.worktrees.map((entry) => {
+            if (entry.path !== f.slot) return entry;
+            const { lease_id: _id, ...rest } = entry;
+            return { ...rest, lease_holder: "quarantined: acquisition state incomplete" };
+          }),
+        };
+        yield* f.fs.writeFileString(poolFile, JSON.stringify(pool));
+      }
+      const originalPartial = pool.worktrees.find((entry) => entry.path === f.slot);
+      const originalRecord = yield* f.fs.readFileString(released!.recordPath);
+      yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+      const request = {
+        cwd: f.cwd,
+        path: f.slot,
+        branch: "access-owner",
+        threadId: f.context.threadId,
+        preparationScope: yield* Effect.scope,
+      };
+      const blockedByOwner =
+        state === "live owner" || state === "foreign server" || state === "unknown owner liveness";
+      if (blockedByOwner) {
+        const denied = yield* f.treehouse.resume(request).pipe(Effect.result);
+        assert.isTrue(Result.isFailure(denied));
+        if (Result.isFailure(denied)) assert.match(denied.failure.message, /\(in-use\)/);
+        assert.strictEqual(yield* f.fs.readFileString(released!.recordPath), originalRecord);
+      } else if (state === "occupied branch") {
+        assert.isTrue(Result.isFailure(yield* f.treehouse.resume(request).pipe(Effect.result)));
+        const retained = yield* f.leases.releasedThread({
+          path: f.slot,
+          threadId: f.context.threadId,
+        });
+        assert.isDefined(retained!.record.release!.resume!.lease);
+        assert.isUndefined(retained!.record.release!.replacement);
+      } else {
+        const replacement = f.path.join(f.root, "pool/2/repo");
+        assert.strictEqual(yield* f.treehouse.resume(request), replacement);
+        assert.strictEqual(yield* f.treehouse.resume(request), replacement);
+        assert.strictEqual(
+          yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] }),
+          "access-owner",
+        );
+        assert.strictEqual(
+          yield* f.git({ cwd: replacement, args: ["rev-parse", "HEAD"] }),
+          f.parentSha,
+        );
+        const resumed = yield* f.leases.releasedThread({
+          path: f.slot,
+          threadId: f.context.threadId,
+        });
+        assert.strictEqual(resumed!.record.release!.abandonedResumes!.length, 1);
+        assert.deepStrictEqual(resumed!.record.release!.abandonedResumes![0]!.resume, previous);
+      }
+      const after = yield* f.fs.readFileString(poolFile).pipe(Effect.flatMap(decodePoolSnapshot));
+      assert.deepStrictEqual(
+        after.worktrees.find((entry) => entry.path === f.slot),
+        originalPartial,
+      );
+      assert.strictEqual(
+        yield* f.fs.readFileString(f.path.join(f.slot, "keep-partial-work")),
+        "unverified local work",
+      );
+      assert.strictEqual(
+        yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
+        state === "occupied branch" ? "access-owner" : "partial-owner",
+      );
+      const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
+      assert.strictEqual(
+        calls.split("\n").filter((line) => line.startsWith("get ")).length,
+        blockedByOwner ? 2 : 3,
+      );
+    }).pipe(provide),
   );
 
   it.live("retains failed allocations without native fallback", () =>

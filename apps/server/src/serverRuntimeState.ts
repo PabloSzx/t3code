@@ -116,14 +116,14 @@ export const clearPersistedServerRuntimeState = Effect.fn(
   );
 });
 
-/** Signal 0 only probes existence; EPERM still means alive. */
+/** Only ESRCH proves absence; permission errors and unknown probe failures stay live. */
 export const isProcessAlive = (pid: number): boolean => {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return error instanceof Error && "code" in error && error.code === "EPERM";
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
   }
 };
 

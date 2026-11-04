@@ -77,6 +77,7 @@ const layerWorktreeLocation = (input: { worktreesDir?: string; stateDir?: string
     Layer.mock(ServerConfig.ServerConfig)({
       worktreesDir: input.worktreesDir ?? managedWorktreesDir,
       stateDir: input.stateDir ?? "/synthetic-state",
+      serverRuntimeStatePath: `${input.stateDir ?? "/synthetic-state"}/server-runtime.json`,
     } as ServerConfig.ServerConfig["Service"]),
     ServerSettings.layerTest(),
   );
@@ -1059,9 +1060,9 @@ effectIt.effect.each(["current", "stopped", "replaced"] as const)(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-effectIt.live(
-  "starts a returned conversation in its rebound lease, not its recycled old path",
-  () =>
+effectIt.live.each(["normal", "legacy"] as const)(
+  "starts a returned conversation in its rebound lease, not its recycled old path (%s)",
+  (state) =>
     Effect.gen(function* () {
       const f = yield* treehouseFixture();
       const config = yield* ServerConfig.ServerConfig;
@@ -1178,6 +1179,16 @@ effectIt.live(
           recheck: Effect.succeed(null),
         }),
       ).toBeNull();
+      if (state === "legacy") {
+        const released = yield* f.leases.releasedThread({ path: f.slot, threadId });
+        yield* f.fs.writeFileString(
+          released!.recordPath,
+          JSON.stringify({
+            ...released!.record,
+            release: { ...released!.record.release, resuming: true },
+          }),
+        );
+      }
       yield* f.driver.createWorktree({
         cwd: f.cwd,
         refName: f.parentSha,

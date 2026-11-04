@@ -8,7 +8,7 @@ import {
   type WorkspaceReservation,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -69,7 +69,7 @@ const make = Effect.gen(function* () {
   );
   const lifecycle = yield* WorkspaceLifecycle.WorkspaceLifecycle;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const lifetime = yield* Scope.Scope;
   const dependencies = yield* Effect.context<Dependencies | ExternalLauncher.ExternalLauncher>();
   const reservations = new Map<
@@ -125,7 +125,7 @@ const make = Effect.gen(function* () {
             return { workspace, reservationId: null };
           }
           transferred = true;
-          const reservationId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+          const reservationId = yield* random.uuidV4();
           const stop = yield* Deferred.make<void>();
           const closed = yield* Deferred.make<void>();
           reservations.set(reservationId, { owner: input.owner, stop, closed });

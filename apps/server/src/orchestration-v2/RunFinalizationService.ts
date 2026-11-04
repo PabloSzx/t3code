@@ -2,6 +2,7 @@ import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contract
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as WorkspaceAccess from "../workspace/WorkspaceAccess.ts";
+import * as FiberMap from "effect/FiberMap";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
@@ -100,6 +101,7 @@ export const layerObserver = Layer.effect(
     const access = yield* WorkspaceAccess.WorkspaceAccess.pipe(
       Effect.provide(WorkspaceAccess.layer),
     );
+    const pullRequestLookups = yield* FiberMap.make<string>();
     return {
       refreshAfterTurn: pullRequests.refreshAfterTurn,
       refresh: Effect.fn("RunFinalizationService.refresh")(
@@ -112,6 +114,8 @@ export const layerObserver = Layer.effect(
           const thread = yield* projections.getThreadShell(threadId);
           if (!thread || thread.branch !== local.refName) return;
           if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
+          // The forge CLI can take minutes, so the next turn must not wait for it. A newer
+          // turn's lookup replaces a running one instead of queueing behind the cwd's lock.
           yield* vcsStatus.refreshPullRequestStatus(cwd).pipe(
             Effect.catch((error) =>
               Effect.logWarning("failed to refresh pull request status after run completion", {
@@ -120,6 +124,7 @@ export const layerObserver = Layer.effect(
                 detail: error.message,
               }),
             ),
+            FiberMap.run(pullRequestLookups, cwd),
           );
         },
         (effect, { cwd, threadId }) =>

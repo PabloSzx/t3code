@@ -1,6 +1,6 @@
 import { CommandId, type ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -63,7 +63,7 @@ export class WorktreeBranchReconciliation extends Context.Service<
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const runner = yield* ProcessRunner.ProcessRunner;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -215,9 +215,7 @@ const make = Effect.gen(function* () {
           dispatchAttempted = true;
           yield* engine.dispatch({
             type: "thread.metadata.update",
-            commandId: CommandId.make(
-              `worktree-reconcile:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
-            ),
+            commandId: CommandId.make(`worktree-reconcile:${yield* random.uuidV4()}`),
             threadId: member.id,
             branch: expected.branch,
             expectedBranch: current.branch,

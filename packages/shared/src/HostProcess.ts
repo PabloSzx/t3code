@@ -4,6 +4,10 @@ import * as NodeDns from "node:dns";
 import * as NodeOS from "node:os";
 import * as NodeSea from "node:sea";
 
+export const ProcessId = Context.Reference<number>("@t3tools/shared/HostProcess/ProcessId", {
+  defaultValue: () => process.pid,
+});
+
 export const Platform = Context.Reference<NodeJS.Platform>("@t3tools/shared/HostProcess/Platform", {
   defaultValue: () => process.platform,
 });

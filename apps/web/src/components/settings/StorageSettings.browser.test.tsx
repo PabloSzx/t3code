@@ -160,7 +160,11 @@ it.each([null, 7] as const)(
     expect(button.disabled).toBe(leaseHardExpiryDays === null);
     await act(async () => button.click());
     if (leaseHardExpiryDays === null) expect(state.run).not.toHaveBeenCalled();
-    else expect(state.run).toHaveBeenCalledWith({ environmentId: "env", input: {} });
+    else
+      expect(state.run.mock.calls.map(([request]) => request)).toEqual([
+        { environmentId: "env-a", input: {} },
+        { environmentId: "env-b", input: {} },
+      ]);
   },
 );
 it("settles mixed retention statuses independently across selected machines", async () => {

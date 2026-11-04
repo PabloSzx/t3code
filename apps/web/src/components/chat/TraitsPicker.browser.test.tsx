@@ -80,7 +80,7 @@ it.each<{
     await using screen = await render(<TraitsPicker {...props} modelOptions={options} />, {
       router: false, // The controlled picker does not navigate.
     });
-    const trigger = screen.getByRole("button", { name: `Effort: ${label}` });
+    const trigger = screen.getByRole("button", { name: label, exact: true });
     await expect.element(trigger).toBeVisible();
     await expect.element(trigger).toHaveTextContent(label);
     await userEvent.click(trigger);
@@ -98,7 +98,7 @@ it.each<{
     await screen.rerender(
       <TraitsPicker {...props} modelOptions={[{ id: "thinking", value: "max" }]} />,
     );
-    const updatedTrigger = screen.getByRole("button", { name: "Effort: Max" });
+    const updatedTrigger = screen.getByRole("button", { name: "Max", exact: true });
     await expect.element(updatedTrigger).toHaveTextContent("Max");
     await userEvent.click(updatedTrigger);
     await expect

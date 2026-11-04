@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Hex from "effect/encoding/Hex";
 import { LeaseCleanupTask } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -78,7 +78,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
-  const crypto = yield* Crypto.Crypto;
+  const digest = yield* Digest.Digest;
   const root = path.join(config.stateDir, "lease-cleanup");
   const isWindows = yield* HostProcess.isWindows;
   const syncDirectory = Effect.fn("LeaseCleanupQueue.syncDirectory")(function* (directory: string) {
@@ -170,7 +170,9 @@ const make = Effect.gen(function* () {
           const result: LeaseCleanupTask[] = [];
           for (const lease of input.leases) {
             const key = yield* encodeKey([lease.pool, lease.path, lease.lease_id]);
-            const id = Hex.encode(yield* crypto.digest("SHA-256", new TextEncoder().encode(key)));
+            const id = Hex.encode(
+              yield* digest.digest(Digest.sha256, new TextEncoder().encode(key)),
+            );
             present.add(id);
             const previous = stored.find((task) => task.id === id);
             const acquired = timestamp(lease.leased_at);

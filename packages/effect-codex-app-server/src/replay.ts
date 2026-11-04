@@ -237,9 +237,9 @@ function recorderThreadConfigKeys(transcript: CodexAppServerReplayTranscript): R
 }
 
 /**
- * `cwd`, `model` and host-supplied MCP servers (machine-local URLs, short-lived
- * authorization headers) vary per machine, and recorder-only keys are not the
- * client's.
+ * `cwd`, `model`, host-supplied MCP servers (machine-local URLs, short-lived
+ * authorization headers) and the T3 thread id vary per machine or run, and
+ * recorder-only keys are not the client's.
  */
 function normalizeThreadRequest(frame: unknown, ignoredConfigKeys: ReadonlySet<string>): unknown {
   if (typeof frame !== "object" || frame === null) return frame;
@@ -261,7 +261,8 @@ function normalizeThreadRequest(frame: unknown, ignoredConfigKeys: ReadonlySet<s
         key !== "mcp_servers" &&
         !key.startsWith("mcp_servers.") &&
         key !== "shell_environment_policy.set.T3_MCP_URL" &&
-        key !== "shell_environment_policy.set.T3_MCP_BEARER_TOKEN",
+        key !== "shell_environment_policy.set.T3_MCP_BEARER_TOKEN" &&
+        key !== "shell_environment_policy.set.T3CODE_THREAD_ID",
     ),
   );
   for (const key of ignoredConfigKeys) delete owned[key];

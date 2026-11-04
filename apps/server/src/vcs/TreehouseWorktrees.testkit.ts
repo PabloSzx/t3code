@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { ThreadId } from "@t3tools/contracts";
 import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { assert } from "@effect/vitest";
@@ -178,7 +179,7 @@ export const testLayer = ProcessRunner.layer.pipe(
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(
     ServerConfig.layerTest(process.cwd(), { prefix: "treehouse-config-" }).pipe(
-      Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     ),
   ),
 );

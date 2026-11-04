@@ -12,9 +12,6 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import * as FileSystem from "effect/FileSystem";
-import * as Path from "effect/Path";
-import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import { Tool, Toolkit } from "effect/ai";
@@ -98,9 +95,7 @@ const WorktreeListTool = Tool.make("t3_worktree_list", {
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     ProjectService.ProjectService,
-    GitWorkflowService.GitWorkflowService,
-    FileSystem.FileSystem,
-    Path.Path,
+    WorktreeMcpService.WorktreeMcpService,
   ],
 })
   .annotate(Tool.Readonly, true)

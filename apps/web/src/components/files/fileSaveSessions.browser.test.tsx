@@ -1,5 +1,10 @@
 import { render, fakeTimers } from "../../../test/render";
-import { EnvironmentId, ThreadId, type WorkspaceAvailability } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  type WorkspaceAvailability,
+  type AuthSessionState,
+} from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { StrictMode, createRef, useImperativeHandle } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -25,10 +30,6 @@ vi.mock(import("~/state/shell"), () => ({
     completeWorkspaceAction: { run: state.complete },
   } as never,
 }));
-vi.mock(import("~/state/session"), async (original) => ({
-  ...(await original()),
-  readEnvironmentScope: () => true,
-}));
 vi.mock(import("~/workspaceContext"), async () => {
   const { createContext } = await import("react");
   return {
@@ -36,13 +37,22 @@ vi.mock(import("~/workspaceContext"), async () => {
     useWorkspaceAvailability: () => state.availability,
   } as never;
 });
-vi.mock(
-  import("./projectFilesQueryState"),
-  () =>
-    ({
-      useProjectFileScope: () => state.scope!,
-    }) as never,
-);
+// The real session atom boots the connection runtime, whose endless discovery poll
+// would keep vi.runAllTimersAsync from ever draining once its timers are faked.
+vi.mock(import("~/state/session"), async (original) => {
+  const actual = await original();
+  const reactivity = await import("effect/reactivity");
+  const signedOut = reactivity.Atom.make(reactivity.AsyncResult.initial<AuthSessionState>());
+  return {
+    ...actual,
+    environmentSession: { ...actual.environmentSession, sessionStateAtom: () => signedOut },
+    readEnvironmentScope: () => true,
+  };
+});
+vi.mock(import("./projectFilesQueryState"), async (original) => ({
+  ...(await original()),
+  useProjectFileScope: () => state.scope!,
+}));
 
 import { WorkspaceContext } from "~/workspaceContext";
 import { changeFileSaveSession, useFileSaveSession, type FileSaveTarget } from "./fileSaveSessions";

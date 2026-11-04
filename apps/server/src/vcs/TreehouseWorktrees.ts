@@ -5,7 +5,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
@@ -97,7 +97,7 @@ const make = Effect.gen(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const settings = yield* ServerSettings.ServerSettingsService;
   const leases = yield* TreehouseLeases.TreehouseLeaseStore.pipe(
     Effect.provide(TreehouseLeases.layer),
@@ -182,7 +182,7 @@ const make = Effect.gen(function* () {
         command: "git",
         args: ["rev-parse", "--verify", "--end-of-options", `${input.refName}^{commit}`],
       });
-      const holder = `t3-code:${Hex.encode(yield* crypto.randomBytes(16))}`;
+      const holder = `t3-code:${Hex.encode(yield* random.randomBytes(16))}`;
       // --base accepts branch names only. Acquire detached, then let Git interpret the exact caller ref.
       const stdout = yield* run({
         cwd: input.cwd,

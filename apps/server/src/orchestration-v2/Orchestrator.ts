@@ -5526,7 +5526,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : latest.status === "completed" && latest.ordinal === source.ordinal + 1);
       if (
         !current ||
-        projection.runs.some(isBlockingRun) ||
+        projection.runs.some(isActiveRun) ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.settledOverride === "settled" ||

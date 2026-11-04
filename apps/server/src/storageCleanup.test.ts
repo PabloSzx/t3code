@@ -48,11 +48,11 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { storageCleanupPullRequestMerged } from "./storageCleanup.ts";
 import {
-  worktreeActivityAt as storageCleanupActivityAt,
-  worktreeThreadIdle as storageCleanupThreadIdle,
-} from "./workspace/worktreeThreads.ts";
+  storageCleanupPullRequestMerged,
+  storageCleanupActivityAt,
+  storageCleanupThreadIdle,
+} from "./storageCleanup.ts";
 
 const NOW_MS = Date.parse("2026-06-10T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1_000;

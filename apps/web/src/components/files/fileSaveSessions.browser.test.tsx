@@ -49,8 +49,7 @@ vi.mock(import("~/state/session"), async (original) => {
     readEnvironmentScope: () => true,
   };
 });
-vi.mock(import("./projectFilesQueryState"), async (original) => ({
-  ...(await original()),
+vi.mock(import("./projectFilesQueryState"), () => ({
   useProjectFileScope: () => state.scope!,
 }));
 

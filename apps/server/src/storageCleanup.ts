@@ -482,7 +482,7 @@ const make = Effect.gen(function* () {
     const sessions = yield* Effect.forEach(rows, (row) => decodeCleanupSession(row.payload_json));
     return sessions.filter((session) => {
       const cwd = path.resolve(session.cwd);
-      return cwd === worktreePath || inside(worktreePath, cwd);
+      return pathKey(cwd) === pathKey(worktreePath) || inside(worktreePath, cwd);
     });
   });
 

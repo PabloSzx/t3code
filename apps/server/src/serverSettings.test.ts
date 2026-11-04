@@ -46,7 +46,7 @@ const decodeServerSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch
 const layerServerSettings = (policy?: ManagedPolicyDocument) =>
   ServerSettingsModule.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
-    Layer.provide(ManagedPolicy.layerTest(policy)),
+    Layer.provideMerge(ManagedPolicy.layerTest(policy)),
     Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
     Layer.provideMerge(
       Layer.fresh(

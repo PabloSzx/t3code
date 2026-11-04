@@ -169,7 +169,7 @@ it.live(
           ),
         ),
       );
-      using realpath = vi.spyOn(NodeFSP, "realpath").mockResolvedValue(f.path.join(f.slot, "file"));
+      using realpath = vi.spyOn(NodeFSP, "realpath");
       const result = yield* files
         .readFile({ cwd: networkRoot, relativePath: `${networkRoot}\\file` })
         .pipe(Effect.result);
@@ -184,14 +184,16 @@ it.live(
       expect(realpath).not.toHaveBeenCalled();
       const nativeFile = f.path.join(f.root, "network-native.txt");
       yield* f.fs.writeFileString(nativeFile, "native network stand-in");
-      realpath.mockResolvedValue(nativeFile);
+      realpath.mockResolvedValueOnce(nativeFile);
       expect(
         (yield* files.readFile({
           cwd: "\\\\native.test\\share",
           relativePath: "\\\\native.test\\share\\file",
         })).contents,
       ).toBe("native network stand-in");
-      expect(realpath).toHaveBeenCalledExactlyOnceWith("\\\\native.test\\share\\file");
+      expect(realpath.mock.calls.filter(([target]) => isNetworkPath(String(target)))).toEqual([
+        ["\\\\native.test\\share\\file"],
+      ]);
     }).pipe(Effect.provide(treehouseTestLayer)),
 );
 

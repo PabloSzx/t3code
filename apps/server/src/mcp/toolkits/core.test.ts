@@ -63,10 +63,6 @@ import * as WorktreeHandlers from "./worktree/handlers.ts";
 import { WorktreeToolkit } from "./worktree/tools.ts";
 import * as McpToolAccess from "../McpToolAccess.ts";
 import * as WorktreeMcpService from "../WorktreeMcpService.ts";
-import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
-import * as GitManager from "../../git/GitManager.ts";
-import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
-import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import {
   accessFixture,
   testLayer as treehouseLayer,
@@ -134,7 +130,10 @@ it.live(
         branch: "access-owner",
       };
       const dependencies = Layer.mergeAll(
-        Layer.mock(WorktreeMcpService.WorktreeMcpService)({}),
+        Layer.mock(WorktreeMcpService.WorktreeMcpService)({
+          listRefs: ({ worktreePath, workspaceRoot, ...refs }) =>
+            f.driver.listRefs({ ...refs, cwd: worktreePath ?? workspaceRoot }),
+        }),
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell: (id) =>
             Effect.succeed(
@@ -147,11 +146,6 @@ it.live(
           getById: () =>
             Effect.succeedSome({ id: target.projectId, workspaceRoot: f.cwd } as ProjectRecord),
         }),
-        GitWorkflowService.layer.pipe(
-          Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
-          Layer.provide(GitVcsDriver.layer),
-          Layer.provide(Layer.mock(GitManager.GitManager)({})),
-        ),
       );
       const toolkit = yield* WorktreeToolkit.pipe(
         Effect.provide(

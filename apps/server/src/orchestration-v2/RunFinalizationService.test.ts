@@ -149,7 +149,9 @@ it.effect.each(
 it.effect("returns from the post-turn refresh without waiting for the PR lookup", () => {
   const threadId = ThreadId.make("thread-slow-forge");
   const runId = RunId.make("completed-run");
+  const lookupStarted = Deferred.makeUnsafe<void>();
   const layer = RunFinalization.layerObserver.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),
@@ -166,7 +168,8 @@ it.effect("returns from the post-turn refresh without waiting for the PR lookup"
               hasWorkingTreeChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
-          refreshPullRequestStatus: () => Effect.never,
+          refreshPullRequestStatus: () =>
+            Deferred.succeed(lookupStarted, undefined).pipe(Effect.andThen(Effect.never)),
         }),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThreadShell: () =>
@@ -184,6 +187,7 @@ it.effect("returns from the post-turn refresh without waiting for the PR lookup"
     const refresh = yield* observer
       .refresh({ cwd: "/repo", threadId, runId })
       .pipe(Effect.timeoutOption("1 minute"), Effect.forkChild({ startImmediately: true }));
+    yield* Deferred.await(lookupStarted);
     yield* TestClock.adjust("1 minute");
     const result = yield* Fiber.join(refresh);
     assert.isTrue(
@@ -200,6 +204,7 @@ it.effect("replaces a still-running PR lookup when a newer turn finishes", () =>
   const secondLookedUp = Deferred.makeUnsafe<void>();
   let lookups = 0;
   const layer = RunFinalization.layerObserver.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(WorkspaceEntries.WorkspaceEntries)({ refresh: () => Effect.void }),

@@ -566,6 +566,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly attemptId: RunAttemptId;
   readonly providerTurnOrdinal: number;
   readonly nativeThreadHasTurns?: boolean;
+  readonly recoveredMessages?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnMessage>;
   readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
     ReadonlyArray<InheritedBackgroundTurnItemRoute>,
     unknown
@@ -1706,6 +1707,9 @@ export const layer: Layer.Layer<
             : {
                 restartContinuationOfRunId: input.run.restartContinuationOfRunId,
               }),
+          ...(input.recoveredMessages === undefined
+            ? {}
+            : { recoveredMessages: input.recoveredMessages }),
           attemptId: input.attemptId,
           rootNodeId: input.rootNode.id,
           providerThread: input.providerThread,

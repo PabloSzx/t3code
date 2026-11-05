@@ -7,7 +7,7 @@ extensions, skills, context files, and native session history.
 
 1. Install [Pi](https://pi.dev) on the machine running the T3 Code server. Pi requires Node.js
    22.19 or newer; its platform installers can install Node if needed. T3 Code supports Pi
-   0.80.5 or newer.
+   0.80.5 or newer. Live steering and restart recovery require Pi 1.5.0 or newer.
 2. Run `pi` in a terminal, then `/login` to connect your model provider or configure its API key.
 3. Open T3 Code Settings, enable Pi, and refresh the provider.
 
@@ -45,12 +45,23 @@ dialogs appear in the T3 Code composer, and the composer context meter follows P
 reporting while a response streams and after it settles.
 
 Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
-loads for the current workspace; selecting one uses Pi's native skill expansion.
+loads for the current workspace. Selecting one adds the loaded skill's instructions to your message.
 
 Pi loads its normal user extensions, and project extensions once the folder is trusted in Pi.
 Blocking `select`, `confirm`, `input`, and `editor` dialogs work in T3 Code. Notifications appear in
 the work log. Pi terminal decoration such as titles, status lines, and widgets does not have a T3
 Code equivalent.
+
+## Steering and restart recovery
+
+When T3 Code resumes a turn after a server restart, it recovers that turn's ordinary steering
+messages. Recovery checks Pi's saved history and delivers messages that have not been recorded
+or cancelled. Messages already recorded in native history do not repeat.
+
+These steers use Pi's custom-message handling. Pi's `input` hooks and native prompt-template
+expansion do not run on them. T3 Code skill chips still work. Slash commands keep their existing
+handling and are not automatically replayed. Steering images retain their uploaded bytes rather
+than using Pi's idle-prompt image normalization.
 
 ## Permission Modes
 

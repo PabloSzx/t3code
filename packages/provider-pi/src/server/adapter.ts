@@ -72,6 +72,7 @@ import {
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import { PI_T3_INPUT_COMMAND, PI_T3_INPUT_MESSAGE_TYPE } from "./inputDeliveryProtocol.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -113,6 +114,7 @@ const PiProviderCapabilitiesV2 = {
     emitsTurnCompleted: true,
     supportsInterrupt: true,
     supportsActiveSteering: true,
+    supportsDurableSteering: true,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
@@ -353,6 +355,8 @@ interface ActivePiTurn {
   readonly streamItems: Map<string, PiStreamItemState>;
   readonly toolArgs: Map<string, unknown>;
   readonly toolStartedAt: Map<string, DateTime.Utc>;
+  // Pi's pendingMessageCount excludes custom messages and deferred settled actions.
+  readonly pendingInputIds: Set<string>;
   interrupted: boolean;
   nativeAborted: boolean;
   sawAgentActivity: boolean;
@@ -402,15 +406,49 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
 /** Pi 1.4.0 rejects prompts with this when they race a compaction it already started. */
 const PI_COMPACTING_PROMPT_REJECTION = "Cannot submit a prompt while compaction is in progress";
 
+const PiInputDeliveryStatus = Schema.Literals(["queued", "recorded", "cancelled"]);
+const PiInputAcceptance = Schema.Struct({
+  inputId: Schema.NonEmptyString,
+  status: Schema.Union([PiInputDeliveryStatus, Schema.Literal("busy")]),
+});
+const PiInputStatuses = Schema.Struct({
+  statuses: Schema.Array(
+    Schema.Struct({
+      inputId: Schema.NonEmptyString,
+      status: Schema.Union([PiInputDeliveryStatus, Schema.Literal("unknown")]),
+    }),
+  ),
+});
+
+const decodePiInputAcceptance = Schema.decodeUnknownEffect(PiInputAcceptance);
+const decodePiInputStatuses = Schema.decodeUnknownEffect(PiInputStatuses);
+
+interface PiPromptPayload {
+  readonly message: string;
+  readonly images: ReadonlyArray<{
+    readonly type: "image";
+    readonly data: string;
+    readonly mimeType: string;
+  }>;
+}
+
+interface PiDeliveryInput {
+  readonly inputId: string;
+  readonly payload: PiPromptPayload;
+}
+
 interface PiPromptSend {
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly kind: "turn_start" | "steer";
   readonly record: PiRpcRecord;
+  readonly inputDelivery?: PiDeliveryInput;
+  readonly recoveredInputs?: ReadonlyArray<PiDeliveryInput>;
 }
 
 interface PiThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActivePiTurn | null;
+  readonly durableInputDelivery: boolean;
 }
 
 interface PiWake {
@@ -583,13 +621,70 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // after it; they precede every prompt held since.
       let rejectedHeldCount = 0;
 
-      const sendPrompt = Effect.fnUntraced(function* (prompt: PiPromptSend) {
-        if (nativeCompacting) {
-          heldPrompts.push(prompt);
-          return;
+      const trySendPrompt = Effect.fnUntraced(function* (prompt: PiPromptSend) {
+        for (const recovered of prompt.recoveredInputs ?? []) {
+          const status = yield* deliverInput({ ...recovered, mode: "restore" });
+          if (status === "busy") return false;
         }
-        yield* connection.send(prompt.record);
-        pendingPromptResponses.push(prompt);
+        if (prompt.inputDelivery !== undefined) {
+          const status = yield* deliverInput({ ...prompt.inputDelivery, mode: "steer" });
+          if (status === "busy") return false;
+          const turn = threadState?.activeTurn;
+          if (turn?.providerTurn.id === prompt.providerTurnId) {
+            if (status === "queued") turn.pendingInputIds.add(prompt.inputDelivery.inputId);
+            else turn.pendingInputIds.delete(prompt.inputDelivery.inputId);
+          }
+          yield* Queue.offer(connection.events, {
+            type: "t3.delivery_ack",
+            providerTurnId: prompt.providerTurnId,
+          });
+        } else {
+          yield* connection.send(prompt.record);
+          pendingPromptResponses.push(prompt);
+        }
+        return true;
+      });
+      // Keep the transferring head visible to Stop, along with every later held input.
+      const flushHeldPrompts = Effect.fnUntraced(function* () {
+        let released: OrchestrationV2ProviderTurn["id"] | null = null;
+        while (heldPrompts.length > 0) {
+          const prompt = heldPrompts[0];
+          if (prompt === undefined) break;
+          const turn = threadState?.activeTurn;
+          if (
+            turn?.providerTurn.id !== prompt.providerTurnId ||
+            turn.interrupted ||
+            stopRequested
+          ) {
+            heldPrompts.shift();
+            continue;
+          }
+          if (
+            nativeCompacting ||
+            (prompt.inputDelivery !== undefined &&
+              !turn.sawAgentActivity &&
+              pendingPromptResponses.some(
+                (pending) =>
+                  pending.providerTurnId === prompt.providerTurnId && pending.kind === "turn_start",
+              ))
+          )
+            break;
+          const sent = yield* trySendPrompt(prompt).pipe(
+            Effect.tapError(() =>
+              Effect.sync(() => {
+                heldPrompts.shift();
+              }),
+            ),
+          );
+          if (!sent) break;
+          heldPrompts.shift();
+          released = prompt.providerTurnId;
+        }
+        return released;
+      });
+      const sendPrompt = Effect.fnUntraced(function* (prompt: PiPromptSend) {
+        heldPrompts.push(prompt);
+        yield* flushHeldPrompts();
       });
       // A just-released prompt has not started its run yet, so a settle probe
       // racing it would see Pi idle. Its ack re-arms the probe instead.
@@ -1276,8 +1371,34 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
-      // Abort leaves queued steers and follow-ups for Pi's next prompt, and Pi before 0.86 starts them
-      // as soon as abort lands, so Stop clears them first. Pi before 0.84.4 rejects clear_queue.
+      const cancelInputDelivery = Effect.fn("PiAdapter.cancelInputDelivery")(function* (
+        turn: ActivePiTurn,
+      ) {
+        if (threadState?.durableInputDelivery !== true) return true;
+        const inputIds = [
+          ...turn.pendingInputIds,
+          ...heldPrompts
+            .filter((prompt) => prompt.providerTurnId === turn.providerTurn.id)
+            .flatMap((prompt) => [
+              ...(prompt.inputDelivery === undefined ? [] : [prompt.inputDelivery.inputId]),
+              ...(prompt.recoveredInputs ?? []).map((entry) => entry.inputId),
+            ]),
+        ];
+        const cancelled = yield* bridgeRequest({
+          args: { operation: "cancel", inputIds },
+          timeoutMs: 2_000,
+        }).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (!cancelled) {
+          stopRequested = true;
+          yield* connection.terminate;
+        }
+        return cancelled;
+      });
+
+      // Abort leaves queued steers for Pi's next prompt; older versions start them as soon as abort lands.
       const clearNativeQueue = Effect.fnUntraced(function* (turn: ActivePiTurn) {
         const cleared = yield* request({ type: "clear_queue" }, 2_000).pipe(
           Effect.map((data) =>
@@ -1811,6 +1932,20 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
+            if (
+              recordString(message, "role") === "custom" &&
+              recordString(message, "customType") === PI_T3_INPUT_MESSAGE_TYPE
+            ) {
+              const inputId = recordString(recordField(message, "details"), "inputId");
+              if (
+                inputId !== undefined &&
+                turn.pendingInputIds.delete(inputId) &&
+                turn.pendingInputIds.size === 0 &&
+                turn.settleWhenIdle
+              )
+                yield* scheduleSettleProbe(turn, true);
+              return;
+            }
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
@@ -2106,6 +2241,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }
             return;
           }
+          case "t3.delivery_ack": {
+            if (
+              turn !== null &&
+              turn.providerTurn.id === event["providerTurnId"] &&
+              turn.settleWhenIdle
+            )
+              yield* scheduleSettleProbe(turn, true);
+            return;
+          }
           case "t3.ui_request_expired": {
             const requestId = recordString(event, "requestId");
             if (requestId === undefined) return;
@@ -2157,6 +2301,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               return;
             }
             if (
+              turn.pendingInputIds.size === 0 &&
+              !heldPrompts.some((prompt) => prompt.providerTurnId === turn.providerTurn.id) &&
               recordField(data, "isStreaming") !== true &&
               recordField(data, "isCompacting") !== true &&
               (recordNumber(data, "pendingMessageCount") ?? 0) === 0
@@ -2179,27 +2325,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               // Tracked here rather than in handleSessionEvent, which also
               // replays buffered wake events after they were observed.
               if (event["type"] === "compaction_start") nativeCompacting = true;
-              if (event["type"] === "compaction_end") {
-                nativeCompacting = false;
-                // Send before the handler can probe settlement, so Pi sees the
-                // prompt first. Prompts whose turn ended or is stopping are dropped.
+              if (event["type"] === "compaction_end") nativeCompacting = false;
+              const promptResponse = event["type"] === "response" && event["command"] === "prompt";
+              const handleFirst = event["type"] === "agent_start" || promptResponse;
+              if (handleFirst) yield* handleSessionEvent(event);
+              if (
+                !nativeCompacting &&
+                (promptResponse ||
+                  ["compaction_end", "agent_start", "agent_settled"].includes(
+                    String(event["type"]),
+                  ))
+              ) {
                 rejectedHeldCount = 0;
-                for (const held of heldPrompts.splice(0)) {
-                  const turn = threadState?.activeTurn;
-                  if (
-                    turn?.providerTurn.id !== held.providerTurnId ||
-                    turn.interrupted ||
-                    stopRequested
-                  )
-                    continue;
-                  yield* sendPrompt(held);
-                  releasedPromptTurnId = held.providerTurnId;
-                }
+                releasedPromptTurnId = yield* flushHeldPrompts();
               }
-              yield* handleSessionEvent(event).pipe(
-                Effect.ensuring(Effect.sync(() => (releasedPromptTurnId = null))),
-              );
-            }),
+              if (!handleFirst) yield* handleSessionEvent(event);
+            }).pipe(Effect.ensuring(Effect.sync(() => (releasedPromptTurnId = null)))),
           );
         }
       }).pipe(
@@ -2378,7 +2519,20 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 createdAt,
                 updatedAt: createdAt,
               };
-        threadState = { providerThread, activeTurn: null };
+        const commandData = yield* request({ type: "get_commands" }).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const commands = recordField(commandData, "commands");
+        const durableInputDelivery =
+          Array.isArray(commands) &&
+          commands.some(
+            (command) =>
+              recordString(command, "name") === PI_T3_INPUT_COMMAND &&
+              recordString(command, "description") === "T3 input delivery protocol v1" &&
+              recordString(recordField(command, "sourceInfo"), "path")?.replaceAll("\\", "/") ===
+                extensionPath.replaceAll("\\", "/"),
+          );
+        threadState = { providerThread, activeTurn: null, durableInputDelivery };
         const baselineEntries = yield* request({ type: "get_entries" }).pipe(
           Effect.orElseSucceed(() => undefined),
         );
@@ -2473,6 +2627,85 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
         }
         return { message, images };
+      });
+
+      const requireDurableInputDelivery = Effect.suspend(() =>
+        threadState?.durableInputDelivery === true
+          ? Effect.void
+          : Effect.fail(
+              new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: PI_PROVIDER,
+                detail:
+                  "Durable steering requires Pi 1.5.0 or newer and the current T3 integration bridge",
+                reason: "durable_input_unsupported",
+              }),
+            ),
+      );
+
+      const bridgeRequest = Effect.fn("PiAdapter.bridgeRequest")(function* ({
+        args,
+        timeoutMs = PI_REQUEST_TIMEOUT_MS,
+      }: {
+        readonly args: PiRpcRecord;
+        readonly timeoutMs?: number;
+      }) {
+        yield* requireDurableInputDelivery;
+        return yield* connection.requestExtensionCommand({
+          command: PI_T3_INPUT_COMMAND,
+          args: { ...args, nativeThreadId: threadState?.providerThread.nativeThreadRef?.nativeId },
+          timeoutMs,
+        });
+      });
+
+      const deliverInput = Effect.fn("PiAdapter.deliverInput")(function* ({
+        inputId,
+        payload,
+        mode,
+      }: PiDeliveryInput & { readonly mode: "steer" | "restore" }) {
+        const data = yield* bridgeRequest({
+          args: {
+            operation: "deliver",
+            inputId,
+            text: payload.message,
+            images: payload.images,
+            mode,
+          },
+        });
+        const accepted = yield* decodePiInputAcceptance(data).pipe(
+          Effect.mapError(() => protocolError("Pi returned an invalid input acceptance")),
+        );
+        if (accepted.inputId !== inputId)
+          return yield* protocolError("Pi acknowledged a different input ID");
+        return accepted.status;
+      });
+
+      const prepareRecoveredInputs = Effect.fn("PiAdapter.prepareRecoveredInputs")(function* (
+        messages: ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnMessage>,
+      ) {
+        const candidates = messages.filter((message) => !message.text.trimStart().startsWith("/"));
+        if (candidates.length === 0) return [];
+        yield* requireDurableInputDelivery;
+        const inputIds = candidates.map((message) => message.messageId);
+        const data = yield* bridgeRequest({ args: { operation: "status", inputIds } });
+        const decoded = yield* decodePiInputStatuses(data).pipe(
+          Effect.mapError(() => protocolError("Pi returned invalid input delivery states")),
+        );
+        const statuses = new Map(decoded.statuses.map(({ inputId, status }) => [inputId, status]));
+        if (
+          statuses.size !== inputIds.length ||
+          decoded.statuses.length !== inputIds.length ||
+          inputIds.some((id) => !statuses.has(id))
+        ) {
+          return yield* protocolError("Pi did not identify every recovery input exactly once");
+        }
+        const missing = candidates.filter(
+          (message) => statuses.get(message.messageId) === "unknown",
+        );
+        return yield* Effect.forEach(missing, (message) =>
+          resolvePromptPayload(message.text, message.attachments).pipe(
+            Effect.map((payload) => ({ inputId: message.messageId, payload })),
+          ),
+        );
       });
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
@@ -2579,6 +2812,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               !continuation && compactCommand === null
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
+            const recoveredInputs = yield* prepareRecoveredInputs(
+              turnInput.recoveredMessages ?? [],
+            );
             const startedAt = yield* DateTime.now;
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
@@ -2605,6 +2841,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               streamItems: new Map(),
               toolArgs: new Map(),
               toolStartedAt: new Map(),
+              pendingInputIds: new Set(),
               interrupted: false,
               nativeAborted: false,
               sawAgentActivity: false,
@@ -2653,6 +2890,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 yield* sendPrompt({
                   providerTurnId: providerTurn.id,
                   kind: "turn_start",
+                  recoveredInputs,
                   record: {
                     type: "prompt",
                     message: payload.message,
@@ -2718,7 +2956,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         steerTurn: Effect.fn("PiAdapter.steerTurn")(
           function* (steerInput: ProviderAdapter.ProviderAdapterV2SteerInput) {
             const turn = threadState?.activeTurn ?? null;
-            if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
+            if (
+              turn === null ||
+              turn.interrupted ||
+              stopRequested ||
+              turn.providerTurn.id !== steerInput.providerTurnId
+            ) {
               return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
             }
             yield* requireLaunchMcpSession(steerInput.threadId);
@@ -2734,7 +2977,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // /compact uses its RPC, which aborts the agent first.
             yield* sessionEventPermit.withPermits(1)(
               Effect.gen(function* () {
-                if (threadState?.activeTurn !== turn) {
+                if (threadState?.activeTurn !== turn || turn.interrupted || stopRequested) {
                   return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
                 }
                 if (compactCommand !== null) {
@@ -2745,9 +2988,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     kind: "steer",
                   });
                 } else if (payload !== null) {
+                  const durable = !steerInput.message.text.trimStart().startsWith("/");
+                  if (durable) yield* requireDurableInputDelivery;
                   yield* sendPrompt({
                     providerTurnId: turn.providerTurn.id,
                     kind: "steer",
+                    ...(durable
+                      ? { inputDelivery: { inputId: steerInput.message.messageId, payload } }
+                      : {}),
                     record: {
                       type: "prompt",
                       message: payload.message,
@@ -2785,6 +3033,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               return yield* protocolError(`Pi turn ${interruptInput.providerTurnId} is not active`);
             }
             turn.interrupted = true;
+            if (!(yield* cancelInputDelivery(turn))) return;
             if (
               interruptInput.requestRuntimeRestart === true ||
               turn.settleWhenIdle ||
@@ -2914,7 +3163,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const threadId = state.providerThread.appThreadId ?? input.threadId;
             const messages = (Array.isArray(activeMessages) ? activeMessages : []).flatMap(
               (message, index) => {
-                const role = recordString(message, "role");
+                const nativeRole = recordString(message, "role");
+                const role =
+                  nativeRole === "custom" &&
+                  recordString(message, "customType") === PI_T3_INPUT_MESSAGE_TYPE
+                    ? "user"
+                    : nativeRole;
                 if (role !== "user" && role !== "assistant") return [];
                 const text = contentText(recordField(message, "content"));
                 if (text.length === 0) return [];

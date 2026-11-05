@@ -74,6 +74,8 @@ const CODEX_GOAL_VALIDATION_MESSAGE =
 const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
   previous_turn_active: "the previous turn is still running",
   attachment_unreadable: "an attachment could not be read",
+  durable_input_unsupported:
+    "durable steering requires Pi 1.5.0 or newer and the current T3 integration bridge",
 };
 
 /**

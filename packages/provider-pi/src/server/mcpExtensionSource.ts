@@ -1,5 +1,10 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  PI_T3_INPUT_COMMAND,
+  PI_T3_INPUT_MESSAGE_TYPE,
+  PI_T3_INPUT_REPLY_PREFIX,
+} from "./inputDeliveryProtocol.ts";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -12,7 +17,7 @@ export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
 
 export const PI_T3_MCP_EXTENSION_SOURCE = `\
-import { stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { VERSION, stripFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { Type } from "typebox";
@@ -25,6 +30,17 @@ const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRU
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
+const INPUT_COMMAND = ${JSON.stringify(PI_T3_INPUT_COMMAND)};
+const INPUT_MESSAGE_TYPE = ${JSON.stringify(PI_T3_INPUT_MESSAGE_TYPE)};
+const INPUT_REPLY_PREFIX = ${JSON.stringify(PI_T3_INPUT_REPLY_PREFIX)};
+
+function deliveryRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function deliveryId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
 
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 
@@ -257,13 +273,13 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
 
   // Keep skill chips in the request. Pi expands only one leading /skill:
   // command, so use its own frontmatter loader for every selected chip here.
-  pi.on("input", async (event, ctx) => {
-    if (!event.text.includes("$")) return;
+  const expandSkillChips = async (text: string, ctx: ExtensionContext) => {
+    if (!text.includes("$")) return text;
     const commands = pi.getCommands().filter((command) => command.source === "skill");
-    const nativeSkill = /^\\/skill:([^ ]+)(?: |$)/.exec(event.text)?.[1];
+    const nativeSkill = /^\\/skill:([^ ]+)(?: |$)/.exec(text)?.[1];
     const seen = new Set<string>(nativeSkill === undefined ? [] : [nativeSkill]);
     const blocks: string[] = [];
-    for (const match of event.text.matchAll(/(^|\\s)\\$([^\\s]+)(?=\\s|$)/g)) {
+    for (const match of text.matchAll(/(^|\\s)\\$([^\\s]+)(?=\\s|$)/g)) {
       const name = match[2];
       if (name === undefined || seen.has(name)) continue;
       const command = commands.find((candidate) => candidate.name === "skill:" + name);
@@ -279,13 +295,97 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
         ctx.ui.notify(\`Could not load skill \${name} from \${path}.\`, "error");
       }
     }
-    if (blocks.length === 0) return;
-    return {
-      action: "transform",
-      text: event.text + "\\n\\n" + blocks.join("\\n\\n"),
-      images: event.images,
-    };
+    return blocks.length === 0 ? text : text + "\\n\\n" + blocks.join("\\n\\n");
+  };
+  pi.on("input", async (event, ctx) => {
+    const text = await expandSkillChips(event.text, ctx);
+    if (text === event.text) return;
+    return { action: "transform", text, images: event.images };
   });
+
+  // Custom messages carry receipts outside model text; ordinary input hooks do not run on this path.
+  const version = typeof VERSION === "string" ? /^(\\d+)\\.(\\d+)\\./.exec(VERSION) : null;
+  if (version !== null && (Number(version[1]) > 1 || (Number(version[1]) === 1 && Number(version[2]) >= 5)) &&
+      typeof pi.registerCommand === "function" && typeof pi.sendMessage === "function") {
+    const queued = new Set<string>();
+    const cancelled = new Set<string>();
+    let generation = 0;
+    pi.registerCommand(INPUT_COMMAND, {
+      description: "T3 input delivery protocol v1",
+      handler: async (args, ctx) => {
+        let requestId: string | undefined;
+        let pendingInputId: string | undefined;
+        const reply = (response: Record<string, unknown>) =>
+          ctx.ui.notify(INPUT_REPLY_PREFIX + JSON.stringify({ requestId, ...response }), "info");
+        try {
+          const value: unknown = JSON.parse(args);
+          if (!deliveryRecord(value) || !deliveryId(value.requestId)) throw new Error("Invalid delivery request");
+          requestId = value.requestId;
+          const nativeThreadId = ctx.sessionManager.getSessionFile();
+          if (nativeThreadId === undefined || value.nativeThreadId !== nativeThreadId)
+            throw new Error("Delivery requested for a different native session");
+          const recorded = new Set<string>();
+          for (const entry of ctx.sessionManager.getEntries()) {
+            if (entry.type === "custom" && entry.customType === INPUT_MESSAGE_TYPE + "-cancelled") {
+              const data: unknown = entry.data;
+              if (!deliveryRecord(data) || !Array.isArray(data.inputIds) || !data.inputIds.every(deliveryId)) throw new Error("Invalid native cancellation receipt");
+              for (const id of data.inputIds) cancelled.add(id);
+            }
+            if (entry.type !== "custom_message" || entry.customType !== INPUT_MESSAGE_TYPE) continue;
+            const details: unknown = entry.details;
+            if (!deliveryRecord(details) || !deliveryId(details.inputId)) throw new Error("Invalid native delivery receipt");
+            recorded.add(details.inputId);
+            queued.delete(details.inputId);
+          }
+          const status = (id: string) => recorded.has(id) ? "recorded" : cancelled.has(id) ? "cancelled" : queued.has(id) ? "queued" : "unknown";
+          if (value.operation === "status") {
+            if (!Array.isArray(value.inputIds) || !value.inputIds.every(deliveryId)) throw new Error("Invalid delivery identities");
+            reply({ success: true, data: { statuses: value.inputIds.map((inputId) => ({ inputId, status: status(inputId) })) } });
+            return;
+          }
+          if (value.operation === "cancel") {
+            generation += 1;
+            const heldIds: unknown = value.inputIds ?? [];
+            if (!Array.isArray(heldIds) || !heldIds.every(deliveryId)) throw new Error("Invalid cancellation identities");
+            const inputIds = [...new Set([...queued, ...heldIds])].filter((id) => !recorded.has(id));
+            for (const id of inputIds) cancelled.add(id);
+            queued.clear();
+            if (inputIds.length > 0) pi.appendEntry(INPUT_MESSAGE_TYPE + "-cancelled", { inputIds });
+            reply({ success: true, data: {} });
+            return;
+          }
+          if (value.operation !== "deliver" || !deliveryId(value.inputId) || typeof value.text !== "string" ||
+              (value.mode !== "steer" && value.mode !== "restore") || !Array.isArray(value.images) ||
+              !value.images.every((image) => deliveryRecord(image) && image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string"))
+            throw new Error("Invalid delivery payload");
+          const inputId = value.inputId;
+          const existing = status(inputId);
+          if (existing !== "unknown") { reply({ success: true, data: { inputId, status: existing } }); return; }
+          if (!ctx.isIdle() && (value.mode === "restore" || ctx.signal === undefined)) { reply({ success: true, data: { inputId, status: "busy" } }); return; }
+          const acceptedGeneration = generation;
+          pendingInputId = inputId;
+          queued.add(inputId);
+          const text = await expandSkillChips(value.text, ctx);
+          if (generation !== acceptedGeneration) { reply({ success: true, data: { inputId, status: "cancelled" } }); return; }
+          if (ctx.sessionManager.getSessionFile() !== nativeThreadId) throw new Error("Native session changed during input preparation");
+          if (!ctx.isIdle() && (value.mode === "restore" || ctx.signal === undefined)) { queued.delete(inputId); reply({ success: true, data: { inputId, status: "busy" } }); return; }
+          const content: ModelContent[] = [{ type: "text", text }];
+          for (const image of value.images) {
+            if (deliveryRecord(image) && typeof image.data === "string" && typeof image.mimeType === "string")
+              content.push({ type: "image", data: image.data, mimeType: image.mimeType });
+          }
+          pi.sendMessage({ customType: INPUT_MESSAGE_TYPE, content, display: true, details: { inputId } },
+            { deliverAs: "steer", triggerTurn: value.mode === "steer" });
+          const appended = ctx.sessionManager.getEntries().some((entry) => entry.type === "custom_message" && entry.customType === INPUT_MESSAGE_TYPE && deliveryRecord(entry.details) && entry.details.inputId === inputId);
+          if (value.mode === "restore" && !appended) { queued.delete(inputId); throw new Error("Pi did not record the restored input"); }
+          reply({ success: true, data: { inputId, status: appended ? "recorded" : "queued" } });
+        } catch {
+          if (pendingInputId !== undefined) queued.delete(pendingInputId);
+          reply({ success: false, error: "T3 input delivery failed" });
+        }
+      },
+    });
+  }
 
   // Workaround for an upstream Pi context-budgeting bug: pi-ai reuses the
   // previous response's usage even when a fork's instructions/tools differ,

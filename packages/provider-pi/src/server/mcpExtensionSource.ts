@@ -39,7 +39,7 @@ function deliveryRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function deliveryId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 256;
+  return typeof value === "string" && value.length > 0;
 }
 
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";

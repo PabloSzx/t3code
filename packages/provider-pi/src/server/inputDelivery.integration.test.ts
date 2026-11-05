@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeVM from "node:vm";
 import { assert, it } from "@effect/vitest";
+import { MessageId } from "@t3tools/contracts";
 import * as Pi from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, type TranscriptContext } from "@earendil-works/pi-ai";
 import { registerFauxProvider, streamSimple } from "@earendil-works/pi-ai/compat";
@@ -179,7 +180,11 @@ it("recovers queued IDs before continuation and never duplicates recorded identi
     firstRun = first.session.prompt("Start");
     await reachedModel.promise;
     const messages = [
-      { inputId: "same-question-a", text: "Does this simplify it? $alpha", images: [image] },
+      {
+        inputId: MessageId.make(`message:thread:${"nested%3A".repeat(40)}:same-question-a`),
+        text: "Does this simplify it? $alpha",
+        images: [image],
+      },
       { inputId: "same-question-b", text: "Does this simplify it? $alpha", images: [] },
     ];
     for (const message of messages) {

@@ -20,21 +20,13 @@ function frameField(frame: unknown, key: string): unknown {
   return typeof frame === "object" && frame !== null ? Reflect.get(frame, key) : undefined;
 }
 
-/** Pi queues prompt streamingBehavior "steer" into the running turn without interruption or a second turn. */
+/** Bridge steering stays in the running Pi turn without interruption or a second provider turn. */
 export function assertPiMessageSteeringOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
 ) {
   const outbound = transcript.entries.flatMap((entry) =>
     entry.type === "expect_outbound" ? [entry.frame] : [],
-  );
-  const prompts = outbound.filter((frame) => frameField(frame, "type") === "prompt");
-  assert.deepEqual(
-    prompts.map((frame) => [frameField(frame, "message"), frameField(frame, "streamingBehavior")]),
-    [
-      [MESSAGE_STEERING_INITIAL_PROMPT, "steer"],
-      [MESSAGE_STEERING_STEER_PROMPT, "steer"],
-    ],
   );
   assert.isFalse(
     outbound.some((frame) => frameField(frame, "type") === "abort"),

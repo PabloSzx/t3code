@@ -4,6 +4,7 @@ import {
   CheckpointId,
   ChatAttachmentId,
   EnvironmentId,
+  MessageId,
   NodeId,
   ProviderInstanceId,
   ProviderSessionId,
@@ -51,7 +52,12 @@ import {
   PI_PROVIDER,
   type PiAdapterV2Options,
 } from "./adapter.ts";
-import { makePiRpcConnection, type PiRpcRecord } from "./rpc.ts";
+import { makePiRpcConnection, piRecordString, type PiRpcRecord } from "./rpc.ts";
+import {
+  PI_T3_INPUT_COMMAND,
+  PI_T3_INPUT_MESSAGE_TYPE,
+  PI_T3_INPUT_REPLY_PREFIX,
+} from "./inputDeliveryProtocol.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
 
@@ -171,6 +177,10 @@ interface FakePi {
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   readonly queueStats: (data: unknown) => void;
+  readonly queueInputStatuses: (data: unknown) => void;
+  readonly setDeliverySupport: (supported: boolean | "foreign") => void;
+  readonly takeDelivery: (operation: string) => Effect.Effect<PiRpcRecord>;
+  readonly deferNextDelivery: () => void;
   /** Pi before 0.84.4 answers clear_queue as an unknown command. */
   readonly setClearQueue: (
     result:
@@ -202,6 +212,16 @@ const recordedIdleState = (sessionFile: string) => ({
 const PI_COMPACTING_PROMPT_ERROR =
   "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.";
 
+function deliveryArgs(record: PiRpcRecord): PiRpcRecord | undefined {
+  const message = piRecordString(record, "message");
+  const prefix = `/${PI_T3_INPUT_COMMAND} `;
+  if (record["type"] !== "prompt" || !message?.startsWith(prefix)) return undefined;
+  const value: unknown = decodeJsonLine(message.slice(prefix.length));
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value))
+    : undefined;
+}
+
 const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const requests = yield* Queue.unbounded<PiRpcRecord>();
@@ -209,6 +229,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const messagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const inputStatuses: Array<unknown> = [];
+  let deferDelivery = false;
+  let deliverySupported: boolean | "foreign" = true;
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -259,7 +282,29 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
             ...stateQueue.shift(),
           },
         };
+      case "get_commands":
+        return {
+          ...base,
+          data: {
+            commands: deliverySupported
+              ? [
+                  {
+                    name: PI_T3_INPUT_COMMAND,
+                    description: "T3 input delivery protocol v1",
+                    sourceInfo: {
+                      path:
+                        deliverySupported === "foreign"
+                          ? "/user/replacement.ts"
+                          : lastSpawn.env["T3_PI_MCP_EXTENSION_PATH"],
+                    },
+                  },
+                ]
+              : [],
+          },
+        };
       case "prompt":
+        if (deliveryArgs(record) !== undefined)
+          return { ...base, data: { disposition: "handled" } };
         if (isCompacting) {
           return { ...base, success: false, error: PI_COMPACTING_PROMPT_ERROR };
         }
@@ -325,6 +370,29 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         }
         const response = respondTo(record);
         if (response !== null) yield* emit(response);
+        const delivery = deliveryArgs(record);
+        if (delivery !== undefined) {
+          if (delivery["operation"] === "deliver" && deferDelivery) {
+            deferDelivery = false;
+            continue;
+          }
+          const data =
+            delivery["operation"] === "status"
+              ? inputStatuses.shift()
+              : delivery["operation"] === "deliver"
+                ? {
+                    inputId: delivery["inputId"],
+                    status: delivery["mode"] === "restore" ? "recorded" : "queued",
+                  }
+                : {};
+          yield* emit({
+            type: "extension_ui_request",
+            method: "notify",
+            message:
+              PI_T3_INPUT_REPLY_PREFIX +
+              encodeJsonLine({ requestId: delivery["requestId"], success: true, data }),
+          });
+        }
       }
     });
 
@@ -360,7 +428,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     Effect.gen(function* () {
       while (true) {
         const record = yield* Queue.take(requests);
-        if (record["type"] === type) return record;
+        if (record["type"] === type && deliveryArgs(record) === undefined) return record;
       }
     });
 
@@ -413,6 +481,21 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       isCompacting = compacting;
     },
     queueStats: (data) => statsQueue.push(data),
+    queueInputStatuses: (data) => inputStatuses.push(data),
+    setDeliverySupport: (supported) => {
+      deliverySupported = supported;
+    },
+    takeDelivery: (operation) =>
+      Effect.gen(function* () {
+        while (true) {
+          const record = yield* Queue.take(requests);
+          const args = deliveryArgs(record);
+          if (args?.["operation"] === operation) return args;
+        }
+      }),
+    deferNextDelivery: () => {
+      deferDelivery = true;
+    },
     setClearQueue: (result) => {
       clearQueue = result;
     },
@@ -549,7 +632,232 @@ const startTurn = Effect.fnUntraced(function* (
   });
 });
 
+const recoveryTurnInput = Effect.fnUntraced(function* ({
+  providerThread,
+  messages,
+}: {
+  providerThread: OrchestrationV2ProviderThread;
+  messages: ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnMessage>;
+}) {
+  const runId = RunId.make("run:thread-pi-test:1");
+  return {
+    appThread: yield* makeAppThread("default"),
+    threadId: THREAD_ID,
+    runId,
+    runOrdinal: 1,
+    providerTurnOrdinal: 1,
+    attemptId: RunAttemptId.make(`run-attempt:${runId}:1`),
+    rootNodeId: NodeId.make(`node:${runId}:root`),
+    providerThread,
+    recoveredMessages: messages,
+    restartContinuationOfRunId: RunId.make("run:thread-pi-test:0"),
+    message: {
+      messageId: MessageId.make("restart-continuation"),
+      text: "Continue after restart",
+      attachments: [],
+      createdBy: "agent",
+      creationSource: "server",
+    },
+    modelSelection: modelSelection("default"),
+    runtimePolicy,
+  } satisfies ProviderAdapter.ProviderAdapterV2TurnInput;
+});
+
 describe("PiAdapterV2", () => {
+  it.effect(
+    "stages only unknown recovery inputs before continuation without reopening known attachments",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const image: ChatAttachment = {
+          id: ChatAttachmentId.make("recovered-image"),
+          type: "image",
+          name: "recovered.png",
+          mimeType: "image/png",
+          sizeBytes: 3,
+        };
+        const missing: ChatAttachment = {
+          ...image,
+          id: ChatAttachmentId.make("already-native-image"),
+        };
+        const host = yield* ProviderHost.ProviderHost;
+        yield* (yield* FileSystem.FileSystem).writeFile(
+          host.resolveAttachmentPath(image)!,
+          new Uint8Array([1, 2, 3]),
+        );
+        const known = ["queued", "recorded", "cancelled"];
+        fake.queueInputStatuses({
+          statuses: [
+            { inputId: "unknown", status: "unknown" },
+            ...known.map((status) => ({ inputId: status, status })),
+          ],
+        });
+        const message = ({
+          id,
+          text,
+          attachment,
+        }: {
+          id: string;
+          text: string;
+          attachment: ChatAttachment;
+        }): ProviderAdapter.ProviderAdapterV2TurnMessage => ({
+          messageId: MessageId.make(id),
+          text,
+          attachments: [attachment],
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const input = yield* recoveryTurnInput({
+          providerThread,
+          messages: [
+            message({ id: "unknown", text: "Recover this question", attachment: image }),
+            ...known.map((status) =>
+              message({ id: status, text: "Already native", attachment: missing }),
+            ),
+            {
+              ...message({ id: "maintenance", text: "/compact", attachment: missing }),
+              attachments: [],
+            },
+          ],
+        });
+        yield* runtime.startTurn(input);
+        const query = yield* fake.takeDelivery("status");
+        assert.deepEqual(query["inputIds"], ["unknown", "queued", "recorded", "cancelled"]);
+        yield* fake.takeRequest("prompt");
+        const records = fake
+          .allRequests()
+          .filter(
+            (request) =>
+              request["type"] === "prompt" && deliveryArgs(request)?.["operation"] !== "status",
+          );
+        assert.deepEqual(
+          records.map((record) => deliveryArgs(record)?.["operation"] ?? record["type"]),
+          ["deliver", "prompt"],
+        );
+        const accepted = records[0] === undefined ? undefined : deliveryArgs(records[0]);
+        assert.isObject(accepted);
+        assert.deepInclude(accepted, {
+          inputId: "unknown",
+          mode: "restore",
+          images: [{ type: "image", data: "AQID", mimeType: "image/png" }],
+        });
+        assert.equal(records[1]?.["message"], "Continue after restart");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      name: "unsupported T3 bridge",
+      supported: false,
+      data: { statuses: [{ inputId: "recover", status: "unknown" }] },
+    },
+    { name: "foreign command owner", supported: "foreign" as const, data: undefined },
+    { name: "missing reply", supported: true, data: undefined },
+    { name: "missing identity", supported: true, data: { statuses: [] } },
+    {
+      name: "duplicate identity",
+      supported: true,
+      data: {
+        statuses: [
+          { inputId: "recover", status: "unknown" },
+          { inputId: "recover", status: "recorded" },
+        ],
+      },
+    },
+    {
+      name: "foreign identity",
+      supported: true,
+      data: { statuses: [{ inputId: "other", status: "unknown" }] },
+    },
+    {
+      name: "invalid status",
+      supported: true,
+      data: { statuses: [{ inputId: "recover", status: "prepared" }] },
+    },
+  ])("fails recovery closed for $name without stranding the native turn", ({ supported, data }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      fake.setDeliverySupport(supported);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueInputStatuses(data);
+      const input = yield* recoveryTurnInput({
+        providerThread,
+        messages: [
+          {
+            messageId: MessageId.make("recover"),
+            text: "Saved question",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        ],
+      });
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runtime.startTurn(input))));
+      assert.isFalse(
+        fake
+          .allRequests()
+          .some(
+            (record) =>
+              record["type"] === "prompt" && deliveryArgs(record)?.["operation"] !== "status",
+          ),
+      );
+      yield* startTurn(runtime, providerThread);
+      const retry = yield* fake.takeRequest("prompt");
+      assert.equal(retry["message"], "Hello pi");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("waits for the starting prompt before delivering steers in order", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      if (running.type !== "provider_turn.updated") return assert.fail("Expected the running turn");
+      for (const id of ["first-steer", "second-steer"])
+        yield* runtime.steerTurn({
+          threadId: THREAD_ID,
+          runId: RunId.make("run:thread-pi-test:1"),
+          providerThread,
+          providerTurnId: running.providerTurn.id,
+          message: {
+            messageId: MessageId.make(id),
+            text: id,
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        });
+      assert.isFalse(
+        fake.allRequests().some((record) => deliveryArgs(record)?.["operation"] === "deliver"),
+        "Steering must not overtake the starting prompt",
+      );
+      fake.setStreaming(true);
+      yield* fake.emit({ type: "agent_start" });
+      assert.equal((yield* fake.takeDelivery("deliver"))["inputId"], "first-steer");
+      assert.equal((yield* fake.takeDelivery("deliver"))["inputId"], "second-steer");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("keeps native image bytes and the saved path in the prompt", () =>
     Effect.gen(function* () {
       const host = yield* ProviderHost.ProviderHost;
@@ -3584,15 +3892,24 @@ describe("PiAdapterV2", () => {
             content: [{ type: "text", text: "hello back" }],
             timestamp: 1700000001000,
           },
+          {
+            role: "custom",
+            customType: PI_T3_INPUT_MESSAGE_TYPE,
+            content: [{ type: "text", text: "saved steer" }],
+            details: { inputId: "saved-steer" },
+          },
+          { role: "custom", customType: "unrelated-extension", content: "not a user message" },
           { role: "toolResult", content: [] },
         ],
       });
       const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
-      assert.equal(snapshot.messages.length, 2);
+      assert.equal(snapshot.messages.length, 3);
       assert.equal(snapshot.messages[0]!.role, "user");
       assert.equal(snapshot.messages[0]!.text, "hello pi");
       assert.equal(snapshot.messages[1]!.role, "assistant");
       assert.equal(snapshot.messages[1]!.text, "hello back");
+      assert.equal(snapshot.messages[2]!.role, "user");
+      assert.equal(snapshot.messages[2]!.text, "saved steer");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -4389,6 +4706,19 @@ describe("PiAdapterV2", () => {
           running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
         assert.isDefined(providerTurnId);
 
+        yield* runtime.steerTurn({
+          threadId: THREAD_ID,
+          runId: RunId.make("run:thread-pi-test:2"),
+          providerThread,
+          providerTurnId: providerTurnId!,
+          message: {
+            messageId: MessageId.make("held-steer"),
+            text: "Do not replay after Stop",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        });
         const interruptedAt = fake.allRequests().length;
         if (restart) {
           fake.deferNextLifecycle("abort");
@@ -4424,11 +4754,19 @@ describe("PiAdapterV2", () => {
         yield* fake.closeStdout;
         const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+        const cancellation = fake
+          .allRequests()
+          .map(deliveryArgs)
+          .findLast((args) => args?.["operation"] === "cancel");
+        assert.deepEqual(cancellation?.["inputIds"], ["held-steer"]);
+        assert.isFalse(
+          fake.allRequests().some((record) => deliveryArgs(record)?.["operation"] === "deliver"),
+        );
         assert.isFalse(
           fake
             .allRequests()
             .slice(interruptedAt)
-            .some((request) => request["type"] === "prompt"),
+            .some((request) => request["type"] === "prompt" && deliveryArgs(request) === undefined),
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -4474,6 +4812,11 @@ describe("PiAdapterV2", () => {
           creationSource: "web",
         },
       });
+      assert.isFalse(
+        fake.allRequests().some((record) => deliveryArgs(record)?.["operation"] === "deliver"),
+      );
+      fake.deferNextDelivery();
+      fake.setStreaming(true);
       fake.setCompacting(false);
       const compactionEnded = fake.allRequests().length;
       yield* fake.emit({
@@ -4483,20 +4826,39 @@ describe("PiAdapterV2", () => {
         aborted: false,
         willRetry: false,
       });
-      const delivered = yield* fake.takeRequest("prompt");
-      assert.equal(delivered["message"], "Steer during compaction");
+      const delivered = yield* fake.takeDelivery("deliver");
+      assert.equal(delivered["text"], "Steer during compaction");
+      assert.equal(delivered["inputId"], "message:thread-pi-test:steer-during-compaction");
       yield* fake.emit({ type: "agent_start" });
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message:
+          PI_T3_INPUT_REPLY_PREFIX +
+          encodeJsonLine({
+            requestId: delivered["requestId"],
+            success: true,
+            data: { inputId: delivered["inputId"], status: "queued" },
+          }),
+      });
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "custom",
+          customType: PI_T3_INPUT_MESSAGE_TYPE,
+          details: { inputId: delivered["inputId"] },
+          content: [{ type: "text", text: "Steer during compaction" }],
+        },
+      });
+      fake.setStreaming(false);
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.equal(
         fake
           .allRequests()
           .slice(compactionEnded)
-          .filter(
-            (request) =>
-              request["type"] === "prompt" && request["message"] === "Steer during compaction",
-          ).length,
+          .filter((request) => deliveryArgs(request)?.["text"] === "Steer during compaction")
+          .length,
         1,
       );
       assert.isTrue(
@@ -4584,82 +4946,129 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("ignores an idle snapshot made stale by a steer", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      yield* startTurn(runtime, providerThread);
-      yield* fake.takeRequest("prompt");
-      const running = yield* takeEvent(
-        (event) =>
-          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-      );
-      assert.equal(running.type, "provider_turn.updated");
-      const providerTurnId =
-        running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
-      assert.isDefined(providerTurnId);
-      yield* fake.emit({ type: "agent_start" });
+  it.effect(
+    "keeps queued delivery owned while ignoring an idle snapshot made stale by a steer",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        assert.equal(running.type, "provider_turn.updated");
+        const providerTurnId =
+          running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+        assert.isDefined(providerTurnId);
+        yield* fake.emit({ type: "agent_start" });
 
-      fake.deferNextState();
-      yield* fake.emit({ type: "agent_settled" });
-      yield* fake.takeRequest("get_state");
-      yield* runtime.steerTurn({
-        threadId: THREAD_ID,
-        runId: RunId.make("run:thread-pi-test:1"),
-        providerThread,
-        providerTurnId: providerTurnId!,
-        message: {
-          messageId: "message:thread-pi-test:late-steer" as never,
-          text: "Continue after settlement",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
-        },
-      });
-      yield* fake.takeRequest("prompt");
-      yield* fake.resolveDeferredState({
-        isStreaming: false,
-        isCompacting: false,
-        pendingMessageCount: 0,
-      });
+        fake.deferNextState();
+        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.takeRequest("get_state");
+        fake.setStreaming(true);
+        fake.deferNextDelivery();
+        const steering = yield* Effect.forkChild(
+          runtime.steerTurn({
+            threadId: THREAD_ID,
+            runId: RunId.make("run:thread-pi-test:1"),
+            providerThread,
+            providerTurnId: providerTurnId!,
+            message: {
+              messageId: "message:thread-pi-test:late-steer" as never,
+              text: "Continue after settlement",
+              attachments: [],
+              createdBy: "user",
+              creationSource: "web",
+            },
+          }),
+        );
+        const delivery = yield* fake.takeDelivery("deliver");
+        assert.isUndefined(steering.pollUnsafe());
+        fake.setStreaming(false);
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "notify",
+          message:
+            PI_T3_INPUT_REPLY_PREFIX +
+            encodeJsonLine({
+              requestId: delivery["requestId"],
+              success: true,
+              data: { inputId: delivery["inputId"], status: "queued" },
+            }),
+        });
+        yield* Fiber.join(steering);
+        yield* fake.resolveDeferredState({
+          isStreaming: false,
+          isCompacting: false,
+          pendingMessageCount: 0,
+        });
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "queued-delivery-dialog",
+          method: "confirm",
+          title: "Native delivery pending",
+        });
+        const dialog = yield* takeEvent(
+          (event) => event.type === "runtime_request.updated" || event.type === "turn.terminal",
+        );
+        if (dialog.type !== "runtime_request.updated")
+          return assert.fail("A queued delivery must retain its turn until Pi consumes it");
+        assert.equal(dialog.runtimeRequest.providerTurnId, providerTurnId);
+        yield* runtime.respondToRuntimeRequest({
+          requestId: dialog.runtimeRequest.id,
+          decision: "decline",
+        });
+        fake.setStreaming(true);
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "message_end",
+          message: {
+            role: "custom",
+            customType: PI_T3_INPUT_MESSAGE_TYPE,
+            details: { inputId: "message:thread-pi-test:late-steer" },
+            content: [{ type: "text", text: "Continue after settlement" }],
+          },
+        });
+        yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Recovered" },
+        });
+        yield* fake.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Recovered" }],
+            stopReason: "stop",
+          },
+        });
+        const assistantItem = yield* takeEvent(
+          (event) =>
+            event.type === "turn.terminal" ||
+            (event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.streaming === false),
+        );
+        assert.isTrue(
+          assistantItem.type === "turn_item.updated" &&
+            assistantItem.turnItem.type === "assistant_message" &&
+            assistantItem.turnItem.text === "Recovered",
+          "A queued delivery must retain its turn until Pi consumes it",
+        );
 
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
-      yield* fake.emit({
-        type: "message_update",
-        assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Recovered" },
-      });
-      yield* fake.emit({
-        type: "message_end",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: "Recovered" }],
-          stopReason: "stop",
-        },
-      });
-      const assistantItem = yield* takeEvent(
-        (event) =>
-          event.type === "turn_item.updated" &&
-          event.turnItem.type === "assistant_message" &&
-          event.turnItem.streaming === false,
-      );
-      assert.isTrue(
-        assistantItem.type === "turn_item.updated" &&
-          assistantItem.turnItem.type === "assistant_message" &&
-          assistantItem.turnItem.text === "Recovered",
-      );
-
-      fake.queueState({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
-      yield* fake.emit({ type: "agent_settled" });
-      yield* fake.takeRequest("get_state");
-      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        fake.setStreaming(false);
+        yield* fake.emit({ type: "agent_settled" });
+        yield* fake.takeRequest("get_state");
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
 

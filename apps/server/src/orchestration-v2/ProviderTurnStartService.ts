@@ -246,6 +246,70 @@ export const layer: Layer.Layer<
       },
     );
 
+    const recoverSteeringMessages = Effect.fn("ProviderTurnStartService.recoverSteeringMessages")(
+      function* (input: {
+        readonly threadId: ThreadId;
+        readonly run: OrchestrationV2Run;
+        readonly providerThread: OrchestrationV2ProviderThread;
+      }) {
+        const nativeThreadId = input.providerThread.nativeThreadRef?.nativeId;
+        if (nativeThreadId == null || input.run.restartContinuationOfRunId === undefined) return [];
+        const sourceRunIds = new Set<RunId>();
+        let sourceRunId: RunId | undefined = input.run.restartContinuationOfRunId;
+        while (sourceRunId !== undefined && !sourceRunIds.has(sourceRunId)) {
+          const currentSourceRunId: RunId = sourceRunId;
+          sourceRunIds.add(currentSourceRunId);
+          const { runs } = yield* projectionStore.getThreadRecords(input.threadId, ["runs"], {
+            runIds: [currentSourceRunId],
+          });
+          sourceRunId = runs.find(
+            (candidate) => candidate.id === currentSourceRunId,
+          )?.restartContinuationOfRunId;
+        }
+        const { turnItems } = yield* projectionStore.getThreadRecords(
+          input.threadId,
+          ["turnItems"],
+          {
+            turnItemTypes: ["user_message"],
+            turnItemRunIds: [...sourceRunIds],
+          },
+        );
+        const candidates = turnItems.flatMap((item) =>
+          item.type === "user_message" &&
+          item.providerThreadId === input.providerThread.id &&
+          item.inputDelivery?.nativeThreadId === nativeThreadId
+            ? [item]
+            : [],
+        );
+        const messages = yield* projectionStore.getMessagesById(
+          input.threadId,
+          candidates.map((item) => item.messageId),
+        );
+        return candidates.flatMap((item) => {
+          const message = messages.get(item.messageId);
+          if (message === undefined || message.role !== "user") return [];
+          return [
+            {
+              messageId: message.id,
+              text: projectComposerContextForProvider({
+                text: message.text,
+                records: message.context?.records ?? [],
+              }),
+              attachments: message.attachments,
+              createdBy: message.createdBy,
+              creationSource: message.creationSource,
+              ...(message.scheduledTaskId === undefined
+                ? {}
+                : { scheduledTaskId: message.scheduledTaskId }),
+              ...(message.senderThreadId === undefined
+                ? {}
+                : { senderThreadId: message.senderThreadId }),
+            },
+          ];
+        });
+      },
+    );
+
     // Build draining callbacks outside startup scope so they cannot retain full thread history.
     const makeRunControls = (input: {
       readonly threadId: ThreadId;
@@ -1722,8 +1786,17 @@ export const layer: Layer.Layer<
         !noteContinuation
           ? session
           : makeDeliverySession(session, startWithHandoffs);
+      const recoveredMessages =
+        session.providerSession.capabilities.turns.supportsDurableSteering === true
+          ? yield* recoverSteeringMessages({
+              threadId: projection.thread.id,
+              run,
+              providerThread: runningProviderThread,
+            })
+          : [];
       return runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
+        ...(recoveredMessages.length === 0 ? {} : { recoveredMessages }),
         appThread: projection.thread,
         providerSessionId,
         session: deliverySession,

@@ -4930,6 +4930,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly providerTurnId: typeof providerTurn.id | null;
         readonly providerThreadId: OrchestrationV2ProviderThread["id"];
         readonly providerInstanceId: ProviderInstanceId;
+        readonly inputDelivery?: { readonly nativeThreadId: string };
         readonly modelSwitch?: OrchestrationV2ModelSwitch | undefined;
       }) {
         const message: OrchestrationV2ConversationMessage = {
@@ -4980,6 +4981,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
           type: "user_message",
           messageId: input.messageId,
+          ...(messageInput.inputDelivery === undefined
+            ? {}
+            : { inputDelivery: messageInput.inputDelivery }),
           inputIntent:
             input.command.type === "queued-message.promote-to-steer"
               ? "promoted_queued_to_steer"
@@ -5063,6 +5067,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerTurnId: providerTurn.id,
         providerThreadId: providerThread.id,
         providerInstanceId: targetRun.providerInstanceId,
+        ...(session.providerSession.capabilities.turns.supportsDurableSteering === true &&
+        !input.text.trimStart().startsWith("/") &&
+        providerThread.nativeThreadRef?.nativeId != null
+          ? { inputDelivery: { nativeThreadId: providerThread.nativeThreadRef.nativeId } }
+          : {}),
       });
       yield* Ref.update(input.effects, (existing) => [
         ...existing,

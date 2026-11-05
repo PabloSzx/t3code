@@ -547,9 +547,6 @@ export function layerWithRegistry<Error>(
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
-  if (options.runEffectWorker === false) {
-    return layerReplayRuntime;
-  }
   // Build recovery before runtime so it commits before the effect worker claims work.
   const layerStartupRecovery: Layer.Layer<
     never,
@@ -572,6 +569,9 @@ export function layerWithRegistry<Error>(
           ),
         )
       : Layer.empty;
+  if (options.runEffectWorker === false) {
+    return layerReplayRuntime.pipe(Layer.provide(layerStartupRecovery));
+  }
   return Layer.effect(
     Orchestrator.OrchestratorV2,
     Effect.gen(function* () {

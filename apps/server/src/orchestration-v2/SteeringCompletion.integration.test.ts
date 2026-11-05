@@ -1,4 +1,12 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
   ChatAttachmentId,
   CommandId,
@@ -648,8 +656,235 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     yield* Fiber.join(running);
     return threadId;
   });
-  return { cwd, events, started, steered, interrupted, layer, startFirstTurn };
+  return { adapter, cwd, events, started, steered, interrupted, layer, startFirstTurn };
 });
+
+it.effect(
+  "recovers saved steering across restart without replaying legacy or foreign native inputs",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* Effect.acquireRelease(
+          fs.makeTempDirectory({ prefix: "t3-steering-restart-" }),
+          (owned) => fs.remove(owned, { recursive: true, force: true }).pipe(Effect.orDie),
+        );
+        const harness = yield* nextTurnSelectionHarness("durable-steering-restart");
+        const turns = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2TurnInput>();
+        const originalCapabilities = yield* harness.adapter.getCapabilities();
+        const capabilities = {
+          ...originalCapabilities,
+          turns: { ...originalCapabilities.turns, supportsDurableSteering: true },
+        };
+        const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+          ...harness.adapter,
+          getCapabilities: () => Effect.succeed(capabilities),
+          openSession: (input) =>
+            harness.adapter.openSession(input).pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                providerSession: { ...runtime.providerSession, capabilities },
+                startTurn: (turn) =>
+                  runtime.startTurn(turn).pipe(Effect.tap(() => Queue.offer(turns, turn))),
+              })),
+            ),
+        };
+        const platform = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
+        const beforePath = path.join(directory, "before.sqlite");
+        const beforeDatabase = SqlitePersistence.layerFromPath(beforePath).pipe(
+          Layer.provide(platform),
+        );
+        const snapshotPath = path.join(directory, "restart.sqlite");
+        const repeatedSnapshotPath = path.join(directory, "restart-again.sqlite");
+        const registry = ProviderAdapterRegistry.layerSingle(adapter);
+        const beforeLayer = ProviderReplayHarness.layerWithRegistry(
+          { name: "durable-steering-before" },
+          registry,
+          {
+            databaseLayer: beforeDatabase,
+            runEffectWorker: false,
+            continueThreadsAfterServerUpdate: true,
+          },
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const threadId = yield* harness.startFirstTurn;
+            const first = yield* Queue.take(turns);
+            const steer = ({ id, text }: { id: string; text: string }) =>
+              orchestrator
+                .dispatch({
+                  type: "message.dispatch",
+                  commandId: CommandId.make(id),
+                  threadId,
+                  messageId: MessageId.make(id),
+                  text,
+                  attachments: [],
+                  dispatchMode: { type: "steer_active", targetRunId: first.runId },
+                  createdBy: "user",
+                  creationSource: "web",
+                })
+                .pipe(Effect.andThen(worker.drain()));
+            yield* steer({ id: "legacy-input", text: "the same question" });
+            yield* steer({ id: "identified-a", text: "the same question" });
+            yield* steer({ id: "identified-b", text: "the next question" });
+            yield* steer({ id: "foreign-input", text: "another conversation" });
+            yield* steer({ id: "native-command", text: "/custom-command" });
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            const inputs = projection.turnItems.filter((item) => item.type === "user_message");
+            assert.deepEqual(
+              inputs.find((item) => item.messageId === "identified-a")?.inputDelivery,
+              { nativeThreadId: "native-thread" },
+            );
+            assert.isUndefined(
+              inputs.find((item) => item.messageId === "native-command")?.inputDelivery,
+            );
+            const sql = yield* SqlClient.SqlClient;
+            const delivered = yield* sql<{
+              status: string;
+            }>`SELECT status FROM orchestration_v2_effect_outbox WHERE command_id = ${"identified-a"} AND effect_type = 'provider-turn.steer'`;
+            assert.equal(delivered[0]?.status, "succeeded");
+            const legacy = inputs.find((item) => item.messageId === "legacy-input")!;
+            const foreign = inputs.find((item) => item.messageId === "foreign-input")!;
+            const occurredAt = yield* DateTime.now;
+            // Historical entries can lack tracking or belong to a different native conversation.
+            yield* (yield* EventSink.EventSinkV2).write({
+              events: [
+                {
+                  id: EventId.make("legacy-delivery-scope"),
+                  type: "turn-item.updated",
+                  threadId,
+                  runId: first.runId,
+                  occurredAt,
+                  payload: { ...legacy, inputDelivery: undefined },
+                },
+                {
+                  id: EventId.make("foreign-delivery-scope"),
+                  type: "turn-item.updated",
+                  threadId,
+                  runId: first.runId,
+                  occurredAt,
+                  payload: {
+                    ...foreign,
+                    inputDelivery: { nativeThreadId: "another-native-thread" },
+                  },
+                },
+              ],
+            });
+            const saved = yield* orchestrator.getThreadProjection(threadId);
+            assert.isUndefined(
+              saved.turnItems
+                .filter((item) => item.type === "user_message")
+                .find((item) => item.messageId === "legacy-input")?.inputDelivery,
+            );
+            // Capture committed input before normal scope shutdown can settle the running provider.
+            yield* sql`VACUUM INTO ${snapshotPath}`;
+          }).pipe(Effect.provide(Layer.fresh(Layer.merge(beforeLayer, beforeDatabase)))),
+        );
+
+        // The replacement provider process cannot emit the old process's trailing events.
+        yield* Queue.clear(harness.events);
+        yield* TestClock.adjust("1 second");
+        const afterDatabase = SqlitePersistence.layerFromPath(snapshotPath).pipe(
+          Layer.provide(platform),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            const after = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+              ThreadId.make("thread:durable-steering-restart"),
+            );
+            assert.isTrue(
+              after.runs.some((run) => run.restartContinuationOfRunId !== undefined),
+              "Restart must create a continuation run",
+            );
+            const continued = yield* Queue.take(turns);
+            assert.isDefined(continued.restartContinuationOfRunId);
+            assert.deepEqual(
+              continued.recoveredMessages?.map((message) => [message.messageId, message.text]),
+              [
+                ["identified-a", "the same question"],
+                ["identified-b", "the next question"],
+              ],
+            );
+            assert.include(continued.message.text, "Continue where you left off.");
+            yield* (yield* Orchestrator.OrchestratorV2).dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make("identified-c"),
+              threadId: continued.threadId,
+              messageId: MessageId.make("identified-c"),
+              text: "one more question",
+              attachments: [],
+              dispatchMode: { type: "steer_active", targetRunId: continued.runId },
+              createdBy: "user",
+              creationSource: "web",
+            });
+            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`VACUUM INTO ${repeatedSnapshotPath}`;
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(
+                Layer.merge(
+                  ProviderReplayHarness.layerWithRegistry(
+                    { name: "durable-steering-after" },
+                    registry,
+                    {
+                      databaseLayer: afterDatabase,
+                      runEffectWorker: false,
+                      recoverOnStartup: true,
+                      continueThreadsAfterServerUpdate: true,
+                    },
+                  ),
+                  afterDatabase,
+                ),
+              ),
+            ),
+          ),
+        );
+        yield* Queue.clear(harness.events);
+        // Reconciliation command identities include the restart timestamp.
+        yield* TestClock.adjust("1 second");
+        const repeatedDatabase = SqlitePersistence.layerFromPath(repeatedSnapshotPath).pipe(
+          Layer.provide(platform),
+        );
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            const projection = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+              ThreadId.make("thread:durable-steering-restart"),
+            );
+            assert.lengthOf(
+              projection.runs.filter((run) => run.restartContinuationOfRunId !== undefined),
+              2,
+            );
+            const continued = yield* Queue.take(turns);
+            assert.deepEqual(
+              continued.recoveredMessages?.map((message) => message.messageId),
+              ["identified-a", "identified-b", "identified-c"],
+            );
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: "durable-steering-repeated" },
+                  registry,
+                  {
+                    databaseLayer: repeatedDatabase,
+                    runEffectWorker: false,
+                    recoverOnStartup: true,
+                    continueThreadsAfterServerUpdate: true,
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
 
 it.effect("steers a delegated task question notice into the running parent turn", () =>
   Effect.scoped(

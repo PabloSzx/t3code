@@ -283,6 +283,8 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   emitsTurnCompleted: Schema.Boolean,
   supportsInterrupt: Schema.Boolean,
   supportsActiveSteering: Schema.Boolean,
+  // Ordinary messages only; native slash commands retain provider-specific dispatch.
+  supportsDurableSteering: Schema.optional(Schema.Boolean),
   // Some native steering mechanisms cancel pending tools before consuming the message.
   activeSteeringInterruptsTools: Schema.optional(Schema.Boolean),
   // Some take text only, so a steer with attachments restarts the turn instead.
@@ -1485,6 +1487,9 @@ export const OrchestrationV2UserMessageInputIntent = Schema.Literals([
 export type OrchestrationV2UserMessageInputIntent =
   typeof OrchestrationV2UserMessageInputIntent.Type;
 
+// Delivery is scoped to the native conversation, which can change without changing the provider row.
+const NativeInputDelivery = Schema.Struct({ nativeThreadId: TrimmedNonEmptyString });
+
 /** A same-harness model or effort change that took effect with this message. */
 export const OrchestrationV2ModelSwitch = Schema.Struct({
   from: ModelSelection,
@@ -1608,6 +1613,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     inputIntent: OrchestrationV2UserMessageInputIntent,
+    inputDelivery: Schema.optional(NativeInputDelivery),
     text: Schema.String,
     /** Same as the text of message `messageId`. */
     textOmitted: DedupedBodyMarker,
@@ -2444,6 +2450,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
     workflowScript: OrchestrationV2ConversationMessage.fields.workflowScript,
     inputIntent: OrchestrationV2UserMessageInputIntent,
+    inputDelivery: Schema.optional(NativeInputDelivery),
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
     attachments: Schema.Array(ChatAttachment),

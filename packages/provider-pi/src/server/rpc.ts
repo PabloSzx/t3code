@@ -19,6 +19,7 @@ import {
 } from "@t3tools/shared/toolOutput";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import { PI_T3_INPUT_REPLY_PREFIX } from "./inputDeliveryProtocol.ts";
 import {
   appendProviderStderrTail,
   sanitizeProviderStderrExcerpt,
@@ -75,11 +76,20 @@ export interface PiRpcSpawnOptions {
   readonly env: NodeJS.ProcessEnv;
 }
 
+interface PiExtensionCommandRequestOptions {
+  readonly command: string;
+  readonly args: PiRpcRecord;
+  readonly timeoutMs?: number;
+}
+
 export interface PiRpcConnection {
   readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
   readonly request: (
     record: PiRpcRecord,
     timeoutMs?: number,
+  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
+  readonly requestExtensionCommand: (
+    options: PiExtensionCommandRequestOptions,
   ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
   readonly events: Queue.Queue<PiRpcRecord, PiRpcError>;
   readonly exited: Effect.Effect<number, PiRpcError>;
@@ -91,6 +101,7 @@ const TERMINATION_GRACE = Duration.seconds(1);
 
 interface PendingPiRequest {
   readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
+  readonly extension: boolean;
 }
 
 // MCP duplicates images in model content and CallToolResult; budget both plus bounded overhead.
@@ -288,8 +299,41 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.fnUntraced(function* (record: PiRpcRecord) {
       receivedRecord = true;
       startupStderr = "";
+      if (record["type"] === "extension_ui_request" && record["method"] === "notify") {
+        const message = piRecordString(record, "message");
+        if (message?.startsWith(PI_T3_INPUT_REPLY_PREFIX)) {
+          const reply = parsePiRecord(message.slice(PI_T3_INPUT_REPLY_PREFIX.length));
+          const id = piRecordString(reply, "requestId");
+          const pending = id === undefined ? undefined : pendingRequests.get(id);
+          if (id !== undefined && pending?.extension === true) {
+            pendingRequests.delete(id);
+            if (reply?.["success"] === true)
+              yield* Deferred.succeed(pending.deferred, reply["data"]);
+            else
+              yield* Deferred.fail(
+                pending.deferred,
+                new PiRpcError({ operation: "extension", detail: "T3 input delivery failed" }),
+              );
+          }
+          return;
+        }
+      }
       if (record["type"] === "response" && typeof record["id"] === "string") {
         const pending = pendingRequests.get(record["id"]);
+        if (pending?.extension === true && record["success"] === true) {
+          if (piRecordString(record["data"], "disposition") !== "handled") {
+            pendingRequests.delete(record["id"]);
+            yield* Deferred.fail(
+              pending.deferred,
+              new PiRpcError({
+                operation: "extension",
+                detail: "T3 delivery command was not handled",
+              }),
+            );
+          }
+          return;
+        }
+        if (pending === undefined && record["id"].startsWith("t3-extension-")) return;
         if (pending !== undefined) {
           pendingRequests.delete(record["id"]);
           if (record["success"] === true) {
@@ -426,14 +470,23 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       }
     });
 
-  const request = Effect.fn("PiRpc.request")(function* (
-    record: PiRpcRecord,
-    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  ): Effect.fn.Return<unknown, PiRpcError | PiRpcTimeoutError> {
-    const id = `t3-${nextRequestId++}`;
+  const executeRequest = Effect.fn("PiRpc.request")(function* (options: {
+    readonly record: PiRpcRecord;
+    readonly timeoutMs: number;
+    readonly extensionCommand?: { readonly command: string; readonly args: PiRpcRecord };
+  }): Effect.fn.Return<unknown, PiRpcError | PiRpcTimeoutError> {
+    const { record, timeoutMs, extensionCommand } = options;
+    const id = `t3-${extensionCommand === undefined ? "" : "extension-"}${nextRequestId++}`;
     const deferred = yield* Deferred.make<unknown, PiRpcError>();
-    pendingRequests.set(id, { deferred });
-    yield* send({ ...record, id }).pipe(
+    pendingRequests.set(id, { deferred, extension: extensionCommand !== undefined });
+    const outgoingRecord =
+      extensionCommand === undefined
+        ? record
+        : {
+            type: "prompt",
+            message: `/${extensionCommand.command} ${encodeJsonLine({ ...extensionCommand.args, requestId: id })}`,
+          };
+    yield* send({ ...outgoingRecord, id }).pipe(
       Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
     );
     return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
@@ -454,7 +507,14 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   return {
     send,
-    request,
+    request: (record, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) =>
+      executeRequest({ record, timeoutMs }),
+    requestExtensionCommand: ({ command, args, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }) =>
+      executeRequest({
+        record: { type: "extension" },
+        timeoutMs,
+        extensionCommand: { command, args },
+      }),
     events,
     exited: Deferred.await(exitDeferred),
     terminate: failTransport(

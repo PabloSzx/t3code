@@ -113,7 +113,16 @@ function replayValueMatches(expected: unknown, actual: unknown): boolean {
   return Object.is(expected, actual);
 }
 
-const ADAPTER_REQUEST_ID = /^t3-\d+$/u;
+const ADAPTER_REQUEST_ID = /^t3-(?:extension-)?\d+$/u;
+const DELIVERY_COMMAND_PREFIX = "/t3-input-delivery ";
+const DELIVERY_REPLY_PREFIX = "t3-input-delivery:v1:";
+
+function deliveryArgs(frame: unknown): unknown {
+  const message = isRecord(frame) ? frame.message : undefined;
+  return typeof message === "string" && message.startsWith(DELIVERY_COMMAND_PREFIX)
+    ? decodeJsonLine(message.slice(DELIVERY_COMMAND_PREFIX.length))
+    : undefined;
+}
 
 function adapterRequestId(frame: unknown): string | undefined {
   const id = isRecord(frame) ? frame.id : undefined;
@@ -123,9 +132,23 @@ function adapterRequestId(frame: unknown): string | undefined {
 /** Rebind adapter request ids without pinning counters; provider ids that responses must echo stay exact. */
 function withRequestId(expected: unknown, actual: unknown): unknown {
   const actualId = adapterRequestId(actual);
-  return isRecord(expected) && adapterRequestId(expected) !== undefined && actualId !== undefined
-    ? { ...expected, id: actualId }
-    : expected;
+  if (!isRecord(expected) || adapterRequestId(expected) === undefined || actualId === undefined)
+    return expected;
+  const expectedArgs = deliveryArgs(expected);
+  const actualArgs = deliveryArgs(actual);
+  return isRecord(expectedArgs) &&
+    isRecord(actualArgs) &&
+    expectedArgs.inputId === "<input-id>" &&
+    typeof actualArgs.inputId === "string" &&
+    actualArgs.inputId.length > 0
+    ? {
+        ...expected,
+        id: actualId,
+        message:
+          DELIVERY_COMMAND_PREFIX +
+          encodeJsonLine({ ...expectedArgs, inputId: actualArgs.inputId, requestId: actualId }),
+      }
+    : { ...expected, id: actualId };
 }
 
 function startsTurn(entry: ProviderReplayEntryType): boolean {
@@ -159,6 +182,24 @@ function recordLabel(frame: unknown, process: number): string | undefined {
 
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+function rebindInboundValue(value: unknown, ids: ReadonlyMap<string, string>): unknown {
+  if (typeof value === "string") {
+    if (value.startsWith(DELIVERY_REPLY_PREFIX))
+      return (
+        DELIVERY_REPLY_PREFIX +
+        encodeJsonLine(
+          rebindInboundValue(decodeJsonLine(value.slice(DELIVERY_REPLY_PREFIX.length)), ids),
+        )
+      );
+    return ids.get(value) ?? value;
+  }
+  if (Array.isArray(value)) return value.map((entry) => rebindInboundValue(entry, ids));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, rebindInboundValue(entry, ids)]),
+  );
+}
 
 function makeLineSplitter() {
   let buffer = "";
@@ -202,8 +243,12 @@ class PiReplayController {
       ids: new Map(),
       open: true,
     };
+    const frame = processStartFrame(command);
+    const extensionIndex = frame.args.lastIndexOf("--extension");
+    const extensionPath = extensionIndex === -1 ? undefined : frame.args[extensionIndex + 1];
+    if (typeof extensionPath === "string") process.ids.set("<extension-path>", extensionPath);
     this.processes.push(process);
-    this.receive(process, processStartFrame(command));
+    this.receive(process, frame);
     return process;
   }
 
@@ -285,6 +330,15 @@ class PiReplayController {
       if (recordedId !== undefined && actualId !== undefined) {
         process.ids.set(recordedId, actualId);
       }
+      const expectedArgs = deliveryArgs(entry.frame);
+      const actualArgs = deliveryArgs(actual);
+      if (
+        isRecord(expectedArgs) &&
+        expectedArgs.inputId === "<input-id>" &&
+        isRecord(actualArgs) &&
+        typeof actualArgs.inputId === "string"
+      )
+        process.ids.set("<input-id>", actualArgs.inputId);
       this.consumed.add(index);
       while (this.consumed.has(this.cursor)) this.cursor += 1;
       return true;
@@ -309,11 +363,7 @@ class PiReplayController {
       this.cursor += 1;
       emitted = true;
       if (!process.open) continue;
-      const frame = entry.frame;
-      const recordedId = isRecord(frame) ? frame.id : undefined;
-      const reboundId = typeof recordedId === "string" ? process.ids.get(recordedId) : undefined;
-      const rebound =
-        isRecord(frame) && reboundId !== undefined ? { ...frame, id: reboundId } : frame;
+      const rebound = rebindInboundValue(entry.frame, process.ids);
       Queue.offerUnsafe(process.stdout, new TextEncoder().encode(`${encodeJsonLine(rebound)}\n`));
     }
     return emitted;

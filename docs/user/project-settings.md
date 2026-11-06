@@ -201,17 +201,20 @@ work finishes or settles, and when a configured deadline expires. An hourly swee
 allocations. Offline machines keep their existing policies.
 
 Select a project to set **Automatic worktree cleanup** to **Inherit**, **Off**, or **Custom**.
-Inherit follows each machine's rules; Off disables that project's ordinary cleanup rules.
-Custom applies separate worktree rules to the selected project or checkout. Browser captures,
-log retention, and the optional hard Treehouse lease expiry remain machine-wide.
+Inherit follows each machine's rules; Off disables that project's worktree cleanup.
+Custom applies the visible worktree rules to the selected project or checkout. Browser captures
+and log retention remain machine-wide.
 
 Worktrees can be removed after a chosen number of inactive days, after a thread settles, after
 merging, or when they have no commits beyond the default branch. Set settled retention to 0 days
 to remove a worktree at the next cleanup after settlement. In repositories without remotes,
 unchanged-worktree cleanup compares against the branch checked out in the project workspace;
 if that checkout has a detached HEAD, the worktree is kept. These ordinary rules apply only to
-T3-managed worktrees. Active work and open terminals prevent ordinary removal. Expired T3-owned Treehouse checkouts are deleted
-entirely, including unpublished work, `.env` and local signing files. No archive is created.
+T3-managed worktrees. Recent thread activity extends retention deadlines, and active runs or
+pending work prevent removal. Once a Treehouse checkout qualifies under these rules, cleanup
+closes its idle provider sessions and terminals, terminates remaining checkout processes and
+deletes all files, including unpublished work, `.env` and local signing files. No archive is
+created. Open terminals and local-file protection still apply to native Git worktrees.
 Finished isolated tasks use the configured settled deadline even when their conversation is not
 manually settled. Shared children must be idle; they do not all need manual settlement.
 
@@ -233,29 +236,12 @@ Choose **Delete now** to run the enabled rules immediately. The latest results s
 worktrees were removed or kept and why, plus any failures.
 Results also list folders in the worktree folder that no thread uses, with their sizes; cleanup never removes them, so remove them manually if you want.
 
-### Hard Treehouse lease expiry
-
-The separate server setting `storageCleanup.leaseHardExpiryDays` accepts `7` or `null`.
-It defaults to `null`, disabled. Enabling it authorizes deletion of every discoverable Treehouse
-lease seven days after acquisition, across repositories, including external and legacy holders.
-Project opt-outs, recent progress, active sessions, and open terminals do not extend this deadline.
-Expiry stops the worktree's processes and agent sessions, deletes all checkout files without an
-archive, and preserves branch refs. Native Git worktrees outside Treehouse are not included.
-
-Before enabling it, inspect `treehouse leases --json` with a compatible Treehouse CLI. Discovery
-covers the configured root, registered custom pools, and pools already known to T3. Older custom
-pools absent from those sources need explicit discovery with `treehouse leases --json --pool /absolute/pool`.
-This read-only command does not register that pool for later sweeps. A future lease issued there
-registers it; otherwise arrange for the pool to be discoverable before enabling the policy.
-
-The storage cleanup service keeps a durable cleanup request for each discovered generation,
-including its deadline, verified owners, blockers, and retries. The read-only
-`server.getLeaseCleanupTasks` RPC exposes these requests. Unknown ages, recovered or malformed
-leases, ownership lookup failures, changed generations, unsafe removal boundaries, and primary
-checkouts block deletion. Blocked expiry retries rather than bypassing those checks. Windows
-forced expiry remains blocked. Deadlines require the server to be running; restart resumes the
-persisted requests. Enabling this policy is a separate destructive decision, not part of installing
-an updated server. Settings show a warning when it is enabled; activation has no UI toggle.
+Treehouse uses the same visible rules and project overrides, not a separate acquisition-age
+policy. Older `leaseHardExpiryDays` values no longer enable cleanup. External or unknown-owner
+leases are not automatically deleted. Lease generations, checkout ownership, primary-checkout
+protection and operation pins remain enforced. A recorded allocator without process-termination
+support blocks deletion instead of falling back to unsafe removal. Windows Treehouse deletion
+remains blocked pending a verified removal backend.
 
 Browser captures and rotated logs have separate retention periods. Expired capture links stop
 working. Current logs, message attachments, and browser profiles are kept.

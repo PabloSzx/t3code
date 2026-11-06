@@ -315,7 +315,6 @@ function CleanupSection() {
       rules.worktreeOnDelete ||
       rules.worktreeUnchanged;
     return (
-      settings.storageCleanup.leaseHardExpiryDays === 7 ||
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
@@ -520,19 +519,12 @@ export function WorktreeCleanupSection() {
   return (
     <SettingsSection id="storage-worktrees" title="Cleanup">
       <>
-        {targets.some((entry) => entry.settings.storageCleanup.leaseHardExpiryDays === 7) && (
-          <SettingsRow
-            title="Hard Treehouse lease expiry"
-            status={ruleStatus("leaseHardExpiryDays")}
-            description="On enabled machines, every discovered Treehouse lease expires seven days after acquisition, even during active work. Checkout files are deleted; branch refs stay. Project cleanup overrides do not apply."
-          />
-        )}
         {isProjectScope && (
           <SettingsRow
             title="Automatic worktree cleanup"
             description={
               mode === "off"
-                ? "Disable this project's ordinary cleanup rules. Machine-wide lease expiry still applies."
+                ? "Disable this project's automatic worktree cleanup."
                 : mode === "custom"
                   ? "Use these rules for this project."
                   : "Use each machine's worktree cleanup settings."
@@ -635,7 +627,7 @@ export function WorktreeCleanupSection() {
                     ]
                       .filter(Boolean)
                       .join(". ")}
-                    description="Remove worktrees this many days after their thread settles. Set 0 days to remove them at the next cleanup. Branches and thread history are kept."
+                    description="Remove worktrees this many days after their thread settles, or its last activity if later. Set 0 days for the next cleanup. Eligible Treehouse checkouts have remaining processes terminated and all files deleted. Branches and thread history are kept."
                     serverScoped={!isProjectScope}
                     control={
                       <RetentionControl

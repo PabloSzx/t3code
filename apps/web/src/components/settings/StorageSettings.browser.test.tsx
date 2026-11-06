@@ -96,7 +96,6 @@ function setup() {
   state.settings = {
     ...DEFAULT_SERVER_SETTINGS,
     storageCleanup: {
-      leaseHardExpiryDays: null,
       worktreeKeepWhen: "uncommitted-changes",
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
@@ -145,22 +144,22 @@ const deleteButton = (container: HTMLElement) =>
     (button) => button.textContent === "Delete now",
   )!;
 
-it.each([null, 7] as const)(
-  "runs only the enabled hard lease policy when all ordinary rules are off: %s",
-  async (leaseHardExpiryDays) => {
+it.each([null, 1] as const)(
+  "runs the configured settled-worktree cleanup when other rules are off: %s",
+  async (worktreeSettledAfterDays) => {
     setup();
     state.settings = {
       ...state.settings,
-      storageCleanup: { ...state.settings.storageCleanup, leaseHardExpiryDays },
+      storageCleanup: { ...state.settings.storageCleanup, worktreeSettledAfterDays },
     };
     state.targets = state.targets.map((target) => ({ ...target, settings: state.settings }));
     state.run.mockResolvedValue({ _tag: "Success", value: { entries: [] } });
     await using screen = await render(panel());
     const button = deleteButton(screen.container);
 
-    expect(button.disabled).toBe(leaseHardExpiryDays === null);
+    expect(button.disabled).toBe(worktreeSettledAfterDays === null);
     await act(async () => button.click());
-    if (leaseHardExpiryDays === null) expect(state.run).not.toHaveBeenCalled();
+    if (worktreeSettledAfterDays === null) expect(state.run).not.toHaveBeenCalled();
     else
       expect(state.run.mock.calls.map(([request]) => request)).toEqual([
         { environmentId: "env-a", input: {} },

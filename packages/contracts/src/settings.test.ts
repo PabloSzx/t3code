@@ -44,7 +44,6 @@ describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
     expect(decodeServerSettings({}).storageCleanup).toEqual({
-      leaseHardExpiryDays: null,
       worktreeAfterDays: null,
       worktreeSettledAfterDays: null,
       worktreeOnMerge: false,
@@ -56,19 +55,12 @@ describe("storage cleanup settings", () => {
     });
   });
 
-  it("accepts only seven days or disabled for hard lease expiry", () => {
-    for (const leaseHardExpiryDays of [7, null]) {
-      const input = { storageCleanup: { leaseHardExpiryDays } };
-      expect(decodeServerSettings(input).storageCleanup.leaseHardExpiryDays).toBe(
-        leaseHardExpiryDays,
-      );
-      expect(decodeServerSettingsPatch(input)).toEqual(input);
-    }
-    for (const leaseHardExpiryDays of [-1, 0, 1, 8, 30]) {
-      const input = { storageCleanup: { leaseHardExpiryDays } };
-      expect(() => decodeServerSettings(input)).toThrow();
-      expect(() => decodeServerSettingsPatch(input)).toThrow();
-    }
+  it("does not reactivate the retired age-only policy from stored settings", () => {
+    const stored = { storageCleanup: { leaseHardExpiryDays: 7 } };
+    expect(decodeServerSettings(stored).storageCleanup).toEqual(
+      DEFAULT_SERVER_SETTINGS.storageCleanup,
+    );
+    expect(decodeServerSettingsPatch(stored)).toEqual({ storageCleanup: {} });
   });
 
   it("accepts partial custom patches but requires complete stored project rules", () => {

@@ -1187,9 +1187,7 @@ export const LeaseCleanupTask = Schema.Struct({
 });
 export type LeaseCleanupTask = typeof LeaseCleanupTask.Type;
 
-const LeaseHardExpiryDays = Schema.NullOr(Schema.Literal(7));
 export const StorageCleanupSettings = Schema.Struct({
-  leaseHardExpiryDays: LeaseHardExpiryDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   worktreeKeepWhen: WorktreeKeepWhen.pipe(
     Schema.withDecodingDefault(Effect.succeed("uncommitted-changes")),
   ),
@@ -1623,7 +1621,6 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({
-      leaseHardExpiryDays: Schema.optionalKey(LeaseHardExpiryDays),
       worktreeKeepWhen: Schema.optionalKey(WorktreeKeepWhen),
       worktreeAfterDays: Schema.optionalKey(StorageRetentionDays),
       worktreeSettledAfterDays: Schema.optionalKey(SettledWorktreeRetentionDays),

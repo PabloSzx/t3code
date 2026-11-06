@@ -468,20 +468,6 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       onChange={(treehouseBinaryPath) => write({ treehouseBinaryPath })}
                     />
 
-                    {displayTargets.some(
-                      (target) => target.settings.storageCleanup.leaseHardExpiryDays === 7,
-                    ) ? (
-                      <View className="gap-2 border-t border-border-subtle px-4 py-3">
-                        <Text className="text-base text-foreground">
-                          Hard Treehouse lease expiry
-                        </Text>
-                        <Text className="text-sm text-foreground-muted">
-                          On enabled environments, every discovered Treehouse lease expires seven
-                          days after acquisition, even during active work. Checkout files are
-                          deleted; branch refs stay. Project cleanup overrides do not apply.
-                        </Text>
-                      </View>
-                    ) : null}
                     <SettingsSwitchRow
                       icon="arrow.triangle.branch"
                       label="Start from remote"

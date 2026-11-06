@@ -105,7 +105,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         ...inherited,
         // PR context follows the conversation; watching remains the source thread's responsibility.
         pullRequests: input.sourceProjection.thread.pullRequests?.map(
-          ({ watch: _watch, ...link }) => link,
+          ({ watch: _watch, ...link }) => ({ ...link, autoWatchDisabled: true }),
         ),
         createdBy: input.createdBy,
         creationSource: input.creationSource,

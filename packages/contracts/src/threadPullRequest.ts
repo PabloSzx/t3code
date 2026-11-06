@@ -93,6 +93,8 @@ export const ThreadPullRequestWatch = Schema.Struct({
   /** Reported remarks at remarksThrough, so late arrivals at that timestamp still count. */
   remarkIds: Schema.Array(TrimmedNonEmptyString),
   conflicting: Schema.Boolean,
+  baseBranch: Schema.optional(TrimmedNonEmptyString),
+  mergedBase: Schema.optional(Schema.NullOr(PositiveInt)),
   /** Consecutive comment-only wakes; limited to prevent bot loops. */
   wakes: NonNegativeInt,
   /**
@@ -113,6 +115,7 @@ export const ThreadPullRequestLink = Schema.Struct({
   snapshot: Schema.NullOr(ThreadPullRequestSnapshot),
   stack: Schema.NullOr(ThreadPullRequestStack),
   watch: Schema.optional(ThreadPullRequestWatch),
+  autoWatchDisabled: Schema.optional(Schema.Boolean),
   /** Resume from the ended watch to avoid duplicate notifications. */
   endedWatch: Schema.optional(ThreadPullRequestWatch),
 });

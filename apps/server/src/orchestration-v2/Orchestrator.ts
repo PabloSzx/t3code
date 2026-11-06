@@ -3167,6 +3167,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is deleted.`,
       });
     }
+    if (command.type === "thread.pull-request.watch" && command.automatic) {
+      const link = threadPullRequestsOf(thread).find((candidate) =>
+        threadPullRequestKeysEqual(candidate, command),
+      );
+      if (
+        thread.deletedAt !== null ||
+        thread.archivedAt !== null ||
+        thread.settledAt !== null ||
+        thread.settledOverride === "settled" ||
+        link?.autoWatchDisabled ||
+        link?.endedWatch !== undefined ||
+        link?.source === "stack-dismissed" ||
+        (link?.snapshot != null && link.snapshot.state !== "open")
+      )
+        return;
+    }
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
@@ -3206,7 +3222,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
-      command.link?.source === "agent"
+      (command.link?.source === "agent" || command.automatic)
     ) {
       const { runs } = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
@@ -3937,6 +3953,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       passed: existing.endedWatch.passed,
                       passedChecks: existing.endedWatch.passedChecks,
                       conflicting: existing.endedWatch.conflicting,
+                      baseBranch: existing.endedWatch.baseBranch,
+                      mergedBase: existing.endedWatch.mergedBase,
                     }),
                     ...(existing.endedWatch?.owedChecks !== undefined && {
                       owedChecks: existing.endedWatch.owedChecks,
@@ -3948,7 +3966,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     remarkIds: [],
                     wakes: 0,
                   });
-          if (watch === existing.watch && links === linked) return thread;
+          const autoWatchDisabled =
+            command.type === "thread.pull-request.watch"
+              ? !command.watching
+              : existing.autoWatchDisabled;
+          if (
+            watch === existing.watch &&
+            links === linked &&
+            autoWatchDisabled === existing.autoWatchDisabled
+          )
+            return thread;
           const final =
             command.type === "thread.pull-request-watch.sync" && watch === undefined
               ? command.endedWatch
@@ -3957,7 +3984,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...thread,
             pullRequests: links.map((link) =>
               link === existing
-                ? withPullRequestWatch(final ? { ...link, watch: final } : link, watch)
+                ? {
+                    ...withPullRequestWatch(final ? { ...link, watch: final } : link, watch),
+                    ...(autoWatchDisabled === undefined ? {} : { autoWatchDisabled }),
+                  }
                 : link,
             ),
             updatedAt: command.type === "thread.pull-request.watch" ? now : thread.updatedAt,

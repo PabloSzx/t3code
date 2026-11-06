@@ -4,7 +4,7 @@ import { type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
-import { act, render } from "../../test/render";
+import { act, render, stubGlobal } from "../../test/render";
 import "../index.css";
 
 import { filesystemEnvironment } from "../state/filesystem";
@@ -244,6 +244,42 @@ describe("ChatMarkdown favicon privacy", () => {
     expect(container.querySelectorAll("img")).toHaveLength(0);
     expect(container.querySelector("a svg")).not.toBeNull();
   });
+});
+
+it("opens middle-clicked desktop links externally without handling right-clicks or fragments", async () => {
+  setup();
+  await using screen = await renderText(
+    "[**Docs**](https://example.com/docs) [Review](https://github.com/example/repo/pull/42) [Video](https://example.com/video.mp4) [Jump](#heading)",
+  );
+  const openExternal = vi.fn().mockResolvedValue(true);
+  using _bridge = stubGlobal("desktopBridge", { openExternal });
+  const links = [...screen.container.querySelectorAll("a")];
+  const dispatch = async ({ target, button }: { target: Element; button: number }) => {
+    const event = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button });
+    await act(() => target.dispatchEvent(event));
+    return event;
+  };
+
+  expect((await dispatch({ target: links[0]!, button: 2 })).defaultPrevented).toBe(false);
+  expect((await dispatch({ target: links[3]!, button: 1 })).defaultPrevented).toBe(false);
+  expect(openExternal).not.toHaveBeenCalled();
+
+  for (const link of links.slice(0, 3)) {
+    expect(
+      (await dispatch({ target: link.querySelector("strong") ?? link, button: 1 }))
+        .defaultPrevented,
+    ).toBe(true);
+  }
+  expect(openExternal.mock.calls).toEqual([
+    ["https://example.com/docs"],
+    ["https://github.com/example/repo/pull/42"],
+    ["https://example.com/video.mp4"],
+  ]);
+
+  using _web = stubGlobal("desktopBridge", undefined);
+  openExternal.mockClear();
+  expect((await dispatch({ target: links[0]!, button: 1 })).defaultPrevented).toBe(false);
+  expect(openExternal).not.toHaveBeenCalled();
 });
 
 describe("ChatMarkdown streaming", () => {

@@ -1222,6 +1222,28 @@ const CHAT_MARKDOWN_COMPONENTS = {
               void readLocalApi()?.shell.openExternal(href);
             });
           }}
+          onAuxClick={(event) => {
+            props.onAuxClick?.(event);
+            if (
+              event.defaultPrevented ||
+              event.button !== 1 ||
+              !href ||
+              isSameDocumentLink ||
+              !window.desktopBridge
+            ) {
+              return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            void readLocalApi()
+              ?.shell.openExternal(href)
+              .catch((cause) =>
+                reportMarkdownActionFailure(
+                  { operation: "open-link-external", target: href },
+                  cause,
+                ),
+              );
+          }}
           onContextMenu={(event) => {
             if (!href || !faviconHost) return;
             event.preventDefault();

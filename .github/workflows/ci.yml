@@ -296,7 +296,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.test_web != 'false' }}
     runs-on: ${{ github.repository == 'PabloSzx/t3code' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404' }}
-    timeout-minutes: 10
+    # Standard fork runners need more time for the full browser suite and built-client boot.
+    timeout-minutes: ${{ github.repository == 'PabloSzx/t3code' && 20 || 10 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6

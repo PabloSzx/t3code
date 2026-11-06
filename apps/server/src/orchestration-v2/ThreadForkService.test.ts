@@ -271,7 +271,10 @@ it.effect("preserves pull request context without inheriting any watches", () =>
     };
     const result = yield* planFork(sourceRun, sourceProjection);
 
-    assert.deepEqual(result.targetThread.pullRequests, links);
+    assert.deepEqual(
+      result.targetThread.pullRequests,
+      links.map((link) => ({ ...link, autoWatchDisabled: true })),
+    );
     assert.deepEqual(result.targetThread.linkedPullRequest, legacyLink);
     assert.deepEqual(result.targetThread.branchPullRequest, legacyLink);
     assert.deepEqual(sourceProjection.thread.pullRequests, watchedLinks);

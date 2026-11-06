@@ -142,6 +142,7 @@ it.effect("a persisted fork leaves PR watching with its parent until explicitly 
         ...key,
         ...link,
         linkedAt: parentWatch.startedAt,
+        autoWatchDisabled: true,
         snapshot: null,
         stack: null,
       },
@@ -170,6 +171,22 @@ it.effect("a persisted fork leaves PR watching with its parent until explicitly 
       .pipe(Effect.flip);
     assert.equal(stale._tag, "OrchestratorDispatchError");
     assert.deepEqual((yield* orchestrator.getThreadProjection(targetThreadId)).runs, []);
+
+    const automatic = yield* orchestrator
+      .dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("fork-watch-automatic"),
+        threadId: targetThreadId,
+        ...key,
+        watching: true,
+        automatic: true,
+        link,
+      })
+      .pipe(Effect.flip);
+    assert.equal(automatic._tag, "OrchestratorDispatchError");
+    assert.isUndefined(
+      (yield* orchestrator.getThreadShell(targetThreadId))?.pullRequests?.[0]?.watch,
+    );
 
     yield* TestClock.adjust("1 second");
     yield* orchestrator.dispatch({

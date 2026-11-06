@@ -319,12 +319,12 @@ def install(build, check_only, assume_yes, accept_unknown):
         raise Stop('This build has not been released for manual installation.')
     if not os.access(APP.parent, os.W_OK):
         raise Stop('Your user cannot replace apps in /Applications. Do not retry with sudo.')
+    watched = [APP, USERDATA, PROFILE]
+    wait_until_closed(watched, assume_yes)
+
     check_data_roots()
     if min(shutil.disk_usage(HOME).free, shutil.disk_usage(APP.parent).free) < required_space(candidate):
         raise Stop('Not enough free space for verified backups, database verification and app staging.')
-
-    watched = [APP, USERDATA, PROFILE]
-    wait_until_closed(watched, assume_yes)
 
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     backup = LOCAL_ROOT / 'backups' / f'install-{stamp}'

@@ -191,6 +191,59 @@ with tempfile.TemporaryDirectory(prefix='t3-installer-test-') as temporary:
         else:
             raise AssertionError('expected an unknown base to be refused')
         installer.install(build, check_only=True, assume_yes=False, accept_unknown=True)
+
+        # Electron removes its live external socket on normal quit, before backup validation.
+        build = fixture(root / 'normal-quit')
+        with tempfile.TemporaryDirectory(prefix='t3-quit-socket-', dir='/tmp') as socket_dir:
+            endpoint = Path(socket_dir) / 'socket'
+            link = installer.PROFILE / 'SingletonSocket'
+            holder = subprocess.Popen(
+                [sys.executable, '-c', '''
+import socket, sys
+from pathlib import Path
+with open(sys.argv[1]) as data, socket.socket(socket.AF_UNIX) as server:
+    server.bind(sys.argv[3])
+    link = Path(sys.argv[2])
+    link.symlink_to(sys.argv[3])
+    print('ready', flush=True)
+    sys.stdin.readline()
+    link.unlink()
+''', str(installer.USERDATA / 'settings.json'), str(link), str(endpoint)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            )
+            real_request_quit = installer.request_quit
+            requests = []
+
+            def request_quit():
+                requests.append(True)
+                holder.stdin.write('quit\n')
+                holder.stdin.flush()
+
+            installer.request_quit = request_quit
+            try:
+                assert holder.stdout.readline().strip() == 'ready'
+                assert link.is_symlink() and link.exists()
+                installer.install(build, check_only=True, assume_yes=True, accept_unknown=False)
+                assert requests == [] and link.exists()
+                installer.install(build, check_only=False, assume_yes=True, accept_unknown=False)
+                assert requests == [True]
+                assert holder.wait() == 0
+                assert not link.is_symlink()
+                assert endpoint.exists(), 'the installer must not remove the external socket'
+                assert asar(installer.APP) == b'candidate'
+                record = json.loads((build / 'build.json').read_text())
+                receipt = json.loads(Path(record['installationReceipt']).read_text())
+                backup = Path(receipt['backup'])
+                assert receipt['installed'] is True
+                assert receipt['verifiedDatabases'] == ['statev2.sqlite']
+                assert asar(backup / 'T3 Code (Nightly).app') == b'base'
+                assert (backup / 'electron-profile/Preferences').read_text() == '{}'
+                assert not (backup / 'electron-profile/SingletonSocket').is_symlink()
+            finally:
+                installer.request_quit = real_request_quit
+                holder.stdin.close()
+                holder.wait()
+                holder.stdout.close()
     finally:
         installer.subprocess.run = original_subprocess_run
         installer.run = real_run

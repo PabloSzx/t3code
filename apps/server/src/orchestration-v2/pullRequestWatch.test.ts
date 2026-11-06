@@ -53,6 +53,7 @@ const capabilities = (checksAlwaysReport: boolean): Detail["capabilities"] => ({
 
 const detail = (overrides: Partial<Detail> = {}): Detail => ({
   capabilities: capabilities(true),
+  baseBranch: "main",
   headSha: "aaaaaaaaaa",
   checks: [check("lint", "success"), check("test", "pending")],
   mergeability: "mergeable",
@@ -350,6 +351,35 @@ describe("evaluatePullRequestWatch", () => {
     });
     assert.isTrue(text.isWellFormed());
     assert.include(text, `"${"x".repeat(196)}..."`);
+  });
+
+  it("reports retargeting and a merged stack base once without treating unknown as a conflict", () => {
+    const initial = evaluatePullRequestWatch(
+      watch(),
+      detail({ baseBranch: "feature/base" }),
+      noRemarks,
+    );
+    assert.deepEqual(initial.changes, []);
+    const merged = detail({ baseBranch: "feature/base", mergedBase: 42, mergeability: "unknown" });
+    const report = evaluatePullRequestWatch(initial.next, merged, noRemarks);
+    assert.deepEqual(report.changes, [{ kind: "base-merged", number: 42 }]);
+    assert.deepEqual(evaluatePullRequestWatch(report.next, merged, noRemarks).changes, []);
+    const retargeted = evaluatePullRequestWatch(
+      report.next,
+      detail({ baseBranch: "main" }),
+      noRemarks,
+    );
+    assert.deepEqual(retargeted.changes, [{ kind: "base-changed", previous: "feature/base" }]);
+    assert.deepEqual(evaluatePullRequestWatch(retargeted.next, detail(), noRemarks).changes, []);
+    const message = pullRequestWatchMessage({
+      number: 7,
+      url: "https://github.com/o/r/pull/7",
+      baseBranch: "feature/base",
+      headSha: report.next.headSha,
+      report,
+    });
+    assert.include(message.text, "Base pull request #42 merged");
+    assert.include(message.text, "update");
   });
 
   it("reports a conflict once, until the branch is clean again", () => {

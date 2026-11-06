@@ -19,7 +19,9 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "no-checks"; readonly minutes: number }
-  | { readonly kind: "conflicting" };
+  | { readonly kind: "conflicting" }
+  | { readonly kind: "base-changed"; readonly previous: string }
+  | { readonly kind: "base-merged"; readonly number: number };
 
 export interface PullRequestWatchReport {
   readonly changes: ReadonlyArray<PullRequestWatchChange>;
@@ -35,8 +37,8 @@ export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<
     PullRequestDetail,
-    "capabilities" | "headSha" | "checks" | "mergeability" | "viewer" | "author"
-  >,
+    "capabilities" | "headSha" | "checks" | "mergeability" | "viewer" | "author" | "baseBranch"
+  > & { readonly mergedBase?: number | null },
   remarks: ReadonlyArray<PullRequestComment> | null,
   now: number,
 ): PullRequestWatchReport {
@@ -136,6 +138,16 @@ export function evaluatePullRequestWatch(
   const conflicting =
     detail.mergeability === "unknown" ? toldConflict : detail.mergeability === "conflicting";
 
+  if (watch.baseBranch !== undefined && watch.baseBranch !== detail.baseBranch) {
+    changes.push({ kind: "base-changed", previous: watch.baseBranch });
+  }
+  const mergedBase =
+    detail.mergedBase ??
+    (watch.baseBranch === detail.baseBranch ? (watch.mergedBase ?? null) : null);
+  if (mergedBase !== null && mergedBase !== watch.mergedBase) {
+    changes.push({ kind: "base-merged", number: mergedBase });
+  }
+
   const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
@@ -151,6 +163,8 @@ export function evaluatePullRequestWatch(
       remarksThrough,
       remarkIds,
       conflicting,
+      baseBranch: detail.baseBranch,
+      mergedBase,
       wakes,
       checksAwaitedSince,
     },
@@ -209,7 +223,17 @@ function changeLines(
         `- No checks have reported${context.commit} after ${change.minutes} minutes. None may be configured to run on this change.`,
       ];
     case "conflicting":
-      return [`- The branch now conflicts with ${context.baseBranch}.`];
+      return [
+        `- The branch now conflicts with ${context.baseBranch}. Update the branch and resolve conflicts before continuing.`,
+      ];
+    case "base-changed":
+      return [
+        `- The base branch changed from ${change.previous} to ${context.baseBranch}. Check the diff and update the branch if needed.`,
+      ];
+    case "base-merged":
+      return [
+        `- Base pull request #${change.number} merged. Check the stack, retarget if needed, and update this branch before continuing.`,
+      ];
   }
 }
 
@@ -219,6 +243,8 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   remarks: "new comments",
   "no-checks": "no checks reported",
   conflicting: "merge conflict",
+  "base-changed": "base branch changed",
+  "base-merged": "base pull request merged",
 };
 
 export function pullRequestWatchMessage(input: {

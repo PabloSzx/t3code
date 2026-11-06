@@ -1025,7 +1025,6 @@ const make = Effect.gen(function* () {
     }
     const memberIds = group.map((member) => member.id);
     const inspect = Effect.fn("StorageCleanup.recheckExpiry")(function* () {
-      if (hasTerminal(removalRoot)) return { blocked: "open terminal", sequence: 0, group: [] };
       if (yield* containsProjectRoot(removalRoot, yield* projectStore.listShells()))
         return { blocked: "contains a project checkout", sequence: 0, group: [] };
       const current = yield* readFamily();
@@ -1099,6 +1098,14 @@ const make = Effect.gen(function* () {
       }),
     );
     if (stopped !== null) return { kind: "kept" as const, reason: stopped };
+    for (const terminalsById of liveTerminals.values()) {
+      for (const terminal of terminalsById.values()) {
+        const cwd = path.resolve(terminal.cwd);
+        if (cwd !== removalRoot && !inside(removalRoot, cwd)) continue;
+        yield* terminals.close({ threadId: terminal.threadId, terminalId: terminal.terminalId });
+        terminalsById.delete(terminal.terminalId);
+      }
+    }
     const before = yield* inspect();
     if (before.blocked !== null) return { kind: "kept" as const, reason: before.blocked };
     if (branch !== null)
@@ -1144,197 +1151,6 @@ const make = Effect.gen(function* () {
     if (blocked !== null) return { kind: "kept" as const, reason: blocked };
     yield* gitManager.invalidateStatus(repositoryPath);
     return { kind: "removed" as const, bytes, repositoryPath };
-  });
-
-  const expireLeases = Effect.fn("StorageCleanup.expireLeases")(function* (input: {
-    readonly settings: ServerSettings;
-    readonly now: number;
-    readonly entries: StorageCleanupReportEntry[];
-  }) {
-    const days = input.settings.storageCleanup.leaseHardExpiryDays;
-    if (days === null) return;
-    const inventory = yield* treehouse.listLeases;
-    const snapshot = yield* readThreads().pipe(Effect.result);
-    const owners = new Map<string, { threadIds: string[]; activityAt: number | null }>();
-    const groups =
-      snapshot._tag === "Success"
-        ? Map.groupBy(
-            snapshot.success.threads.filter((thread) => thread.worktreePath !== null),
-            (thread) => path.resolve(thread.worktreePath!),
-          )
-        : new Map<string, OrchestrationV2ThreadShell[]>();
-    for (const lease of inventory) {
-      const group = groups.get(lease.path) ?? [];
-      const current = yield* treehouseLeases
-        .currentThreads({ path: lease.path, threads: group })
-        .pipe(Effect.result);
-      if (
-        current._tag === "Success" &&
-        current.success.verified &&
-        current.success.leaseId === lease.lease_id
-      ) {
-        const activity = current.success.threads.map(worktreeActivityAt);
-        owners.set(lease.path, {
-          threadIds: current.success.threads.map((thread) => thread.id),
-          activityAt: activity.length ? Math.max(...activity) : null,
-        });
-      }
-    }
-    const tasks = yield* leaseQueue.reconcile({ leases: inventory, owners, now: input.now, days });
-    for (let task of tasks) {
-      const lease = inventory.find(
-        (entry) =>
-          entry.lease_id === task.leaseId && entry.path === task.path && entry.pool === task.pool,
-      );
-      if (lease === undefined) continue;
-      const due =
-        task.dueAt === null
-          ? null
-          : Option.getOrNull(DateTime.make(task.dueAt).pipe(Option.map(DateTime.toEpochMillis)));
-      const retry =
-        task.nextAttemptAt === null
-          ? null
-          : Option.getOrNull(
-              DateTime.make(task.nextAttemptAt).pipe(Option.map(DateTime.toEpochMillis)),
-            );
-      let reason = task.reason;
-      let outcome: StorageCleanupReportEntry["outcome"] = "kept";
-      if (snapshot._tag === "Failure") {
-        task = yield* leaseQueue.update({
-          task,
-          state: "blocked",
-          reason: "Task ownership lookup failed",
-          now: input.now,
-        });
-        reason = task.reason;
-        outcome = "failed";
-        yield* deferWorktree(input.now + 300000);
-      } else if (due !== null && due > input.now) yield* deferWorktree(due);
-      else if (retry !== null && retry > input.now) yield* deferWorktree(retry);
-      else if (
-        due !== null &&
-        task.state !== "removed" &&
-        task.state !== "released" &&
-        task.reason !== "A completed lease generation reappeared" &&
-        lease.leased_at === task.acquiredAt &&
-        lease.lease_holder === task.holder &&
-        !lease.quarantined &&
-        /^[a-f0-9]{32}$/.test(lease.lease_id)
-      ) {
-        task = yield* leaseQueue.update({
-          task,
-          state: "reclaiming",
-          reason: "Hard lease age limit reached",
-          now: input.now,
-        });
-        const result = yield* treehouse
-          .expireLease({
-            lease,
-            days,
-            candidateThreadIds: (groups.get(lease.path) ?? []).map((thread) => thread.id),
-            recheck: Effect.gen(function* () {
-              if ((yield* settingsService.getSettings).storageCleanup.leaseHardExpiryDays !== days)
-                return "Lease expiry policy changed";
-              if (
-                !lease.removal_root ||
-                (yield* containsProjectRoot(lease.removal_root, yield* projectStore.listShells()))
-              )
-                return "Contains a project checkout or an unverified removal boundary";
-              return null;
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new GitCommandError({
-                    operation: "StorageCleanup.recheckForcedExpiry",
-                    command: "treehouse destroy",
-                    cwd: lease.path,
-                    detail: "Cannot verify the forced expiry policy or removal boundary",
-                    cause,
-                  }),
-              ),
-            ),
-            stopOwners: Effect.fn("StorageCleanup.stopExpiredLeaseOwners")(
-              function* (target) {
-                const current = yield* readThreads();
-                for (const threadId of target.threadIds) {
-                  if (
-                    !current.threads.some(
-                      (thread) =>
-                        thread.id === threadId &&
-                        thread.worktreePath !== null &&
-                        path.resolve(thread.worktreePath) === target.path,
-                    )
-                  )
-                    continue;
-                  yield* engine.dispatch({
-                    type: "thread.stop",
-                    commandId: CommandId.make(`lease-expiry:${lease.lease_id}:${threadId}`),
-                    threadId: ThreadId.make(threadId),
-                    stopDelegatedTasks: false,
-                    reason: "Lease reached its hard age limit",
-                  });
-                  for (const terminal of liveTerminals.get(threadId)?.values() ?? []) {
-                    if (
-                      path.resolve(terminal.cwd) === lease.removal_root ||
-                      inside(lease.removal_root, path.resolve(terminal.cwd))
-                    )
-                      yield* terminals.close({ threadId, terminalId: terminal.terminalId });
-                  }
-                }
-              },
-              (effect) =>
-                effect.pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new GitCommandError({
-                        operation: "StorageCleanup.stopExpiredLeaseOwners",
-                        command: "thread.stop",
-                        cwd: lease.path,
-                        detail: "Cannot stop the expired lease owner",
-                        cause,
-                      }),
-                  ),
-                ),
-            ),
-          })
-          .pipe(Effect.result);
-        if (result._tag === "Success" && result.success === null) {
-          yield* gitManager.invalidateStatus(lease.path);
-          task = yield* leaseQueue.update({
-            task,
-            state: "removed",
-            reason: "Expired lease checkout removed; branch refs retained",
-            now: input.now,
-          });
-          outcome = "removed";
-        } else {
-          task = yield* leaseQueue.update({
-            task,
-            state: "blocked",
-            reason:
-              result._tag === "Success"
-                ? result.success!
-                : "Managed lease expiry failed; retry is scheduled",
-            now: input.now,
-          });
-          outcome = "failed";
-          yield* deferWorktree(input.now + 300000);
-        }
-        reason = task.reason;
-      }
-      input.entries.push({
-        kind: "worktree",
-        outcome,
-        reason: `${reason}. Cleanup task ${task.id}; ${task.state}${task.dueAt === null ? "" : `; deadline ${task.dueAt}`}`,
-        leaseId: lease.lease_id || undefined,
-        path: lease.path,
-        projectPath: null,
-        threadId: null,
-        threadTitle: null,
-        bytes: null,
-        files: null,
-      });
-    }
   });
 
   const cleanWorktrees = Effect.fn("StorageCleanup.cleanWorktrees")(function* (
@@ -1524,7 +1340,7 @@ const make = Effect.gen(function* () {
         const familyBranchChanged = group.some((member) => member.branch !== thread.branch);
         if (!pooled && familyBranchChanged)
           return keep("a subagent thread's branch differs from this worktree's branch");
-        if (hasTerminal(worktreePath)) return keep(waitForStop("open terminal"));
+        if (!pooled && hasTerminal(worktreePath)) return keep(waitForStop("open terminal"));
         // Compare canonical roots while allowing symlinked parents, never symlinked worktree directories.
         const realPath = yield* fs.realPath(worktreePath);
         const realParent = yield* fs.realPath(path.dirname(worktreePath));
@@ -2002,41 +1818,6 @@ const make = Effect.gen(function* () {
     const serverSettings = yield* settingsService.getSettings;
     const settings = serverSettings.storageCleanup;
     const entries: StorageCleanupReportEntry[] = [];
-    yield* expireLeases({ settings: serverSettings, now, entries }).pipe(
-      Effect.catch((cause) =>
-        Effect.gen(function* () {
-          yield* deferWorktree(now + 300000);
-          yield* Effect.gen(function* () {
-            for (const task of yield* leaseQueue.list) {
-              if (task.state === "removed" || task.state === "released") continue;
-              yield* leaseQueue.update({
-                task,
-                state: "blocked",
-                reason:
-                  "Lease reconciliation failed; discovery or responsibility could not be verified",
-                now,
-              });
-            }
-          }).pipe(
-            Effect.catch((queueError) =>
-              Effect.logWarning("cannot persist lease reconciliation failure", { queueError }),
-            ),
-          );
-          entries.push({
-            kind: "worktree",
-            outcome: "failed",
-            reason: "Lease cleanup reconciliation failed; persisted requests remain pending",
-            path: null,
-            projectPath: null,
-            threadId: null,
-            threadTitle: null,
-            bytes: null,
-            files: null,
-          });
-          yield* Effect.logWarning("lease cleanup reconciliation failed", { cause });
-        }),
-      ),
-    );
     const deletedWorktrees = yield* cleanWorktrees(serverSettings, now, entries).pipe(
       Effect.catch((error) =>
         Effect.gen(function* () {
@@ -2162,6 +1943,21 @@ const make = Effect.gen(function* () {
   });
 
   const start = Effect.fn("StorageCleanup.start")(function* () {
+    yield* Effect.gen(function* () {
+      for (const task of yield* leaseQueue.list) {
+        if (task.state === "removed" || task.state === "released") continue;
+        yield* leaseQueue.update({
+          task,
+          state: "released",
+          reason: "Acquisition-age policy retired; visible worktree cleanup rules apply",
+          now: yield* Clock.currentTimeMillis,
+        });
+      }
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("cannot retire legacy lease cleanup requests", { cause }),
+      ),
+    );
     const unsubscribe = yield* terminals.subscribeMetadata((event) =>
       Effect.sync(() => {
         const blockedBefore = keptWorktrees.filter(hasTerminal);

@@ -19,7 +19,6 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
-import * as WorkspaceLifecycle from "../workspace/WorkspaceLifecycle.ts";
 import {
   TreehouseLease,
   TreehouseLeaseError,
@@ -41,16 +40,6 @@ export interface TreehouseIdleReturnOptions {
 export interface TreehouseIdleDestroyOptions extends TreehouseIdleReturnOptions {
   readonly leaseId: string;
 }
-export interface TreehouseForcedExpiryOptions {
-  readonly lease: LeaseInventoryEntry;
-  readonly days: number;
-  readonly candidateThreadIds: readonly string[];
-  readonly recheck: Effect.Effect<string | null, GitCommandError>;
-  readonly stopOwners: (input: {
-    readonly threadIds: readonly string[];
-    readonly path: string;
-  }) => Effect.Effect<void, GitCommandError>;
-}
 export interface TreehouseResumeOptions {
   readonly cwd: string;
   readonly path: string;
@@ -62,9 +51,6 @@ export class TreehouseWorktrees extends Context.Service<
   TreehouseWorktrees,
   {
     readonly listLeases: Effect.Effect<readonly LeaseInventoryEntry[], GitCommandError>;
-    readonly expireLease: (
-      input: TreehouseForcedExpiryOptions,
-    ) => Effect.Effect<string | null, GitCommandError>;
     readonly create: (
       input: VcsCreateWorktreeInput,
       options: TreehouseCreateOptions,
@@ -333,177 +319,6 @@ const make = Effect.gen(function* () {
       Effect.provideService(Path.Path, path),
       Effect.mapError((cause) => mapError({ cwd: "Treehouse lease catalogue", cause })),
     ),
-    expireLease: Effect.fn("TreehouseWorktrees.expireLease")(
-      function* (input) {
-        if (yield* HostProcess.isWindows)
-          return "Forced expiry needs a verified Windows checkout-removal backend";
-        let releasing: TreehouseLeases.OwnedTreehouseLease | null = null;
-        let removed = false;
-        return yield* Effect.gen(function* () {
-          const policy = yield* settings.getSettings;
-          if (
-            input.days <= 0 ||
-            policy.storageCleanup.leaseHardExpiryDays !== input.days ||
-            input.lease.leased_at === null
-          )
-            return "Forced lease expiry is not enabled";
-          const acquiredAt = input.lease.leased_at;
-          const acquired = yield* decodeAcquiredAt(acquiredAt);
-          if (
-            DateTime.toEpochMillis(acquired) >
-            (yield* Clock.currentTimeMillis) - input.days * 86400000
-          )
-            return "Lease has not reached its hard age limit";
-          const inventory = yield* run({
-            cwd: yield* HostProcess.HomeDirectory,
-            command: policy.treehouseBinaryPath || "treehouse",
-            args: ["leases", "--json", "--pool", input.lease.pool],
-          }).pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(LeaseInventory))));
-          if (
-            !inventory.some(
-              (entry) =>
-                entry.path === input.lease.path &&
-                entry.pool === input.lease.pool &&
-                entry.lease_id === input.lease.lease_id &&
-                entry.lease_holder === input.lease.lease_holder &&
-                entry.leased_at === input.lease.leased_at &&
-                entry.removal_root === input.lease.removal_root &&
-                !entry.quarantined,
-            )
-          )
-            return "Lease generation or acquisition metadata changed";
-          const checkout = yield* fs.realPath(input.lease.path);
-          const pool = yield* fs.realPath(input.lease.pool);
-          if (
-            !input.lease.removal_root ||
-            checkout !== input.lease.path ||
-            (yield* treehousePoolForPath(checkout)) !== pool ||
-            input.lease.quarantined ||
-            input.lease.leased_at === null
-          )
-            return "Allocator identity or acquisition time cannot be verified";
-          const listed = yield* run({
-            cwd: checkout,
-            command: "git",
-            args: ["worktree", "list", "--porcelain", "-z"],
-            trimOutput: false,
-          });
-          const first = listed.split("\0")[0];
-          if (!first?.startsWith("worktree ")) return "Repository checkout cannot be verified";
-          const repositoryPath = yield* fs.realPath(first.slice(9));
-          if (repositoryPath === checkout) return "Contains a primary repository checkout";
-          const blocked = yield* input.recheck;
-          if (blocked !== null) return blocked;
-          const repository = yield* run({
-            cwd: checkout,
-            command: "git",
-            args: ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-          });
-          const head = yield* run({ cwd: checkout, command: "git", args: ["rev-parse", "HEAD"] });
-          const symbolic = yield* run({
-            cwd: checkout,
-            command: "git",
-            args: ["rev-parse", "--symbolic-full-name", "HEAD"],
-          });
-          const branch = symbolic.startsWith("refs/heads/") ? symbolic.slice(11) : "";
-          const current = yield* settings.getSettings;
-          let binary = current.treehouseBinaryPath || "treehouse";
-          const reserve = Effect.gen(function* () {
-            if (!input.lease.lease_holder.startsWith("t3-code:")) return null;
-            return yield* leases.withLock({
-              path: checkout,
-              effect: leases.reserveExpiry({
-                lease: {
-                  path: checkout,
-                  lease_id: input.lease.lease_id,
-                  lease_holder: input.lease.lease_holder,
-                  leased_at: acquiredAt,
-                },
-                pool,
-                binary,
-                days: input.days,
-                release: {
-                  projectPath: repositoryPath,
-                  repository: yield* fs.realPath(repository),
-                  branch,
-                  headSha: head,
-                  threadIds: [...input.candidateThreadIds],
-                },
-              }),
-            });
-          });
-          releasing = yield* reserve;
-          binary = releasing?.record.binary ?? binary;
-          const help = yield* run({
-            cwd: repositoryPath,
-            command: binary,
-            args: ["destroy", "--help"],
-          });
-          if (!help.includes("--expire-after") || !help.includes("--terminate-agent-sessions"))
-            return "Allocator binary lacks age-checked forced expiry";
-          const beforeStop = yield* input.recheck;
-          if (beforeStop !== null) return beforeStop;
-          releasing = yield* reserve;
-          yield* input.stopOwners({
-            threadIds: releasing?.record.release?.threadIds ?? [],
-            path: checkout,
-          });
-          return yield* withWorkspaceLease(
-            checkout,
-            leases.withLock({
-              path: checkout,
-              effect: Effect.gen(function* () {
-                const rechecked = yield* input.recheck;
-                if (rechecked !== null) return rechecked;
-                yield* run({
-                  cwd: checkout,
-                  command: "git",
-                  args: ["update-ref", `refs/t3/expired-leases/${input.lease.lease_id}`, "HEAD"],
-                });
-                yield* run({
-                  cwd: repositoryPath,
-                  command: binary,
-                  args: [
-                    "destroy",
-                    checkout,
-                    "--yes",
-                    "--include-leased",
-                    "--include-unlanded",
-                    "--include-in-use",
-                    "--if-lease-id",
-                    input.lease.lease_id,
-                    "--expire-after",
-                    `${input.days * 24}h`,
-                    "--terminate-agent-sessions",
-                  ],
-                });
-                removed = true;
-                if (releasing !== null) yield* leases.markReturned(releasing);
-                yield* WorkspaceLifecycle.invalidate;
-                return null;
-              }),
-            }),
-          );
-        }).pipe(
-          Effect.ensuring(
-            Effect.gen(function* () {
-              const owned = releasing;
-              if (removed || owned === null || !(yield* fs.exists(input.lease.path))) return;
-              yield* leases.withLock({
-                path: input.lease.path,
-                effect: leases.cancelCleanupReturn(owned),
-              });
-            }).pipe(Effect.ignoreCause({ log: true })),
-          ),
-        );
-      },
-      (effect, input) =>
-        effect.pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.provideService(Path.Path, path),
-          Effect.mapError((cause) => mapError({ cwd: input.lease.path, cause })),
-        ),
-    ),
     create,
     returnIdle: Effect.fn("TreehouseWorktrees.returnIdle")(
       function* (input) {
@@ -668,8 +483,17 @@ const make = Effect.gen(function* () {
                 command: owned.record.binary,
                 args: ["destroy", "--help"],
               });
-              if (!help.includes("--if-lease-id"))
-                return "recorded Treehouse binary needs lease-checked destroy support";
+              if (
+                !help.includes("--if-lease-id") ||
+                !help.includes("--expire-after") ||
+                !help.includes("--terminate-agent-sessions")
+              )
+                return "recorded Treehouse binary needs verified process-terminating destroy support";
+              const acquired = yield* decodeAcquiredAt(owned.record.lease.leased_at);
+              if (DateTime.toEpochMillis(acquired) > (yield* Clock.currentTimeMillis))
+                return "lease acquisition time cannot be verified";
+              const blockedBeforeReturn = yield* input.recheck;
+              if (blockedBeforeReturn !== null) return blockedBeforeReturn;
               const releasing = yield* leases.beginCleanupReturn({
                 owned,
                 discardLocalFiles: true,
@@ -691,11 +515,17 @@ const make = Effect.gen(function* () {
                     "--yes",
                     "--include-leased",
                     "--include-unlanded",
+                    "--include-in-use",
                     "--if-lease-id",
                     input.leaseId,
+                    // T3 rechecks the configured deadline; the allocator verifies this exact acquisition.
+                    "--expire-after",
+                    "1ns",
+                    "--terminate-agent-sessions",
                   ],
                 });
                 yield* leases.markReturned(releasing);
+                return null;
               }).pipe(Effect.result);
               if (destroyed._tag === "Failure") {
                 if (yield* fs.exists(input.path))
@@ -704,7 +534,7 @@ const make = Effect.gen(function* () {
                     .pipe(Effect.ignoreCause({ log: true }));
                 return yield* destroyed.failure;
               }
-              return null;
+              return destroyed.success;
             }),
           }),
         );

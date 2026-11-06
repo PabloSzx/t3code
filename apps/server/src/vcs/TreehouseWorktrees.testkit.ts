@@ -4,6 +4,7 @@ import { ThreadId } from "@t3tools/contracts";
 import * as TreehouseWorktrees from "./TreehouseWorktrees.ts";
 import { assert } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -14,7 +15,11 @@ import * as TreehouseLeases from "../workspace/treehouseLeases.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 
 // Only the external allocator is a fixture. Revision selection and removal use real T3 + Git.
-const allocator = `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+const allocator = ({
+  leasedAt,
+}: {
+  leasedAt: string;
+}) => `import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -40,7 +45,7 @@ if (args[0] === "get") {
   if (!existsSync(slot)) git(repo, ["worktree", "add", "--detach", slot, "main"]);
   else git(slot, ["switch", "--detach", "main"]);
   const holder = args[args.indexOf("--lease-holder") + 1];
-  const lease = { path: slot, lease_id: randomBytes(16).toString("hex"), lease_holder: holder, leased_at: "2026-01-01T00:00:00Z", base_branch: "" };
+  const lease = { path: slot, lease_id: randomBytes(16).toString("hex"), lease_holder: holder, leased_at: ${JSON.stringify(leasedAt)}, base_branch: "" };
   state.worktrees = [...state.worktrees.filter(entry => entry.path !== slot), { ...lease, leased: true }];
   writeFileSync(stateFile, JSON.stringify(state));
   console.log(JSON.stringify(lease));
@@ -86,7 +91,11 @@ export const fixture = Effect.fn("TreehouseTest.fixture")(function* (
   const cwd = path.join(root, "repo");
   yield* fs.makeDirectory(cwd);
   const binary = path.join(root, "allocator.mjs");
-  yield* fs.writeFileString(binary, `#!${process.execPath}\n${allocator}`, { mode: 0o755 });
+  yield* fs.writeFileString(
+    binary,
+    `#!${process.execPath}\n${allocator({ leasedAt: DateTime.formatIso(yield* DateTime.now) })}`,
+    { mode: 0o755 },
+  );
   const git = Effect.fn("TreehouseTest.git")(function* (input: { cwd?: string; args: string[] }) {
     const result = yield* runner.run({
       command: "git",

@@ -472,6 +472,10 @@ const cleanupFixture = (
         branchPullRequest: () => Effect.sync(() => pullRequest),
       } as unknown as GitManager.GitManager["Service"]),
       Effect.provideService(TerminalManager.TerminalManager, {
+        close: ({ threadId, terminalId }: { threadId: string; terminalId: string }) =>
+          Effect.suspend(
+            () => terminalListener?.({ type: "remove", threadId, terminalId }) ?? Effect.void,
+          ),
         subscribeMetadata: (
           listener: (event: TerminalMetadataStreamEvent) => Effect.Effect<void>,
         ) =>
@@ -602,9 +606,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2);
 const state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));
-if (args[0] === 'destroy' && args[1] === '--help') { console.log('destroy --if-lease-id'); process.exit(0); }
+if (args[0] === 'destroy' && args[1] === '--help') { console.log('destroy --if-lease-id --expire-after --terminate-agent-sessions'); process.exit(0); }
 const entry = state.worktrees.find(entry => entry.path === args[1]);
-if (!entry?.leased || args[args.indexOf('--if-lease-id') + 1] !== entry.lease_id || args.includes('--force') || args.includes('--include-in-use')) process.exit(2);
+if (!entry?.leased || args[args.indexOf('--if-lease-id') + 1] !== entry.lease_id || args.includes('--force')) process.exit(2);
+if (args[0] === 'destroy' && (!args.includes('--include-in-use') || !args.includes('--terminate-agent-sessions') || !args.includes('--expire-after'))) { console.error('checkout still has processes'); process.exit(2); }
 if (args[0] === 'return') entry.leased = false;
 else if (args[0] === 'destroy' && args.includes('--yes') && args.includes('--include-leased') && args.includes('--include-unlanded')) {
   const removed = spawnSync('git', ['worktree', 'remove', '--force', '--', entry.path], { cwd: ${JSON.stringify(f.repo)}, encoding: 'utf8' });
@@ -1988,6 +1993,7 @@ describe("storage cleanup reports and local file policies", () => {
       const retainedHead = (yield* f.command(f.worktree, ["rev-parse", "HEAD"])).stdout.trim();
       yield* f.fs.writeFileString(`${f.worktree}/tracked.txt`, "discard unpublished edits");
       yield* f.fs.symlink(outside, `${f.worktree}/node_modules`);
+      yield* f.openTerminal({ cwd: f.worktree, worktreePath: f.worktree });
       const report = yield* f.service.runNow;
       expect(report.entries.find((entry) => entry.path === f.worktree)).toMatchObject({
         outcome: "removed",

@@ -96,7 +96,6 @@ describe("serverSettings helpers", () => {
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: {
-        leaseHardExpiryDays: 7,
         worktreeAfterDays: 8,
         worktreeOnMerge: true,
         logsAfterDays: 30,
@@ -107,7 +106,6 @@ describe("serverSettings helpers", () => {
         storageCleanup: { worktreeAfterDays: null },
       }).storageCleanup,
     ).toMatchObject({
-      leaseHardExpiryDays: 7,
       worktreeAfterDays: null,
       worktreeOnMerge: true,
       logsAfterDays: 30,

@@ -292,10 +292,6 @@ def required_space(candidate):
     return total + (USERDATA / 'statev2.sqlite').stat().st_size + 1024 * 1024 * 1024
 
 
-def app_running():
-    return bool(open_pids([APP]))
-
-
 def install(build, check_only, assume_yes, accept_unknown):
     if os.geteuid() == 0:
         raise Stop('Run this as your normal macOS user, without sudo.')
@@ -412,13 +408,10 @@ def finish(build, record, receipt, save, stage, previous, version, backup):
     except OSError as error:
         warn(f'Could not mark the build as installed: {error}')
     try:
-        if app_running():
-            receipt['launch'] = 'already-running'
-            say(f'Installed {version}. T3 is already running the new app.')
-        else:
-            launched = subprocess.run(['/usr/bin/open', str(APP)], capture_output=True, text=True).returncode == 0
-            receipt['launch'] = 'requested' if launched else 'not-started'
-            say(f'Installed {version}.' + (' Opening T3.' if launched else ' Open T3 from /Applications.'))
+        # LaunchServices reuses an existing instance; unrelated bundle readers must not suppress launch.
+        launched = subprocess.run(['/usr/bin/open', str(APP)], capture_output=True, text=True).returncode == 0
+        receipt['launch'] = 'requested' if launched else 'not-started'
+        say(f'Installed {version}.' + (' Opening T3.' if launched else ' Open T3 from /Applications.'))
         save()
     except (OSError, Stop) as error:
         say(f'Installed {version}. Open T3 from /Applications.')

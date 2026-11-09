@@ -900,6 +900,8 @@ describe("Treehouse worktrees", () => {
     ["registration", "none"],
     ["replacement", "none"],
     ["allocation", "local work"],
+    ["allocation", "occupied source branch"],
+    ["replacement", "occupied source branch"],
     ["allocation", "another branch"],
     ["replacement", "active preparation"],
     ["replacement", "foreign binding"],
@@ -970,6 +972,10 @@ describe("Treehouse worktrees", () => {
           branch: "recover-resume",
           threadId: "owner",
         };
+        if (blocker === "occupied source branch") {
+          yield* f.settings.updateSettings({ branchNamePrefix: "pablosaez/" });
+          if (stage === "replacement") yield* f.git({ args: ["switch", "recover-resume"] });
+        }
         const operation = yield* treehouse
           .resume({ ...request, preparationScope: preparation })
           .pipe(Effect.forkChild());
@@ -978,6 +984,8 @@ describe("Treehouse worktrees", () => {
         if (blocker !== "active preparation") yield* Scope.close(preparation, Exit.void);
         if (blocker === "local work")
           yield* f.fs.writeFileString(f.path.join(f.slot, "keep-work"), "retained local work");
+        if (blocker === "occupied source branch")
+          yield* f.git({ args: ["switch", "recover-resume"] });
         if (blocker === "another branch")
           yield* f.git({ cwd: f.slot, args: ["switch", "-c", "other-owner"] });
         if (blocker === "foreign binding")
@@ -1023,7 +1031,7 @@ describe("Treehouse worktrees", () => {
           Effect.provide(TreehouseWorktrees.layer),
         );
         const retry = restarted.resume({ ...request, preparationScope: yield* Effect.scope });
-        if (blocker !== "none") {
+        if (blocker !== "none" && blocker !== "occupied source branch") {
           assert.isTrue(Result.isFailure(yield* retry.pipe(Effect.result)));
           assert.strictEqual(yield* f.fs.readFileString(stateFile), allocatedState);
           const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
@@ -1052,15 +1060,24 @@ describe("Treehouse worktrees", () => {
         }
         assert.strictEqual(yield* retry, f.slot);
         assert.strictEqual(yield* f.fs.readFileString(stateFile), allocatedState);
-        assert.strictEqual(
-          yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] }),
-          "recover-resume",
-        );
+        const branch = yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] });
+        if (blocker === "occupied source branch") {
+          assert.match(branch, /^pablosaez\//);
+          assert.strictEqual(
+            yield* f.git({ args: ["branch", "--show-current"] }),
+            "recover-resume",
+          );
+          assert.strictEqual(yield* f.git({ args: ["rev-parse", "recover-resume"] }), f.parentSha);
+        } else assert.strictEqual(branch, "recover-resume");
         assert.strictEqual(yield* f.git({ cwd: f.slot, args: ["rev-parse", "HEAD"] }), f.parentSha);
         const calls = yield* f.fs.readFileString(f.path.join(f.root, "calls"));
         assert.strictEqual(calls.split("\n").filter((line) => line.startsWith("get ")).length, 2);
         const recovered = yield* f.leases.read(f.slot);
         const released = yield* f.leases.releasedThread({ path: f.slot, threadId: "owner" });
+        if (blocker === "occupied source branch") {
+          assert.strictEqual(released!.record.release!.resume!.branch, branch);
+          assert.strictEqual(yield* retry, f.slot);
+        }
         assert.strictEqual(
           released!.record.release!.replacement!.leaseId,
           recovered!.record.lease.lease_id,
@@ -1197,22 +1214,15 @@ describe("Treehouse worktrees", () => {
         assert.isTrue(Result.isFailure(denied));
         if (Result.isFailure(denied)) assert.match(denied.failure.message, /\(in-use\)/);
         assert.strictEqual(yield* f.fs.readFileString(released!.recordPath), originalRecord);
-      } else if (state === "occupied branch") {
-        assert.isTrue(Result.isFailure(yield* f.treehouse.resume(request).pipe(Effect.result)));
-        const retained = yield* f.leases.releasedThread({
-          path: f.slot,
-          threadId: f.context.threadId,
-        });
-        assert.isDefined(retained!.record.release!.resume!.lease);
-        assert.isUndefined(retained!.record.release!.replacement);
       } else {
         const replacement = f.path.join(f.root, "pool/2/repo");
         assert.strictEqual(yield* f.treehouse.resume(request), replacement);
         assert.strictEqual(yield* f.treehouse.resume(request), replacement);
-        assert.strictEqual(
-          yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] }),
-          "access-owner",
-        );
+        const branch = yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] });
+        if (state === "occupied branch") {
+          assert.notStrictEqual(branch, "access-owner");
+          assert.strictEqual(yield* f.git({ args: ["rev-parse", "access-owner"] }), f.parentSha);
+        } else assert.strictEqual(branch, "access-owner");
         assert.strictEqual(
           yield* f.git({ cwd: replacement, args: ["rev-parse", "HEAD"] }),
           f.parentSha,

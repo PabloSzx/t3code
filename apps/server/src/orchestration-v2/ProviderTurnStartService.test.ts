@@ -1347,7 +1347,7 @@ effectIt.effect.each(["current", "stopped", "replaced"] as const)(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-effectIt.live.each(["normal", "legacy"] as const)(
+effectIt.live.each(["normal", "legacy", "occupied branch"] as const)(
   "starts a returned conversation in its rebound lease, not its recycled old path (%s)",
   (state) =>
     Effect.gen(function* () {
@@ -1483,26 +1483,41 @@ effectIt.live.each(["normal", "legacy"] as const)(
         path: null,
       });
       yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+      if (state === "occupied branch") {
+        yield* f.git({ args: ["switch", "feature/restore"] });
+        yield* f.fs.writeFileString(f.path.join(f.cwd, "keep-primary-work"), "primary edits");
+      }
       yield* harness.start;
       const replacement = f.path.join(f.root, "pool", "2", "repo");
+      const branch = yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] });
       expect(harness.projection().thread.worktreePath).toBe(replacement);
       expect(harness.open).toHaveBeenCalledWith(
         expect.objectContaining({ runtimePolicy: expect.objectContaining({ cwd: replacement }) }),
       );
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
       expect(harness.startRootRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          appThread: expect.objectContaining({ worktreePath: replacement }),
+          appThread: expect.objectContaining({ worktreePath: replacement, branch }),
           runtimePolicy: expect.objectContaining({ cwd: replacement }),
           checkpointScope: expect.objectContaining({ cwd: replacement }),
+          message: expect.objectContaining({ text: "Continue" }),
         }),
       );
       expect(yield* f.git({ cwd: f.slot, args: ["branch", "--show-current"] })).toBe("unrelated");
-      expect(yield* f.git({ cwd: replacement, args: ["branch", "--show-current"] })).toBe(
-        "feature/restore",
-      );
+      if (state === "occupied branch") {
+        expect(branch).not.toBe("feature/restore");
+        expect(yield* f.git({ args: ["branch", "--show-current"] })).toBe("feature/restore");
+        expect(yield* f.fs.readFileString(f.path.join(f.cwd, "keep-primary-work"))).toBe(
+          "primary edits",
+        );
+        expect(yield* f.git({ args: ["rev-parse", "feature/restore"] })).toBe(f.parentSha);
+        expect(yield* f.git({ cwd: replacement, args: ["rev-parse", "HEAD"] })).toBe(f.parentSha);
+      } else expect(branch).toBe("feature/restore");
+      expect(harness.projection().thread.branch).toBe(branch);
       yield* f.leases.assertThread({ path: replacement, threadId });
       const child = yield* projections.getThread(childId);
       expect(child.worktreePath).toBe(replacement);
+      expect(child.branch).toBe(branch);
       expect(child.archivedAt).toEqual(now);
       yield* f.leases.assertThread({ path: replacement, threadId: childId });
     }).pipe(

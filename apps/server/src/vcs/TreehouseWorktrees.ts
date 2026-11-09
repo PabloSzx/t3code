@@ -1,4 +1,6 @@
-import { GitCommandError, type VcsCreateWorktreeInput } from "@t3tools/contracts";
+import { GitCommandError, type ProjectId, type VcsCreateWorktreeInput } from "@t3tools/contracts";
+import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
@@ -41,6 +43,7 @@ export interface TreehouseIdleDestroyOptions extends TreehouseIdleReturnOptions 
   readonly leaseId: string;
 }
 export interface TreehouseResumeOptions {
+  readonly projectId?: ProjectId;
   readonly cwd: string;
   readonly path: string;
   readonly branch: string;
@@ -265,7 +268,10 @@ const make = Effect.gen(function* () {
               args: ["symbolic-ref", "--quiet", "HEAD"],
               cwd: canonical,
             });
-            if (branch.code === 0 && branch.stdout.trim() === `refs/heads/${input.refName}`)
+            if (
+              branch.code === 0 &&
+              branch.stdout.trim() === `refs/heads/${input.newRefName ?? input.refName}`
+            )
               return canonical;
             if (branch.code !== 1)
               return yield* new TreehouseLeaseError({ path: canonical, reason: "stale-binding" });
@@ -612,7 +618,7 @@ const make = Effect.gen(function* () {
                   });
                   if (
                     (yield* fs.realPath(common)) !== (yield* fs.realPath(actual)) ||
-                    branch !== `refs/heads/${input.branch}`
+                    branch !== `refs/heads/${release.resume?.branch ?? input.branch}`
                   )
                     return yield* new TreehouseLeaseError({
                       path: input.path,
@@ -620,15 +626,53 @@ const make = Effect.gen(function* () {
                     });
                   return release.replacement.path;
                 }
+                let recoveryBranch = release.resume?.branch;
+                if (recoveryBranch === undefined) {
+                  const worktrees = yield* run({
+                    cwd: input.cwd,
+                    command: "git",
+                    args: ["worktree", "list", "--porcelain", "-z"],
+                    trimOutput: false,
+                  });
+                  const occupied = worktrees.split("\0\0").some((entry) => {
+                    const fields = entry.split("\0");
+                    return (
+                      fields.includes(`branch refs/heads/${input.branch}`) &&
+                      !fields.includes(`worktree ${release.resume?.lease?.path}`)
+                    );
+                  });
+                  if (occupied) {
+                    const current = yield* settings.getSettings;
+                    const naming =
+                      input.projectId === undefined
+                        ? current
+                        : resolveProjectSettings(current, input.projectId).settings;
+                    const token = Hex.encode(yield* random.randomBytes(16));
+                    recoveryBranch = buildTemporaryWorktreeBranchName({
+                      randomHex: () => token,
+                      naming: {
+                        mode: naming.branchNamingMode,
+                        prefix: naming.branchNamePrefix,
+                        instructions: naming.branchNameInstructions,
+                      },
+                    });
+                  }
+                }
                 const resuming = yield* leases.withLock({
                   path: input.path,
                   effect: leases.beginResume({
                     owned: released,
                     holder: `t3-code:${Hex.encode(yield* random.randomBytes(16))}`,
+                    ...(recoveryBranch === undefined ? {} : { branch: recoveryBranch }),
                   }),
                 });
                 const created = yield* create(
-                  { cwd: input.cwd, refName: input.branch, path: null },
+                  {
+                    cwd: input.cwd,
+                    refName: recoveryBranch === undefined ? input.branch : release.headSha,
+                    ...(recoveryBranch === undefined ? {} : { newRefName: recoveryBranch }),
+                    path: null,
+                  },
                   {
                     preparationScope: input.preparationScope,
                     resume: resuming,

@@ -77,6 +77,7 @@ export interface RebindThreadWorktreeOptions {
   readonly familyThreadIds?: readonly ThreadId[];
   readonly path: string;
   readonly branch: string;
+  readonly nextBranch?: string;
   readonly eventId: OrchestrationV2DomainEvent["id"];
   readonly occurredAt: DateTime.Utc;
 }
@@ -569,7 +570,7 @@ const layerBase: Layer.Layer<
                   reason: "stale-binding",
                 });
               if (
-                current.branch === input.branch &&
+                current.branch === (input.nextBranch ?? input.branch) &&
                 current.worktreePath === input.path &&
                 input.path !== input.previousPath
               ) {
@@ -594,7 +595,12 @@ const layerBase: Layer.Layer<
                 type: "thread.metadata-updated",
                 threadId,
                 occurredAt: input.occurredAt,
-                payload: { ...current, worktreePath: input.path, updatedAt: input.occurredAt },
+                payload: {
+                  ...current,
+                  branch: input.nextBranch ?? input.branch,
+                  worktreePath: input.path,
+                  updatedAt: input.occurredAt,
+                },
               });
             }
             if (input.path !== input.previousPath) {

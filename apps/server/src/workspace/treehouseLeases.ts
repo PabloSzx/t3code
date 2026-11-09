@@ -26,6 +26,7 @@ export const TreehouseLease = Schema.Struct({
   base_branch: Schema.optional(Schema.String),
 });
 const Resume = Schema.Struct({
+  branch: Schema.optional(Schema.String),
   holder: Schema.String.check(Schema.isPattern(/^t3-code:[a-f0-9]{32}$/)),
   allocationStarted: Schema.Boolean,
   lease: Schema.optional(TreehouseLease),
@@ -259,6 +260,7 @@ export class TreehouseLeaseStore extends Context.Service<
     readonly beginResume: (input: {
       readonly owned: Owned;
       readonly holder: string;
+      readonly branch?: string;
     }) => Effect.Effect<Owned, TreehouseLeaseError>;
     readonly startResumeAllocation: (owned: Owned) => Effect.Effect<void, TreehouseLeaseError>;
     readonly finishResumeAllocation: (input: {
@@ -849,6 +851,7 @@ const make = Effect.gen(function* () {
                 : {}),
               resume: {
                 ...(confirmed ? previous : { holder: input.holder, allocationStarted: false }),
+                ...(input.branch === undefined ? {} : { branch: previous?.branch ?? input.branch }),
                 ownerPid,
                 ownerId,
               },

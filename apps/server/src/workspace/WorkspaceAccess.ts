@@ -29,7 +29,7 @@ export class WorkspaceAccessError extends Schema.TaggedError<WorkspaceAccessErro
   { threadId: ThreadId, cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "This conversation's workspace is unavailable. Resume it with an explicit workspace action; do not use its saved checkout path.";
+    return "T3 could not verify a safe workspace for this conversation. Sending another message retries workspace recovery; do not use its saved checkout path.";
   }
 }
 type ThreadLookup = ProjectionStore.ProjectionStoreV2 | ProjectService.ProjectService;
@@ -148,6 +148,7 @@ const make = Effect.gen(function* () {
               Effect.provide(TreehouseWorktrees.layer),
             );
             const resumed = yield* treehouse.resume({
+              projectId: thread.projectId,
               cwd: project.value.workspaceRoot,
               path: cwd,
               branch: thread.branch,
@@ -159,6 +160,7 @@ const make = Effect.gen(function* () {
                 path: cwd,
                 reason: "stale-binding",
               });
+            const recovered = yield* leases.releasedThread({ path: cwd, threadId: input.threadId });
             const sink = yield* EventSink.EventSinkV2;
             const ids = yield* IdAllocator.IdAllocatorV2;
             yield* sink.rebindWorktree({
@@ -168,6 +170,7 @@ const make = Effect.gen(function* () {
                 released.record.release?.threadIds.map((id) => ThreadId.make(id)) ?? [],
               path: resumed,
               branch: thread.branch,
+              nextBranch: recovered?.record.release?.resume?.branch ?? thread.branch,
               eventId: yield* ids.allocate.event({ threadId: input.threadId }),
               occurredAt: yield* DateTime.now,
             });

@@ -3674,32 +3674,52 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("keeps an input dialog's title as the header above its placeholder", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime, takeEvent } = yield* openRuntime(fake);
-      yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      yield* fake.emit({
-        type: "extension_ui_request",
-        id: "ui-input-placeholder",
-        method: "input",
-        title: "Name",
-        placeholder: "Your name",
-      });
-      const event = yield* takeEvent(
-        (event) =>
-          event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
-      );
-      if (event.type !== "turn_item.updated" || event.turnItem.type !== "user_input_request") {
-        return assert.fail("expected a user input request");
-      }
-      assert.equal(event.turnItem.questions[0]?.header, "Name");
-      assert.equal(event.turnItem.questions[0]?.question, "Your name");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  it.effect.each([
+    { title: "Name", placeholder: "Your name", answer: "" },
+    {
+      title:
+        '[Hold selection] Which holds should I revisit?\n\n1. First hold — Investigate the first hold.\n2. Second hold — Investigate the second hold.\n3. Third hold — Investigate the third hold.\n\nEnter the numbers of all that apply, comma-separated (e.g. "1,3"), or type a custom answer as plain text.',
+      placeholder: "1,3",
+      answer: " 1,3\n",
+    },
+  ])(
+    "keeps input instructions readable and returns exact answers: $placeholder",
+    ({ title, placeholder, answer }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* fake.emit({
+          type: "extension_ui_request",
+          id: "ui-input-placeholder",
+          method: "input",
+          title,
+          placeholder,
+        });
+        const event = yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "user_input_request",
+        );
+        if (event.type !== "turn_item.updated" || event.turnItem.type !== "user_input_request") {
+          return assert.fail("expected a user input request");
+        }
+        const question = decodeUserInputQuestions(event.turnItem.questions)[0];
+        assert.equal(question?.header, "Question");
+        assert.equal(question?.question, `${title}\n\n${placeholder}`);
+        assert.deepEqual(question?.options, []);
+        assert.equal(question?.initialAnswer, "");
+        yield* runtime.respondToRuntimeRequest({
+          requestId: event.turnItem.requestId,
+          answers: { "ui-input-placeholder": answer },
+        });
+        const response = yield* fake.takeRequest("extension_ui_response");
+        assert.equal(response["value"], answer);
+        assert.isUndefined(response["cancelled"]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("emits a valid empty select option and returns its original value", () =>

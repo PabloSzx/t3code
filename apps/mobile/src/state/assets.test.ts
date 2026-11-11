@@ -1,4 +1,5 @@
 import {
+  AssetWorkspaceAssetNotFoundError,
   AuthFilesystemReadScope,
   EnvironmentAuthorizationError,
   EnvironmentId,
@@ -6,7 +7,7 @@ import {
   type AuthSessionState,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { AsyncResult } from "effect/reactivity";
+import { Atom, AsyncResult } from "effect/reactivity";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -15,6 +16,9 @@ const state = vi.hoisted(() => ({
   assetAtom: {},
   mint: vi.fn(),
   assetQuery: vi.fn(),
+  executeQuery: vi.fn(),
+  preparedConnectionAtom: null as unknown,
+  availabilityAtom: null as unknown,
 }));
 
 vi.mock("react", () => ({ useCallback: <A>(callback: A) => callback }));
@@ -26,17 +30,13 @@ vi.mock("@effect/atom-react", () => ({
       ? AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: 1 })
       : AsyncResult.initial(false),
 }));
-vi.mock("./session", async () => {
-  const { Atom } = await import("effect/reactivity");
-  const prepared = Atom.make({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } });
-  return {
-    environmentSession: {
-      sessionStateAtom: () => ({}),
-      preparedConnectionValueAtom: () => prepared,
-    },
-    usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } }),
-  };
-});
+vi.mock("./session", () => ({
+  environmentSession: {
+    sessionStateAtom: () => ({}),
+    preparedConnectionValueAtom: () => state.preparedConnectionAtom,
+  },
+  usePreparedConnection: () => ({ _tag: "Some", value: { httpBaseUrl: "https://host.test" } }),
+}));
 vi.mock("./presentation", () => ({
   useEnvironmentPresentation: () => ({
     isReady: true,
@@ -48,12 +48,9 @@ vi.mock("./query", () => ({
 }));
 vi.mock("./projectClones", () => ({ environmentProjectCloneListAtom: () => null }));
 vi.mock("./workspace-access", () => ({ useScopedWorkspaceQuery: <A>(atom: A) => atom }));
-vi.mock("./shell", async () => {
-  const { Atom, AsyncResult } = await import("effect/reactivity");
-  // Availability that never arrives, as before the first subscription result.
-  const pending = Atom.make(AsyncResult.initial(true));
-  return { shellEnvironment: { workspaceAvailability: () => pending } };
-});
+vi.mock("./shell", () => ({
+  shellEnvironment: { workspaceAvailability: () => state.availabilityAtom },
+}));
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
 vi.mock("../connection/catalog", () => ({
   environmentCatalog: { sessionGenerationAtom: () => null },
@@ -61,6 +58,10 @@ vi.mock("../connection/catalog", () => ({
 vi.mock("@t3tools/client-runtime/state/assets", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/state/assets")>()),
   createAssetEnvironmentAtoms: () => ({ createUrl: state.assetQuery }),
+}));
+vi.mock("@t3tools/client-runtime/state/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/state/runtime")>()),
+  executeAtomQuery: state.executeQuery,
 }));
 vi.mock("./use-atom-query-runner", () => ({ useAtomQueryRunner: () => state.mint }));
 
@@ -73,6 +74,12 @@ const resource = { _tag: "media-file", threadId, path: "/repo/image.png" } as co
 beforeEach(() => {
   state.session = null;
   state.phase = "connected";
+  state.preparedConnectionAtom = Atom.make({
+    _tag: "Some",
+    value: { httpBaseUrl: "https://host.test" },
+  });
+  state.availabilityAtom = Atom.make(AsyncResult.success(null));
+  state.executeQuery.mockReset();
   state.assetQuery.mockReset().mockReturnValue(state.assetAtom);
   state.mint
     .mockReset()
@@ -123,8 +130,26 @@ it("lets the server authorize an explicit refresh before the client grant loads"
 });
 
 it("stops waiting for workspace availability when the preview is closed", async () => {
+  state.availabilityAtom = Atom.make(AsyncResult.initial(true));
   const controller = new AbortController();
   const pending = refreshAssetUrl(environmentId, resource, controller.signal);
   controller.abort();
   expect(await pending).toBeNull();
+  expect(state.executeQuery).not.toHaveBeenCalled();
+});
+
+it("rejects with the server's error and resolves null only without a connection", async () => {
+  const missing = new AssetWorkspaceAssetNotFoundError({
+    resource,
+    checkedPath: "/repo/missing.png",
+  });
+  state.executeQuery.mockResolvedValue(AsyncResult.failure(Cause.fail(missing)));
+  state.preparedConnectionAtom = Atom.make({
+    _tag: "Some",
+    value: { httpBaseUrl: "https://host.test" },
+  });
+  await expect(refreshAssetUrl(environmentId, resource)).rejects.toBe(missing);
+
+  state.preparedConnectionAtom = Atom.make({ _tag: "None" });
+  await expect(refreshAssetUrl(environmentId, resource)).resolves.toBeNull();
 });

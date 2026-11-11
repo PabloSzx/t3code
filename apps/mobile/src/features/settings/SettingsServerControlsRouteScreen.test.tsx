@@ -51,7 +51,7 @@ vi.mock("./components/SourceControlSignInSection", () => ({
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("@react-navigation/native", () => ({ useNavigation: () => ({}) }));
 vi.mock("../../state/session", () => ({
-  readEnvironmentScope: () => true,
+  readEnvironmentScope: (environmentId: string) => !mocks.readOnly.has(environmentId),
   useEnvironmentsWithScope: () =>
     new Set(
       mocks.targets
@@ -92,7 +92,6 @@ vi.mock("./components/SettingsEnvironmentFilterHeader", () => ({
     icon: "line.3.horizontal.decrease.circle",
     items: [],
   }),
-  SettingsEnvironmentFilterHeader: () => null,
 }));
 vi.mock("./components/DatabaseStorageNotice", () => ({ DatabaseStorageNotice: () => null }));
 vi.mock("./components/SettingsSection", () => ({ SettingsSection: Children }));
@@ -143,6 +142,7 @@ vi.mock("./settings-environment-filter", () => ({
 }));
 
 import {
+  SettingsEnvironmentSourceControlRouteScreen,
   SettingsThreadsRouteScreen,
   SettingsWorktreesRouteScreen,
 } from "./SettingsServerControlsRouteScreen";
@@ -159,7 +159,11 @@ function environment(environmentId: string, label: string) {
         sidebarAutoSettleOnMerge: false,
       },
       environment: {
-        capabilities: { projectSettingsOverrides: true, threadAutoSettlement: true },
+        capabilities: {
+          projectSettingsOverrides: true,
+          threadAutoSettlement: true,
+          treehouseWorktrees: true,
+        },
       },
     },
   };
@@ -185,6 +189,30 @@ afterEach(() => {
 });
 
 describe("SettingsServerControlsRouteScreen", () => {
+  it.each([
+    { name: "writable host", supported: true, project: false, readOnly: false, canWrite: true },
+    { name: "older host", supported: false, project: false, readOnly: false, canWrite: false },
+    { name: "project override", supported: true, project: true, readOnly: false, canWrite: false },
+    { name: "read-only host", supported: true, project: false, readOnly: true, canWrite: false },
+  ])("keeps Treehouse writes host-scoped for a $name", async (input) => {
+    const target = environment("local", "Local");
+    target.serverConfig.environment.capabilities.treehouseWorktrees = input.supported;
+    mocks.targets = [target];
+    mocks.projectSelected = input.project;
+    if (input.readOnly) mocks.readOnly.add("local");
+    act(() => root.render(<SettingsEnvironmentSourceControlRouteScreen />));
+    const toggle = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].find(
+      (button) => button.textContent === "Use Treehouse for new worktrees",
+    )!;
+    expect(toggle.disabled).toBe(!input.canWrite);
+    await act(async () => toggle.click());
+    expect(mocks.updateSettings.mock.calls).toEqual(
+      input.canWrite
+        ? [[{ environmentId: "local", input: { patch: { treehouseWorktreesEnabled: true } } }]]
+        : [],
+    );
+  });
+
   it("sends a draft saved during a pending write once that write settles", async () => {
     const pending = Promise.withResolvers<AsyncResult.Success<void>>();
     mocks.updateSettings.mockReturnValueOnce(pending.promise);

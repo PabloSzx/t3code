@@ -1,8 +1,4 @@
-import type {
-  ModelSelection,
-  ProviderDriverKind,
-  ProviderOptionDescriptor,
-} from "@t3tools/contracts";
+import type { ModelSelection, ProviderOptionDescriptor } from "@t3tools/contracts";
 import {
   buildProviderOptionSelectionsFromDescriptors,
   getProviderOptionCurrentLabel,
@@ -110,7 +106,6 @@ export function getTraitSelectChange(
 }
 
 export function buildTraitsTriggerDisplay(input: {
-  provider: ProviderDriverKind;
   descriptors: ReadonlyArray<ProviderOptionDescriptor>;
   primarySelectDescriptorId: string | null;
   ultrathinkPromptControlled: boolean;
@@ -120,10 +115,12 @@ export function buildTraitsTriggerDisplay(input: {
   label: string;
   /** "Fast" or "Ultrafast" when a speed option is on. */
   speedLabel: string | null;
+  ultracode: boolean;
 } {
   let fastModeFallbackLabel: string | null = null;
   let speedLabel: string | null = null;
   let reasoningLabelIndex = -1;
+  let ultracodeLabelIndex = -1;
   const labels: Array<string> = [];
   for (const descriptor of input.descriptors) {
     if (descriptor.id === "fastMode" && descriptor.type === "boolean") {
@@ -131,11 +128,14 @@ export function buildTraitsTriggerDisplay(input: {
       fastModeFallbackLabel = speedLabel ?? "Normal";
       continue;
     }
-    if (
-      input.provider === "codex" &&
-      descriptor.id === "serviceTier" &&
-      descriptor.type === "select"
-    ) {
+    if (descriptor.id === "ultracode" && descriptor.type === "boolean") {
+      if (descriptor.currentValue === true) {
+        ultracodeLabelIndex = labels.length;
+        labels.push(descriptor.label);
+      }
+      continue;
+    }
+    if (descriptor.id === "serviceTier" && descriptor.type === "select") {
       const currentValue = getProviderOptionCurrentValue(descriptor);
       const fastTier = descriptor.options.find(({ label }) => label === "Fast");
       const ultrafastTier = descriptor.options.find(({ label }) => label === "Ultrafast");
@@ -165,7 +165,9 @@ export function buildTraitsTriggerDisplay(input: {
               input.modelSelection,
               input.reportedModelSelection,
             ) ??
-            (descriptor.id === input.primarySelectDescriptorId ? descriptor.label : undefined));
+            (descriptor.id === input.primarySelectDescriptorId || descriptor.id === "thinking"
+              ? descriptor.label
+              : null));
     if (typeof label === "string" && label.length > 0) {
       if (reasoningLabelIndex === -1 && isReasoningSelect(descriptor)) {
         reasoningLabelIndex = labels.length;
@@ -174,8 +176,9 @@ export function buildTraitsTriggerDisplay(input: {
     }
   }
 
+  const ultracode = ultracodeLabelIndex >= 0;
   if (labels.length === 0 && fastModeFallbackLabel !== null) {
-    return { label: fastModeFallbackLabel, speedLabel };
+    return { label: fastModeFallbackLabel, speedLabel, ultracode };
   }
   if (speedLabel) {
     if (reasoningLabelIndex >= 0) {
@@ -184,5 +187,5 @@ export function buildTraitsTriggerDisplay(input: {
       labels.push(speedLabel);
     }
   }
-  return { label: labels.join(" · "), speedLabel };
+  return { label: labels.join(" · "), speedLabel, ultracode };
 }

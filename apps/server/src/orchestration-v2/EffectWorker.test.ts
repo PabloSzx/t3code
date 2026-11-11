@@ -21,6 +21,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -114,6 +115,7 @@ function layerExecutorFor(input: {
         otherWorkingThreads: () => Effect.succeed([]),
         releaseUnlessBusy: () => Effect.succeed(true),
         releaseIdleForThreads: () => Effect.die("unused task retirement"),
+        subscribePromptSuggestion: () => Stream.empty,
       }),
     ),
     Layer.succeed(

@@ -267,6 +267,8 @@ describe("remote editor links", () => {
         reservationId: null,
       }),
     );
+    // A successful open would announce on a real timer that fires in the next test.
+    state.openUrl.mockResolvedValueOnce(false);
     await act(async () => screen.rerender(<FavoriteEditorFallback />));
 
     expect((await pressOpenFavorite()).defaultPrevented).toBe(true);

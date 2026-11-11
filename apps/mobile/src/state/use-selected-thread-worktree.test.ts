@@ -1,59 +1,104 @@
-import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type WorkspaceAvailability } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import type { WorkspaceSource } from "./workspace-access";
 
 const state = vi.hoisted(() => ({
-  shell: null as { projectId: string; worktreePath: string | null } | null,
-  detail: null as { thread: { projectId: string } } | null,
+  thread: null as {
+    id: ThreadId;
+    environmentId: EnvironmentId;
+    worktreePath: string | null;
+  } | null,
+  project: null as { workspaceRoot: string } | null,
   detailWorktreePath: null as string | null,
-  projects: new Map<string, { workspaceRoot: string }>(),
+  source: null as WorkspaceSource | null,
+  availability: null as WorkspaceAvailability | null,
 }));
 
-vi.mock("./entities", () => ({
-  useQuietThreadShell: (ref: unknown) => (ref === null ? null : state.shell),
-  useProject: (ref: { projectId: string } | null) =>
-    ref === null ? null : (state.projects.get(ref.projectId) ?? null),
+vi.mock("./use-thread-selection", () => ({
+  useThreadSelection: () => ({
+    selectedThread: state.thread,
+    selectedThreadProject: state.project,
+  }),
 }));
-vi.mock("./threads", async () => {
-  const { some, none } = await import("effect/Option");
-  return {
-    useEnvironmentThread: (environmentId: unknown, threadId: unknown) => ({
-      data:
-        environmentId !== null && threadId !== null && state.detail ? some(state.detail) : none(),
-    }),
-  };
-});
 vi.mock("./use-thread-detail", () => ({
-  useThreadWorktreePath: (ref: unknown) => (ref === null ? null : state.detailWorktreePath),
-  useSelectedThreadWorktreePath: () => null,
+  useSelectedThreadWorktreePath: () => state.detailWorktreePath,
 }));
 vi.mock("./workspace-access", () => ({
-  useWorkspaceSource: () => null,
-  useWorkspaceAvailability: () => null,
+  useWorkspaceSource: () => state.source,
+  useWorkspaceAvailability: () => state.availability,
 }));
-vi.mock("./use-thread-selection", () => ({ useThreadSelection: () => ({}) }));
 
-const { useThreadCwd } = await import("./use-selected-thread-worktree");
+import { useSelectedThreadWorktree } from "./use-selected-thread-worktree";
 
-const ref = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
+const environmentId = EnvironmentId.make("env");
+const threadId = ThreadId.make("thread");
+const worktreePath = "/repo/.worktrees/a";
 
-function setup(input: Partial<Omit<typeof state, "projects">>) {
-  Object.assign(state, { shell: null, detail: null, detailWorktreePath: null }, input);
-  state.projects = new Map([[ProjectId.make("project"), { workspaceRoot: "/repo" }]]);
+function setup() {
+  state.thread = { id: threadId, environmentId, worktreePath };
+  state.project = { workspaceRoot: "/repo" };
+  state.detailWorktreePath = null;
+  state.source = { environmentId, threadId, root: worktreePath };
+  state.availability = null;
 }
 
-describe("useThreadCwd", () => {
-  it("falls back to the project root from the loaded detail when the shell is missing", () => {
-    setup({ detail: { thread: { projectId: "project" } } });
-    expect(useThreadCwd(ref)).toBe("/repo");
+describe("useSelectedThreadWorktree", () => {
+  it.each([null, { state: "released", cwd: null }, { state: "unavailable", cwd: null }] as const)(
+    "keeps unavailable workspace paths only for explicit recovery: %j",
+    (availability) => {
+      setup();
+      state.availability = availability;
+      expect(useSelectedThreadWorktree()).toEqual({
+        recordedCwd: worktreePath,
+        selectedThreadWorktreePath: null,
+        selectedThreadCwd: null,
+      });
+
+      // A loaded detail can be the only record of the returned checkout.
+      state.thread = { id: threadId, environmentId, worktreePath: null };
+      state.detailWorktreePath = worktreePath;
+      expect(useSelectedThreadWorktree()).toEqual({
+        recordedCwd: worktreePath,
+        selectedThreadWorktreePath: null,
+        selectedThreadCwd: null,
+      });
+    },
+  );
+
+  it("exposes an available checkout and still supports native project workspaces", () => {
+    setup();
+    state.availability = {
+      state: "active",
+      cwd: worktreePath,
+      context: { threadId, generation: "a".repeat(32) },
+    };
+    expect(useSelectedThreadWorktree()).toEqual({
+      recordedCwd: worktreePath,
+      selectedThreadWorktreePath: worktreePath,
+      selectedThreadCwd: worktreePath,
+    });
+
+    state.thread = { id: threadId, environmentId, worktreePath: null };
+    state.availability = null;
+    expect(useSelectedThreadWorktree()).toEqual({
+      recordedCwd: "/repo",
+      selectedThreadWorktreePath: null,
+      selectedThreadCwd: "/repo",
+    });
   });
 
-  it("prefers the thread worktree over the project root", () => {
-    setup({ shell: { projectId: "project", worktreePath: "/repo/.worktrees/a" } });
-    expect(useThreadCwd(ref)).toBe("/repo/.worktrees/a");
-  });
-
-  it("is null without a thread", () => {
-    setup({ detail: { thread: { projectId: "project" } } });
-    expect(useThreadCwd(null)).toBeNull();
+  it.each([
+    { environmentId, threadId: ThreadId.make("another-thread"), root: worktreePath },
+    { environmentId: EnvironmentId.make("another-env"), threadId, root: worktreePath },
+    null,
+  ])("does not hide another workspace's paths under an unrelated scope: %j", (source) => {
+    setup();
+    state.source = source;
+    state.availability = { state: "released", cwd: null };
+    expect(useSelectedThreadWorktree()).toEqual({
+      recordedCwd: worktreePath,
+      selectedThreadWorktreePath: worktreePath,
+      selectedThreadCwd: worktreePath,
+    });
   });
 });

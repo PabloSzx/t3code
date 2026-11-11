@@ -34,7 +34,7 @@ function TreehouseRows() {
         serverScoped
         settingKeys={["treehouseWorktreesEnabled"]}
         {...searchableSetting("treehouse-worktrees")}
-        description="Use an installed Treehouse CLI on each selected environment for new worktrees in any Git repository. Off uses native Git for new allocations. Existing checkouts and leases stay unchanged. T3 does not install Treehouse or fall back to Git if allocation fails."
+        description="Use the host's installed Treehouse CLI for new worktrees. Off uses Git. Existing checkouts and leases stay unchanged. T3 neither installs Treehouse nor falls back to Git after allocation failures."
         status={
           !supportsTreehouse ? "Update selected environments to enable Treehouse." : undefined
         }

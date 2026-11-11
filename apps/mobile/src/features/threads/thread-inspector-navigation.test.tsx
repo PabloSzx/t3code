@@ -4,6 +4,8 @@ import * as React from "react";
 import { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { WorkspaceSource } from "../../state/workspace-access";
 
 const harness = vi.hoisted(() => ({
   dispatch: (_action: unknown) => {},
@@ -13,7 +15,7 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
-  useAdaptiveWorkspaceLayout: () => ({ fileInspector: { supported: true } }),
+  useWorkspacePaneState: () => ({ fileInspector: { supported: true } }),
 }));
 vi.mock("@react-navigation/native", async () => {
   const { createRequire } = await import("node:module");
@@ -170,7 +172,7 @@ it("keeps the parent when the maximized child's Agents sheet opens another child
   expect(screen.state).toEqual(originalState);
 });
 
-it("keeps a focused inspector registered across renders and updates its content", () => {
+it("keeps a focused inspector registered with current content and workspace scope", () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   const requireMobile = NodeModule.createRequire(import.meta.url);
   const listeners = { focus: new Set<() => void>(), blur: new Set<() => void>() };
@@ -196,6 +198,15 @@ it("keeps a focused inspector registered across renders and updates its content"
   };
   const navigationContext = React.createContext(navigation);
   const routeContext = React.createContext({ key: "file" });
+  const WorkspaceContext = React.createContext<WorkspaceSource | null>(null);
+  let workspace: WorkspaceSource = {
+    environmentId: EnvironmentId.make("environment"),
+    threadId: ThreadId.make("thread"),
+    root: "/repo/worktree",
+  };
+  function WorkspaceProbe() {
+    return <span data-workspace={JSON.stringify(React.use(WorkspaceContext))} />;
+  }
   const babel = requireMobile("@babel/core") as {
     transformFileSync(file: string, options: Record<string, unknown>): { code: string };
   };
@@ -226,7 +237,10 @@ it("keeps a focused inspector registered across renders and updates its content"
     Inspector?: (props: {
       readonly content: {
         readonly active: string;
-        readonly panes: ReadonlyArray<{ readonly key: string; readonly render: () => string }>;
+        readonly panes: ReadonlyArray<{
+          readonly key: string;
+          readonly render: () => React.ReactNode;
+        }>;
       };
     }) => null;
   } = {};
@@ -241,6 +255,7 @@ it("keeps a focused inspector registered across renders and updates its content"
         NavigationContext: navigationContext,
         NavigationRouteContext: routeContext,
       };
+    if (name === "../../state/workspace-access") return { WorkspaceContext };
     return {};
   };
   new Function("require", "exports", compiled.code)(load, exports);
@@ -250,7 +265,20 @@ it("keeps a focused inspector registered across renders and updates its content"
     if (content === undefined) return null;
     let panes = contents.get(content);
     if (!panes) {
-      panes = { active: "main", panes: [{ key: "main", render: () => content }] };
+      panes = {
+        active: "main",
+        panes: [
+          {
+            key: "main",
+            render: () => (
+              <>
+                {content}
+                <WorkspaceProbe />
+              </>
+            ),
+          },
+        ],
+      };
       contents.set(content, panes);
     }
     return <Inspector content={panes} />;
@@ -258,7 +286,13 @@ it("keeps a focused inspector registered across renders and updates its content"
   const root = createRoot(document.createElement("div"));
   using _root = { [Symbol.dispose]: () => act(() => root.unmount()) };
   const render = (content: string | undefined) =>
-    act(() => root.render(<Screen content={content} />));
+    act(() =>
+      root.render(
+        <WorkspaceContext value={workspace}>
+          <Screen content={content} />
+        </WorkspaceContext>,
+      ),
+    );
   const first = "first";
   render(first);
   registerWorkspaceInspector.mockClear();
@@ -275,6 +309,14 @@ it("keeps a focused inspector registered across renders and updates its content"
   using _pane = { [Symbol.dispose]: () => act(() => paneRoot.unmount()) };
   act(() => paneRoot.render(activeRender?.()));
   expect(paneContainer.textContent).toBe("second");
+  const renderedWorkspace = () =>
+    paneContainer.querySelector("[data-workspace]")?.getAttribute("data-workspace");
+  expect(renderedWorkspace()).toBe(JSON.stringify(workspace));
+
+  workspace = { ...workspace, threadId: ThreadId.make("other-thread"), root: "/repo/other" };
+  render(second);
+  act(() => paneRoot.render(activeRender?.()));
+  expect(renderedWorkspace()).toBe(JSON.stringify(workspace));
   const emit = (event: "focus" | "blur") =>
     act(() => {
       focused = event === "focus";

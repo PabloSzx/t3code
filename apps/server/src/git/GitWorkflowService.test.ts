@@ -39,7 +39,7 @@ it.live(
       for (const context of [f.context, undefined]) {
         const requests: ReadonlyArray<Effect.Effect<unknown, GitManagerServiceError>> = [
           workflow.listRefs({ cwd: alias }),
-          workflow.isRepository(alias),
+          workflow.repositoryRoot(alias),
           workflow.createRef({ cwd: alias, refName: "must-not-create", switchRef: true }),
         ];
         expect(
@@ -63,7 +63,7 @@ it.live(
           (ref) => ref.current && ref.name === "foreign-owner",
         ),
       ).toBe(true);
-      expect(yield* workflow.isRepository(f.cwd)).toBe(true);
+      expect(yield* workflow.repositoryRoot(f.cwd)).toBe(f.cwd);
       expect(yield* workflow.hasRefNamed({ cwd: f.cwd, refName: "must-not-create" })).toBe(false);
     }).pipe(
       Effect.provide(

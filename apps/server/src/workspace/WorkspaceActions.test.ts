@@ -83,6 +83,7 @@ const fixture = Effect.fn("WorkspaceActionsTest.fixture")(function* () {
   const projects = ProjectService.ProjectService.of({
     getById: () => Effect.succeedSome(project),
     getByWorkspaceRoot: () => Effect.succeedSome(project),
+    workspaceScanDirectory: unexpected,
     snapshot: Effect.succeed({ projects: [project], updatedAt: project.updatedAt }),
     getShell: unexpected,
     listShells: unexpected,
@@ -102,8 +103,7 @@ const fixture = Effect.fn("WorkspaceActionsTest.fixture")(function* () {
           ExternalLauncher.ExternalLauncher,
           ExternalLauncher.ExternalLauncher.of({
             resolveAvailableEditors: () => Effect.succeed(["vscode"]),
-            // @effect-diagnostics-next-line effectSucceedWithVoid:off -- The optional reveal-kind contract requires undefined rather than void.
-            resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+            resolveFileManagerRevealKind: () => Effect.undefined,
             launchBrowser: () => Effect.die("Unexpected browser"),
             launchEditor: (input) =>
               Effect.sync(() => {

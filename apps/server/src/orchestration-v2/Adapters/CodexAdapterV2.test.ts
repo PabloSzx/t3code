@@ -1692,11 +1692,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                       id: 2,
                       method: "thread/start",
                       params: {
+                        cwd: "/workspace",
+                        model: "gpt-5.4",
                         config: {
                           "tools.update_plan.enabled": true,
                           mcp_optional_startup_grace_ms: 10_000,
+                          "features.concurrent_reasoning_summaries": true,
+                          "shell_environment_policy.set.T3CODE_THREAD_ID": `thread-${scenario}`,
                           "shell_environment_policy.set.T3_MCP_URL": "http://127.0.0.1:43123/mcp",
                           "shell_environment_policy.set.T3_MCP_BEARER_TOKEN": "secret-codex-token",
+                          "mcp_servers.t3-code": {
+                            url: "http://127.0.0.1:43123/mcp",
+                            tool_timeout_sec: 3_900,
+                            http_headers: { Authorization: "Bearer secret-codex-token" },
+                            disabled_tools: ["t3_thread_wait"],
+                          },
+                          "mcp_servers.t3-code-direct": {
+                            url: "http://127.0.0.1:43123/mcp",
+                            tool_timeout_sec: 3_900,
+                            http_headers: { Authorization: "Bearer secret-codex-token" },
+                            enabled_tools: ["t3_thread_wait"],
+                            omit_tools_from: ["code_mode", "deferred"],
+                          },
                         },
                       },
                     },

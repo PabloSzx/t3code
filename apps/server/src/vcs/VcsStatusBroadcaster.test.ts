@@ -1529,8 +1529,12 @@ it.effect("publishes overlapping branch reads in checkout order", () => {
   const state = newState();
   return Effect.gen(function* () {
     const b = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-    const branches = yield* Stream.toPull(b.streamBranchStatus({ cwd: "/repo" }));
-    yield* branches;
+    const branches = yield* Queue.unbounded<{ readonly refName: string | null }>();
+    yield* b.streamBranchStatus({ cwd: "/repo" }).pipe(
+      Stream.runForEach((event) => Queue.offer(branches, event)),
+      Effect.forkScoped({ startImmediately: true }),
+    );
+    yield* Queue.take(branches);
     const entered = yield* Deferred.make<void>();
     const resume = yield* Deferred.make<void>();
     let reads = 0;
@@ -1549,7 +1553,10 @@ it.effect("publishes overlapping branch reads in checkout order", () => {
     yield* Deferred.succeed(resume, undefined);
     yield* Fiber.join(older);
     yield* Fiber.join(newer);
-    assert.deepEqual(yield* branches, [{ refName: "old" }, { refName: "new" }]);
+    assert.deepEqual(
+      [yield* Queue.take(branches), yield* Queue.take(branches)],
+      [{ refName: "old" }, { refName: "new" }],
+    );
   }).pipe(Effect.provide(layerTestFor(state)), Effect.scoped);
 });
 

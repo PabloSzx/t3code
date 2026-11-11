@@ -27,7 +27,7 @@ import * as Scope from "effect/Scope";
 import * as Clock from "effect/Clock";
 import * as Exit from "effect/Exit";
 import { accessFixture, testLayer as treehouseLayer } from "../vcs/TreehouseWorktrees.testkit.ts";
-import { base64UrlEncode, signPayload } from "../auth/utils.ts";
+import { base64UrlEncode } from "../auth/utils.ts";
 import { HttpClientRequest, HttpClientResponse, HttpServerResponse } from "effect/http";
 import { vi } from "vite-plus/test";
 
@@ -275,10 +275,7 @@ it.live.each(["lifetime", "media", "workspace", "legacy", "favicon", "source-con
           )).sourcePath,
         ).toBe("brand-b.svg");
       }
-      const secret = yield* (yield* ServerSecretStore.ServerSecretStore).getOrCreateRandom(
-        "asset-access-signing-key",
-        32,
-      );
+      const signer = yield* AssetSigner.AssetSigner;
       const payload = base64UrlEncode(
         yield* encodeLegacyWorkspaceClaim({
           version: 1,
@@ -290,7 +287,7 @@ it.live.each(["lifetime", "media", "workspace", "legacy", "favicon", "source-con
       );
       if (mode === "legacy")
         expect(
-          yield* resolveAsset(`${payload}.${signPayload(payload, secret)}`, "preview.html"),
+          yield* resolveAsset(`${payload}.${yield* signer.sign(payload)}`, "preview.html"),
         ).toBeNull();
       expect(
         (yield* issueAssetUrl({

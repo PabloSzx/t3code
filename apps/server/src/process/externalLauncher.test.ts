@@ -35,10 +35,10 @@ it.live("refuses recycled editor targets below the transport before spawning", (
     yield* f.fs.makeDirectory(bin);
     yield* f.fs.writeFileString(f.path.join(bin, "code"), "#!/bin/sh\n", { mode: 0o755 });
     const env = { PATH: bin, DISPLAY: ":0" };
+    const next = yield* f.recycle;
     const spawned: ChildProcess.StandardCommand[] = [];
     yield* Effect.gen(function* () {
       const launcher = yield* ExternalLauncher.ExternalLauncher;
-      const next = yield* f.recycle;
       for (const context of [undefined, f.context]) {
         const result = yield* launcher
           .launchEditor({ editor: "vscode", cwd: `${f.slot}/file:12:4` })
@@ -104,6 +104,7 @@ function makeMockDetachedHandle(input: MockSpawnResult & { readonly onUnref?: ()
 const layerTest = (input: {
   readonly platform: NodeJS.Platform;
   readonly config?: ServerConfig.ServerConfig["Service"];
+  readonly fileSystem?: FileSystem.FileSystem;
   readonly env?: Record<string, string>;
   readonly resolveExecutable?: (command: string) => string | undefined;
   readonly onSpawn?: (command: ChildProcess.StandardCommand) => void;
@@ -135,6 +136,9 @@ const layerTest = (input: {
         Layer.mergeAll(
           NodeServices.layer,
           layerSpawner,
+          ...(input.fileSystem === undefined
+            ? []
+            : [Layer.succeed(FileSystem.FileSystem, input.fileSystem)]),
           input.config === undefined
             ? ServerConfig.layerTest(process.cwd(), { prefix: "editor-config-" }).pipe(
                 Layer.provide(NodeServices.layer),
@@ -662,6 +666,20 @@ it.effect.skipIf(windowsHost)("does not open Zed with the OpenZFS zed daemon on 
         layerTest({
           platform: "linux",
           env: { HOME: home, PATH: binDir },
+          fileSystem: {
+            ...fs,
+            stat: (file) =>
+              file.startsWith(`${home}${path.sep}`)
+                ? fs.stat(file)
+                : Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "NotFound",
+                      module: "FileSystem",
+                      method: "stat",
+                      pathOrDescriptor: file,
+                    }),
+                  ),
+          },
           onSpawn: (command) => spawned.push(command),
           spawnResult: (command) => (command.args[0] === "--version" ? { exitCode: 1 } : undefined),
         }),

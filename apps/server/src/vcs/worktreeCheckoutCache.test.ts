@@ -14,14 +14,19 @@ import * as Layer from "effect/Layer";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as CheckoutCloner from "./CheckoutCloner.ts";
 import { makeGitVcsDriverCore } from "./GitVcsDriverCore.ts";
 import { makeWorktreeCheckoutCache } from "./worktreeCheckoutCache.ts";
 
 // Tests close their own scope first, so background cache builds finish before the temp folder goes.
-const layerTest = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-worktree-checkout-cache-test-",
-}).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
+const layerTest = ServerSettings.layerTest().pipe(
+  Layer.provideMerge(
+    ServerConfig.layerTest(process.cwd(), {
+      prefix: "t3-worktree-checkout-cache-test-",
+    }).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  ),
+);
 
 // macOS clones for real; elsewhere `cp -a` stands in, keeping mtimes like a clone does.
 const testCloner = Effect.gen(function* () {

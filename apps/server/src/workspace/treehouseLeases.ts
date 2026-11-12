@@ -67,6 +67,10 @@ const Use = Schema.Struct({
   path: Schema.String,
   leaseId: LeaseId,
   kind: Schema.Literals(["provider", "terminal", "preparation", "operation"]),
+  ownerPid: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 2_147_483_647 })),
+  ),
+  ownerId: Schema.optional(Schema.String),
 });
 const PoolState = Schema.Struct({
   version: Schema.Number,
@@ -519,12 +523,28 @@ const make = Effect.gen(function* () {
     (effect, input) =>
       effect.pipe(Effect.mapError((cause) => metadataError({ path: input.path, cause }))),
   );
+  const useOwner = Effect.fn("TreehouseLeases.useOwner")(function* () {
+    const pid = yield* HostProcess.ProcessId;
+    const runtime = Option.isSome(config)
+      ? yield* readPersistedServerRuntimeState(config.value.serverRuntimeStatePath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+        )
+      : Option.none();
+    return {
+      pid,
+      runtime: Option.filter(
+        runtime,
+        (state) => state.pid === pid && state.ownerId !== undefined && state.ownerId.length > 0,
+      ),
+    };
+  });
   const pinOwnedUse = Effect.fn("TreehouseLeases.pinOwnedUse")(function* (input: {
     owned: Owned;
     kind: (typeof Use.Type)["kind"];
   }) {
     const root = yield* location();
     const uses = path.join(root, "uses");
+    const owner = yield* useOwner();
     yield* fs.makeDirectory(uses, { recursive: true });
     const pin = yield* fs.makeTempDirectory({ directory: uses, prefix: "use-" });
     yield* writeJson({
@@ -533,9 +553,11 @@ const make = Effect.gen(function* () {
         path: input.owned.record.lease.path,
         leaseId: input.owned.record.lease.lease_id,
         kind: input.kind,
+        ownerPid: owner.pid,
+        ...(Option.isSome(owner.runtime) ? { ownerId: owner.runtime.value.ownerId } : {}),
       },
     });
-    return fs.remove(pin, { recursive: true }).pipe(Effect.ignoreCause({ log: true }));
+    return fs.remove(pin, { recursive: true, force: true }).pipe(Effect.ignoreCause({ log: true }));
   });
   const assertUnused = Effect.fn("TreehouseLeases.assertUnused")(
     function* (input: { owned: Owned; allowedThreadIds: readonly string[] }) {
@@ -564,15 +586,41 @@ const make = Effect.gen(function* () {
           () => Effect.succeed([]),
         ),
       );
+      const owner = uses.length > 0 ? yield* useOwner() : undefined;
       for (const name of uses) {
+        const pin = path.join(root, "uses", name);
+        const marker = path.join(pin, "use.json");
         const use = yield* fs
-          .readFileString(path.join(root, "uses", name, "use.json"))
+          .readFileString(marker)
           .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Use))));
-        if (use.leaseId === owned.record.lease.lease_id)
+        if (use.leaseId !== owned.record.lease.lease_id) continue;
+        const runtime = owner === undefined ? Option.none() : owner.runtime;
+        // A different nonce proves exit because server startup holds the exclusive home lock.
+        let exited =
+          Option.isSome(runtime) &&
+          use.ownerPid !== undefined &&
+          use.ownerId !== undefined &&
+          use.ownerId.length > 0 &&
+          use.ownerId !== runtime.value.ownerId;
+        if (!exited && use.ownerPid !== undefined && use.ownerPid !== owner?.pid)
+          exited = !isProcessAlive(use.ownerPid);
+        if (
+          !exited &&
+          use.ownerPid === undefined &&
+          use.ownerId === undefined &&
+          Option.isSome(runtime)
+        ) {
+          // Legacy pins have no process identity; only a verified subsequent server can retire them.
+          const startedAt = Date.parse(runtime.value.startedAt);
+          const modified = (yield* fs.stat(marker)).mtime;
+          exited = Option.exists(modified, (time) => time.getTime() < startedAt);
+        }
+        if (!exited)
           return yield* new TreehouseLeaseError({
             path: owned.record.lease.path,
             reason: "in-use",
           });
+        yield* fs.remove(pin, { recursive: true });
       }
     },
     (effect, input) =>

@@ -1375,6 +1375,118 @@ describe("Treehouse worktrees", () => {
         yield* f.leases.assertThread({ path: f.slot, threadId: "new-thread" });
       }).pipe(provide),
   );
+  it.live.each([
+    "previous server",
+    "dead owner",
+    "legacy before startup",
+    "legacy after startup",
+    "live foreign owner",
+    "malformed owner",
+    "missing runtime",
+    "foreign runtime",
+  ] as const)("reconciles orphan use markers conservatively: %s", (state) =>
+    Effect.gen(function* () {
+      const f = yield* accessFixture();
+      const config = yield* ServerConfig.ServerConfig;
+      const runtime = yield* ServerRuntimeState.makePersistedServerRuntimeState({
+        config,
+        port: 43123,
+      });
+      const firstScope = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(firstScope, exit));
+      const firstOwner = yield* ServerOwnership.acquireServerOwnership(
+        config.serverRuntimeStatePath,
+      ).pipe(Effect.provideService(Scope.Scope, firstScope));
+      yield* firstOwner.publish(runtime);
+      const releasePrevious = yield* f.leases.pinUse({
+        path: f.slot,
+        threadId: f.context.threadId,
+        kind: "provider",
+      });
+      yield* Effect.addFinalizer(() => releasePrevious);
+      const uses = f.path.join(f.registry, "uses");
+      const [pin] = yield* f.fs.readDirectory(uses);
+      assert.isDefined(pin);
+      const marker = f.path.join(uses, pin!, "use.json");
+      const owned = yield* f.leases.read(f.slot);
+      assert.isNotNull(owned);
+      if (state.startsWith("legacy")) {
+        yield* f.fs.writeFileString(
+          marker,
+          JSON.stringify({
+            path: f.slot,
+            leaseId: owned!.record.lease.lease_id,
+            kind: "provider",
+          }),
+        );
+        const timestamp = state === "legacy before startup" ? 1 : 4_102_444_800;
+        yield* f.fs.utimes(marker, timestamp, timestamp);
+      }
+      if (state === "live foreign owner" || state === "malformed owner")
+        yield* f.fs.writeFileString(
+          marker,
+          JSON.stringify({
+            path: f.slot,
+            leaseId: owned!.record.lease.lease_id,
+            kind: "provider",
+            ownerPid: state === "live foreign owner" ? process.pid : "unknown",
+          }),
+        );
+      if (state === "dead owner") {
+        const runner = yield* ProcessRunner.ProcessRunner;
+        const child = yield* runner.run({
+          command: process.execPath,
+          args: ["-e", "process.stdout.write(String(process.pid))"],
+        });
+        assert.strictEqual(child.code, 0);
+        const pid = Number(child.stdout);
+        assert.isTrue(Number.isInteger(pid) && pid > 0);
+        yield* f.fs.writeFileString(
+          marker,
+          JSON.stringify({
+            path: f.slot,
+            leaseId: owned!.record.lease.lease_id,
+            kind: "provider",
+            ownerPid: pid,
+          }),
+        );
+      }
+      yield* Scope.close(firstScope, Exit.void);
+      const secondOwner = yield* ServerOwnership.acquireServerOwnership(
+        config.serverRuntimeStatePath,
+      );
+      yield* secondOwner.publish(runtime);
+      const releaseCurrent = yield* f.leases.pinUse({
+        path: f.slot,
+        threadId: f.context.threadId,
+        kind: "terminal",
+      });
+      if (state === "missing runtime") yield* f.fs.remove(config.serverRuntimeStatePath);
+      if (state === "foreign runtime")
+        yield* ServerRuntimeState.persistServerRuntimeState({
+          path: config.serverRuntimeStatePath,
+          state: { ...runtime, pid: 2_147_483_647, ownerId: "foreign-runtime" },
+        });
+      const check = f.leases.assertUnused({
+        owned: owned!,
+        allowedThreadIds: [f.context.threadId],
+      });
+      assert.isTrue(Result.isFailure(yield* check.pipe(Effect.result)));
+      yield* releaseCurrent;
+      const recoverable =
+        state === "previous server" || state === "dead owner" || state === "legacy before startup";
+      if (recoverable) {
+        yield* check;
+        assert.isFalse(yield* f.fs.exists(marker));
+        assert.isNull(yield* f.release);
+        assert.strictEqual(yield* f.git({ args: ["rev-parse", "access-owner"] }), f.parentSha);
+      } else {
+        assert.isTrue(Result.isFailure(yield* check.pipe(Effect.result)));
+        assert.isTrue(yield* f.fs.exists(marker));
+        assert.isNotNull(yield* f.leases.read(f.slot));
+      }
+    }).pipe(provide),
+  );
   it.live("refuses unknown leases, missing pooled paths, and raw linked-worktree cleanup", () =>
     Effect.gen(function* () {
       const f = yield* fixture();

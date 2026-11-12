@@ -298,6 +298,7 @@ function makeLocalCommandHarness(input: {
   readonly ensureThreadFailure?: unknown;
   readonly historyReadFailureAfterFallback?: unknown;
   readonly resumeFailure?: ProviderAdapter.ProviderAdapterV2Error;
+  readonly piResumeTransportFailure?: boolean;
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
   readonly writeFailure?: unknown;
@@ -354,7 +355,13 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make(input.nativeGoals === undefined ? "codex" : "opencode"),
+    driver: ProviderDriverKind.make(
+      input.piResumeTransportFailure
+        ? "pi"
+        : input.nativeGoals === undefined
+          ? "codex"
+          : "opencode",
+    ),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -668,7 +675,11 @@ function makeLocalCommandHarness(input: {
       ],
     };
   }
-  if ("historyReadFailureAfterFallback" in input || "resumeFailure" in input) {
+  if (
+    "historyReadFailureAfterFallback" in input ||
+    "resumeFailure" in input ||
+    input.piResumeTransportFailure
+  ) {
     const nativeThreadRef = {
       driver: providerThread.driver,
       nativeId: "native-resume-thread",
@@ -775,7 +786,20 @@ function makeLocalCommandHarness(input: {
       ),
     ),
   );
-  const fallbackEnsureThread = vi.fn(() => Effect.succeed(providerThread));
+  const fallbackEnsureThread = vi.fn(() =>
+    Effect.succeed({
+      ...providerThread,
+      ...(input.piResumeTransportFailure
+        ? {
+            nativeThreadRef: {
+              driver: providerThread.driver,
+              nativeId: "recovered-pi-session",
+              strength: "strong" as const,
+            },
+          }
+        : {}),
+    }),
+  );
   const resumeFallbackSession = {
     driver: providerThread.driver,
     resumeThread: () =>
@@ -787,8 +811,17 @@ function makeLocalCommandHarness(input: {
             cause: "native thread is gone",
           }),
       ),
-    ensureThread: fallbackEnsureThread,
+    ensureThread: input.piResumeTransportFailure
+      ? () =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: providerThread.driver,
+              detail: "Pi transport closed during status reset",
+            }),
+          )
+      : fallbackEnsureThread,
   };
+  const close = vi.fn(() => Effect.void);
   const providerSession = {
     id: providerSessionId,
     driver: providerThread.driver,
@@ -832,39 +865,49 @@ function makeLocalCommandHarness(input: {
       ? Effect.succeed(sideChatSession as never)
       : input.interruptOpen === true
         ? Effect.interrupt
-        : "historyReadFailureAfterFallback" in input || "resumeFailure" in input
-          ? Effect.succeed(resumeFallbackSession as never)
-          : "ensureThreadFailure" in input
-            ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
-            : "openFailure" in input
-              ? Effect.sync(() => {
-                  if (input.interruptRunBeforeOpenFailure === true) interruptRun();
-                }).pipe(
-                  Effect.andThen(
-                    Effect.fail(
-                      new ProviderSessionManager.ProviderSessionOpenError({
-                        instanceId: newInstanceId,
-                        providerSessionId,
-                        cause: input.openFailure,
-                      }),
+        : input.piResumeTransportFailure && close.mock.calls.length > 0
+          ? Effect.succeed({
+              driver: providerThread.driver,
+              providerSession,
+              ensureThread: fallbackEnsureThread,
+            } as never)
+          : "historyReadFailureAfterFallback" in input ||
+              "resumeFailure" in input ||
+              input.piResumeTransportFailure
+            ? Effect.succeed(resumeFallbackSession as never)
+            : "ensureThreadFailure" in input
+              ? Effect.succeed({ driver: providerThread.driver, ensureThread } as never)
+              : "openFailure" in input
+                ? Effect.sync(() => {
+                    if (input.interruptRunBeforeOpenFailure === true) interruptRun();
+                  }).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new ProviderSessionManager.ProviderSessionOpenError({
+                          instanceId: newInstanceId,
+                          providerSessionId,
+                          cause: input.openFailure,
+                        }),
+                      ),
                     ),
-                  ),
-                )
-              : input.failReadsAfterRunning === true || input.previousTurn !== undefined
-                ? Effect.succeed({
-                    driver: providerThread.driver,
-                    providerSession,
-                    ensureThread: () => Effect.succeed(providerThread),
-                    resumeThread: () => Effect.succeed(projection.providerThreads[0]),
-                  } as never)
-                : Effect.die("A local command must not open a native session."),
+                  )
+                : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+                  ? Effect.succeed({
+                      driver: providerThread.driver,
+                      providerSession,
+                      ensureThread: () => Effect.succeed(providerThread),
+                      resumeThread: () => Effect.succeed(projection.providerThreads[0]),
+                    } as never)
+                  : Effect.die("A local command must not open a native session."),
   );
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >((runInput) =>
     input.sideChat !== undefined
       ? runInput.session.startTurn(runInput as never).pipe(Effect.orDie)
-      : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+      : input.failReadsAfterRunning === true ||
+          input.previousTurn !== undefined ||
+          input.piResumeTransportFailure
         ? Effect.suspend(() =>
             providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
           )
@@ -954,7 +997,7 @@ function makeLocalCommandHarness(input: {
       Layer.mergeAll(
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: (handoff) =>
-            input.sideChat?.nativeForkFrom === undefined
+            input.sideChat?.nativeForkFrom === undefined && !input.piResumeTransportFailure
               ? Effect.die("history read must fail first")
               : Effect.succeed({
                   ...handoff,
@@ -1006,7 +1049,7 @@ function makeLocalCommandHarness(input: {
               projection.runs.find((candidate) => candidate.id === id),
             ),
           getTurnStartHistory: () =>
-            input.sideChat !== undefined
+            input.sideChat !== undefined || input.piResumeTransportFailure
               ? Effect.succeed([])
               : Effect.fail(
                   new ProjectionStore.ProjectionStoreReadError({
@@ -1017,6 +1060,7 @@ function makeLocalCommandHarness(input: {
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open,
+          close,
           get: () =>
             Effect.succeed(
               input.previousTurn?.liveSession === false
@@ -1054,6 +1098,7 @@ function makeLocalCommandHarness(input: {
     createWorktree,
     open,
     fallbackEnsureThread,
+    close,
     writeIfRunCurrent,
     startRootRun,
     startTurn,
@@ -2198,6 +2243,26 @@ effectIt.effect("fails the run instead of replacing a native thread another clie
         failure: { class: "provider_error", message: detail },
       },
     ]);
+  }),
+);
+
+effectIt.effect("replaces a stopped Pi transport before recovering native context", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      piResumeTransportFailure: true,
+    });
+
+    yield* harness.start;
+
+    expect(harness.projection().runs.at(-1)?.status).toBe("running");
+    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef?.nativeId).toBe(
+      "recovered-pi-session",
+    );
+    expect(harness.projection().contextHandoffs).toMatchObject([
+      { summaryText: "PARENT_HISTORY", strategy: "full_thread_summary" },
+    ]);
+    expect(harness.startRootRun).toHaveBeenCalledOnce();
   }),
 );
 

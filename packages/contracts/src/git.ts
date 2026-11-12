@@ -106,6 +106,16 @@ const GitResolvedPullRequest = Schema.Struct({
 });
 export type GitResolvedPullRequest = typeof GitResolvedPullRequest.Type;
 
+export const TreehousePoolCapacity = Schema.Struct({
+  pool: TrimmedNonEmptyString,
+  max_trees: NonNegativeInt,
+  total: NonNegativeInt,
+  leased: NonNegativeInt,
+  unleased: NonNegativeInt,
+  unallocated: NonNegativeInt,
+});
+export type TreehousePoolCapacity = typeof TreehousePoolCapacity.Type;
+
 export const VcsStatusInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
 });

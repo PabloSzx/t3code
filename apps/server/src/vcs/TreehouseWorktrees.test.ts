@@ -59,6 +59,55 @@ const decodePoolSnapshot = Schema.decodeEffect(
   ),
 );
 
+it.live(
+  "decodes host pool capacity and rejects incompatible CLI reports instead of inventing headroom",
+  () =>
+    provide(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture();
+          const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
+            Effect.provide(TreehouseWorktrees.layer),
+          );
+          const report = {
+            pool: f.path.join(f.root, "pool"),
+            max_trees: 80,
+            total: 4,
+            leased: 3,
+            unleased: 1,
+            unallocated: 76,
+          };
+          for (const sample of [
+            { output: JSON.stringify(report), code: 0, valid: true },
+            { output: "not JSON", code: 0, valid: false },
+            { output: JSON.stringify({ ...report, leased: -1 }), code: 0, valid: false },
+            { output: JSON.stringify([]), code: 0, valid: false },
+            { output: JSON.stringify(report), code: 1, valid: false },
+          ]) {
+            yield* f.fs.writeFileString(
+              f.binary,
+              `#!${process.execPath}\nimport { readFileSync } from 'node:fs';\nreadFileSync(0);\nif (process.argv.slice(2).join(' ') !== 'capacity --json') process.exit(2);\nconsole.log(${JSON.stringify(sample.output)});\nprocess.exit(${sample.code});\n`,
+            );
+            const result = yield* treehouse.capacity({ cwd: f.cwd }).pipe(Effect.result);
+            if (sample.valid) {
+              assert(Result.isSuccess(result));
+              expect(result.success).toMatchObject({ max_trees: 80, leased: 3, unallocated: 76 });
+            } else {
+              assert(Result.isFailure(result));
+              expect(result.failure).toMatchObject({
+                _tag: "GitCommandError",
+                operation: "TreehouseWorktrees.capacity",
+              });
+            }
+          }
+          yield* f.settings.updateSettings({ treehouseWorktreesEnabled: false });
+          yield* f.fs.remove(f.binary);
+          expect(yield* treehouse.capacity({ cwd: f.cwd })).toBeNull();
+        }),
+      ),
+    ),
+);
+
 const historyLayer = EventSink.layer.pipe(
   Layer.provideMerge(
     Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(

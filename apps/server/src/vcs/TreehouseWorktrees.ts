@@ -1,4 +1,10 @@
-import { GitCommandError, type ProjectId, type VcsCreateWorktreeInput } from "@t3tools/contracts";
+import {
+  GitCommandError,
+  TreehousePoolCapacity,
+  WorkspaceOperation,
+  type ProjectId,
+  type VcsCreateWorktreeInput,
+} from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -54,6 +60,9 @@ export class TreehouseWorktrees extends Context.Service<
   TreehouseWorktrees,
   {
     readonly listLeases: Effect.Effect<readonly LeaseInventoryEntry[], GitCommandError>;
+    readonly capacity: (input: {
+      readonly cwd: string;
+    }) => Effect.Effect<TreehousePoolCapacity | null, GitCommandError>;
     readonly create: (
       input: VcsCreateWorktreeInput,
       options: TreehouseCreateOptions,
@@ -80,6 +89,7 @@ const isSpawnError = Schema.is(ProcessRunner.ProcessSpawnError);
 const isTimeoutError = Schema.is(ProcessRunner.ProcessTimeoutError);
 const TREEHOUSE_COMMAND_TIMEOUT = "15 minutes";
 const decodeLease = Schema.decodeEffect(Schema.fromJsonString(TreehouseLease));
+const decodeCapacity = Schema.decodeEffect(Schema.fromJsonString(TreehousePoolCapacity));
 const decodeInventoryLease = Schema.decodeUnknownEffect(TreehouseLease);
 const decodeAcquiredAt = Schema.decodeEffect(Schema.DateTimeUtcFromString);
 
@@ -308,6 +318,71 @@ const make = Effect.gen(function* () {
       ),
   );
   return TreehouseWorktrees.of({
+    capacity: Effect.fn("TreehouseWorktrees.capacity")(
+      function* (input) {
+        const current = yield* settings.getSettings;
+        if (!current.treehouseWorktreesEnabled) return null;
+        const binary = current.treehouseBinaryPath || "treehouse";
+        if (binary !== "treehouse" && !path.isAbsolute(binary)) {
+          return yield* new GitCommandError({
+            operation: "TreehouseWorktrees.capacity",
+            command: "treehouse capacity",
+            cwd: input.cwd,
+            detail: "Treehouse binary path must be absolute on this environment's host.",
+          });
+        }
+        const context = yield* WorkspaceOperation;
+        return yield* Effect.acquireUseRelease(
+          leases.pinOperation({
+            targets: [input.cwd],
+            ...(context === undefined ? {} : { context }),
+          }),
+          () =>
+            runner
+              .run({
+                cwd: input.cwd,
+                command: binary,
+                args: ["capacity", "--json"],
+                stdin: "",
+                timeout: "10 seconds",
+                maxOutputBytes: 64 * 1024,
+              })
+              .pipe(
+                Effect.flatMap(
+                  Effect.fnUntraced(function* (output) {
+                    if (output.code !== 0 || output.stdoutTruncated || output.stderrTruncated) {
+                      return yield* new GitCommandError({
+                        operation: "TreehouseWorktrees.capacity",
+                        command: "treehouse capacity",
+                        cwd: input.cwd,
+                        detail:
+                          "Worktree capacity is unavailable. Check that the host's Treehouse CLI supports capacity --json.",
+                        cause: output,
+                      });
+                    }
+                    return yield* decodeCapacity(output.stdout);
+                  }),
+                ),
+              ),
+          (release) => release,
+        );
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isGitError(cause)
+              ? cause
+              : new GitCommandError({
+                  operation: "TreehouseWorktrees.capacity",
+                  command: "treehouse capacity",
+                  cwd: input.cwd,
+                  detail:
+                    "Worktree capacity is unavailable. Check that the host's Treehouse CLI supports capacity --json.",
+                  cause,
+                }),
+          ),
+        ),
+    ),
     listLeases: Effect.gen(function* () {
       const current = yield* settings.getSettings;
       const pools = new Set<string>();

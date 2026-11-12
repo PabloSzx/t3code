@@ -5,6 +5,7 @@ import {
   CommandId,
   EnvironmentId,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
   ProviderInstanceId,
@@ -118,6 +119,7 @@ interface HarnessOptions {
   readonly deleteLocalBranchFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
   readonly existsFails?: boolean;
+  readonly otherThreadPath?: string;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -301,6 +303,21 @@ const makeHarness = (options: HarnessOptions = {}) => {
           dispatch,
           getThreadRecords,
           sendToThread,
+          getShellSnapshot: () =>
+            Effect.succeed({
+              threads:
+                options.otherThreadPath === undefined
+                  ? []
+                  : [
+                      {
+                        ...makeProjection({ worktreePath: options.otherThreadPath }).thread,
+                        id: ThreadId.make("other-thread"),
+                      } as OrchestrationV2ThreadShell,
+                    ],
+              archivedThreads: [],
+              snapshotSequence: 0,
+              schemaVersion: 1,
+            }),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
         Layer.mock(ProjectService.ProjectService)({
           getById,
@@ -321,6 +338,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
           listRefs,
           listLocalBranchNames,
           localStatus,
+          currentBranch: () => Effect.succeed(options.currentBranch ?? "dev"),
           fetchWorktreeBaseCommit,
           createWorktree,
           removeWorktree,
@@ -492,9 +510,151 @@ describe("t3_worktree_handoff", () => {
         _tag: "WorktreeMcpFailure",
         code: "already_in_worktree",
       });
+      const stale = yield* Effect.exit(
+        runHandoff(harness, {
+          branch: "feature/second",
+          expectedWorktreePath: "/worktrees/project/stale",
+        }),
+      );
+      expectTypedFailure(stale, { code: "invalid_request" });
       expect(harness.createWorktree).not.toHaveBeenCalled();
     });
   });
+
+  it.effect("replaces an inspected checkout without changing its staged or untracked files", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-switch-" });
+      const cwd = `${directory}/repo`;
+      const previousPath = `${directory}/previous`;
+      const nextPath = `${directory}/next`;
+      yield* fs.makeDirectory(cwd);
+      const command = (at: string, args: string[]) =>
+        git.execute({ operation: "handoff-switch-test", cwd: at, args });
+      yield* command(cwd, ["init", "-b", "main"]);
+      yield* command(cwd, ["config", "user.name", "Test"]);
+      yield* command(cwd, ["config", "user.email", "test@example.test"]);
+      yield* fs.writeFileString(`${cwd}/tracked.txt`, "base\n");
+      yield* command(cwd, ["add", "."]);
+      yield* command(cwd, ["commit", "-m", "base"]);
+      yield* git.createWorktree({
+        cwd,
+        refName: "main",
+        newRefName: "previous",
+        path: previousPath,
+      });
+      yield* fs.writeFileString(`${previousPath}/tracked.txt`, "staged\n");
+      yield* command(previousPath, ["add", "tracked.txt"]);
+      yield* fs.writeFileString(`${previousPath}/tracked.txt`, "unstaged\n");
+      yield* fs.writeFileString(`${previousPath}/untracked.txt`, "keep me\n");
+      const status = (yield* command(previousPath, ["status", "--porcelain=v1"])).stdout;
+      const harness = makeHarness({
+        thread: { branch: "previous", worktreePath: previousPath },
+        git: {
+          createWorktree: (input) => git.createWorktree({ ...input, cwd, path: nextPath }),
+        },
+      });
+      const result = yield* runHandoff(harness, {
+        branch: "replacement",
+        baseRef: "main",
+        expectedWorktreePath: previousPath,
+        runSetupScript: false,
+        continuationPrompt: "Continue the authorized work in this conversation.",
+      });
+      expect(result.worktreePath).toBe(nextPath);
+      expect(result.continuation.status).toBe("scheduled");
+      expect((yield* command(previousPath, ["status", "--porcelain=v1"])).stdout).toBe(status);
+      expect((yield* command(previousPath, ["show", ":tracked.txt"])).stdout).toBe("staged\n");
+      expect(yield* fs.readFileString(`${previousPath}/tracked.txt`)).toBe("unstaged\n");
+      expect(yield* fs.readFileString(`${previousPath}/untracked.txt`)).toBe("keep me\n");
+      expect(yield* fs.readFileString(`${nextPath}/tracked.txt`)).toBe("base\n");
+      expect(yield* fs.exists(`${nextPath}/untracked.txt`)).toBe(false);
+      expect(harness.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId,
+          worktreePath: nextPath,
+          expectedWorktreePath: previousPath,
+          expectedBranch: "previous",
+        }),
+      );
+      expect(harness.removeWorktree).not.toHaveBeenCalled();
+
+      const attachHarness = makeHarness({
+        thread: { branch: "replacement", worktreePath: nextPath },
+        git: {
+          listRefs: (input) => git.listRefs({ ...input, cwd }),
+          currentBranch: (target) =>
+            command(target, ["symbolic-ref", "--short", "HEAD"]).pipe(
+              Effect.map((result) => result.stdout.trim()),
+            ),
+        },
+      });
+      const attached = yield* runHandoff(attachHarness, {
+        branch: "previous",
+        existingWorktreePath: previousPath,
+        expectedWorktreePath: nextPath,
+      });
+      expect(attached.worktreePath).toBe(yield* fs.realPath(previousPath));
+      expect(attached.setupScript.status).toBe("skipped");
+      expect(attached.continuation.status).toBe("skipped");
+      expect(attachHarness.createWorktree).not.toHaveBeenCalled();
+      expect(attachHarness.runForThread).not.toHaveBeenCalled();
+      expect((yield* command(previousPath, ["status", "--porcelain=v1"])).stdout).toBe(status);
+
+      for (const refusal of ["wrong-repository", "owned", "dispatch-failure"] as const) {
+        const refused = makeHarness({
+          thread: { branch: "replacement", worktreePath: nextPath },
+          ...(refusal === "owned" ? { otherThreadPath: previousPath } : {}),
+          dispatchFails: refusal === "dispatch-failure",
+          git: {
+            listRefs: (input) => git.listRefs({ ...input, cwd }),
+            currentBranch: (target) =>
+              command(target, ["symbolic-ref", "--short", "HEAD"]).pipe(
+                Effect.map((result) => result.stdout.trim()),
+              ),
+          },
+        });
+        const failure = yield* runHandoff(refused, {
+          branch: "previous",
+          existingWorktreePath: refusal === "wrong-repository" ? cwd : previousPath,
+          expectedWorktreePath: nextPath,
+        }).pipe(Effect.exit);
+        expectTypedFailure(failure, {
+          code: refusal === "dispatch-failure" ? "operation_failed" : "invalid_request",
+        });
+        if (refusal !== "dispatch-failure") expect(refused.dispatch).not.toHaveBeenCalled();
+        expect(refused.removeWorktree).not.toHaveBeenCalled();
+        expect(refused.deleteLocalBranch).not.toHaveBeenCalled();
+        expect((yield* command(previousPath, ["status", "--porcelain=v1"])).stdout).toBe(status);
+      }
+      const missingPath = `${directory}/deleted`;
+      const recoveredPath = `${directory}/recovered`;
+      const missing = makeHarness({
+        thread: { branch: "previous", worktreePath: missingPath },
+        git: {
+          createWorktree: (input) => git.createWorktree({ ...input, cwd, path: recoveredPath }),
+        },
+      });
+      const recovered = yield* runHandoff(missing, {
+        branch: "recovered",
+        baseRef: "main",
+        expectedWorktreePath: missingPath,
+        runSetupScript: false,
+      });
+      expect(recovered.worktreePath).toBe(recoveredPath);
+      expect(yield* fs.exists(missingPath)).toBe(false);
+      expect(yield* fs.readFileString(`${recoveredPath}/tracked.txt`)).toBe("base\n");
+    }).pipe(
+      Effect.provide(
+        GitVcsDriver.layer.pipe(
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "handoff-switch-git-" })),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
+      ),
+    ),
+  );
 
   it.effect("rejects an existing branch with an actionable error naming its checkout", () => {
     const harness = makeHarness({ existingBranchWorktreePath: "/elsewhere/checkout" });

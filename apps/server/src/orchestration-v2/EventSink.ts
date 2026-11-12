@@ -458,8 +458,11 @@ const layerBase: Layer.Layer<
               ) {
                 let bindWorkspace =
                   input.rebindWorktrees === true || event.type === "thread.created";
+                let expectedPreviousPath: string | null | undefined;
                 if (!bindWorkspace && event.type === "thread.metadata-updated") {
                   const previous = yield* projectionStore.getThread(event.threadId);
+                  if (previous.worktreePath !== event.payload.worktreePath)
+                    expectedPreviousPath = previous.worktreePath;
                   bindWorkspace =
                     previous.worktreePath !== event.payload.worktreePath ||
                     previous.branch !== event.payload.branch ||
@@ -470,6 +473,7 @@ const layerBase: Layer.Layer<
                     path: event.payload.worktreePath,
                     threadId: event.payload.id,
                     sequence: stored.sequence,
+                    ...(expectedPreviousPath === undefined ? {} : { expectedPreviousPath }),
                     ...(event.type === "thread.created" &&
                     event.payload.lineage.relationshipToParent === "fork" &&
                     event.payload.forkedFrom?.type === "run"

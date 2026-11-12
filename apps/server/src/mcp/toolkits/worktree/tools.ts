@@ -32,7 +32,7 @@ const WorktreeToolFailure = Schema.Union([WorktreeMcpFailure, OrchestratorMcpFai
 
 const WorktreeHandoffTool = Tool.make("t3_worktree_handoff", {
   description:
-    "Move THIS thread into a new git worktree on a new branch. Runs the setup script by default. A separate agent in a worktree: `t3_thread_launch` with `workspaceStrategy`. Call last in your turn. The move ends the live session. `continuationPrompt` resumes work there next turn. Without it, the thread waits. The worktree stays after the thread is deleted. Fails if this thread has a worktree.",
+    "Change THIS thread's checkout, preserving its conversation. Create a new worktree on branch, or attach existingWorktreePath with its actual branch. Read t3_worktree_status first and pass expectedWorktreePath when replacing a checkout. Old files, edits and branches stay untouched; uncommitted edits do not move. Foreign leases and other threads' checkouts are refused. Call last: the live session ends. continuationPrompt resumes this conversation there next turn; omitted, it waits. Do not create a new conversation just to change checkout.",
   parameters: WorktreeMcpHandoffInput,
   success: WorktreeMcpHandoffResult,
   failure: WorktreeToolFailure,
@@ -62,7 +62,7 @@ const WorktreeReconcileBranchTool = Tool.make("t3_worktree_reconcile_branch", {
 
 const WorktreeStatusTool = Tool.make("t3_worktree_status", {
   description:
-    "Report this thread's worktree: attached or not, path, branch, project root, and the `startFromOrigin` default. Check before `t3_worktree_handoff`.",
+    "Read this thread's saved checkout binding, even if its directory is missing: attached, path, branch, project root, and startFromOrigin default. This is metadata, not proof the checkout is usable. Check before t3_worktree_handoff.",
   // No `parameters`: Tool.make defaults to Tool.EmptyParams, which serializes
   // to a top-level `type: "object"` JSON Schema. An explicit empty
   // Schema.Struct({}) serializes to `anyOf: [object, array]`, which is not a

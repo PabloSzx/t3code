@@ -226,6 +226,7 @@ export class TreehouseLeaseStore extends Context.Service<
       threadId: string;
       sequence: number;
       sourceThreadId?: string;
+      expectedPreviousPath?: string | null;
     }) => Effect.Effect<void, TreehouseLeaseError>;
     readonly commitThread: (input: {
       path: string | null;
@@ -559,27 +560,35 @@ const make = Effect.gen(function* () {
     });
     return fs.remove(pin, { recursive: true, force: true }).pipe(Effect.ignoreCause({ log: true }));
   });
+  const assertUnbound = Effect.fn("TreehouseLeases.assertUnbound")(function* (input: {
+    owned: Owned;
+    allowedThreadIds: readonly string[];
+  }) {
+    const { owned } = input;
+    const root = yield* location();
+    const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed([]),
+      ),
+    );
+    const allowed = new Set(input.allowedThreadIds.map((id) => `${Base64Url.encode(id)}.json`));
+    for (const name of threads) {
+      const binding = yield* fs
+        .readFileString(path.join(root, "threads", name))
+        .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
+      if (binding.active && binding.leaseId === owned.record.lease.lease_id && !allowed.has(name))
+        return yield* new TreehouseLeaseError({
+          path: owned.record.lease.path,
+          reason: "in-use",
+        });
+    }
+  });
   const assertUnused = Effect.fn("TreehouseLeases.assertUnused")(
     function* (input: { owned: Owned; allowedThreadIds: readonly string[] }) {
+      yield* assertUnbound(input);
       const { owned } = input;
       const root = yield* location();
-      const threads = yield* fs.readDirectory(path.join(root, "threads")).pipe(
-        Effect.catchIf(
-          (error) => error.reason._tag === "NotFound",
-          () => Effect.succeed([]),
-        ),
-      );
-      const allowed = new Set(input.allowedThreadIds.map((id) => `${Base64Url.encode(id)}.json`));
-      for (const name of threads) {
-        const binding = yield* fs
-          .readFileString(path.join(root, "threads", name))
-          .pipe(Effect.flatMap(Schema.decodeEffect(Schema.fromJsonString(Binding))));
-        if (binding.active && binding.leaseId === owned.record.lease.lease_id && !allowed.has(name))
-          return yield* new TreehouseLeaseError({
-            path: owned.record.lease.path,
-            reason: "in-use",
-          });
-      }
       const uses = yield* fs.readDirectory(path.join(root, "uses")).pipe(
         Effect.catchIf(
           (error) => error.reason._tag === "NotFound",
@@ -1195,17 +1204,28 @@ const make = Effect.gen(function* () {
             ) {
               const released = yield* readRecord(previous.leaseId);
               const release = released.record.release;
-              if (
-                !released.record.returned ||
-                release?.replacement?.leaseId !== owned.record.lease.lease_id ||
-                release.replacement.path !== owned.record.lease.path ||
-                !release.threadIds.includes(input.threadId)
-              )
+              const resuming =
+                released.record.returned &&
+                release?.replacement?.leaseId === owned.record.lease.lease_id &&
+                release.replacement.path === owned.record.lease.path &&
+                release.threadIds.includes(input.threadId);
+              const switching =
+                input.expectedPreviousPath !== undefined &&
+                (!previous.active ||
+                  (input.expectedPreviousPath === previous.path &&
+                    !released.record.returned &&
+                    release === undefined));
+              if (!resuming && !switching)
                 return yield* new TreehouseLeaseError({
                   path: input.path,
                   reason: "stale-binding",
                 });
-              resumedFrom = { path: previous.path, leaseId: previous.leaseId };
+              if (resuming) {
+                resumedFrom = { path: previous.path, leaseId: previous.leaseId };
+              } else {
+                yield* assertUnbound({ owned, allowedThreadIds: [input.threadId] });
+                resumedFrom = undefined;
+              }
             }
             yield* writeJson({
               target: bindingPath({ root, threadId: input.threadId }),

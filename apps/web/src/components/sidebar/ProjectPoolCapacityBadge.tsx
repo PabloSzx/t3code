@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
+import { cn } from "~/lib/utils";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { serverEnvironment } from "../../state/server";
 import { vcsEnvironment } from "../../state/vcs";
@@ -7,17 +8,22 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 type Project = Pick<SidebarProjectSnapshot, "environmentId" | "workspaceRoot" | "memberProjects">;
 
-export function ProjectPoolCapacityBadge({ project }: { project: Project }) {
+interface ProjectPoolCapacityBadgeProps {
+  project: Project;
+  className?: string | undefined;
+}
+
+export function ProjectPoolCapacityBadge({ project, className }: ProjectPoolCapacityBadgeProps) {
   const config = useAtomValue(serverEnvironment.configValueAtom(project.environmentId));
   if (
     config?.environment.capabilities.treehousePoolCapacity !== true ||
     !config.settings.treehouseWorktreesEnabled
   )
     return null;
-  return <PoolCapacity project={project} />;
+  return <PoolCapacity project={project} className={className} />;
 }
 
-function PoolCapacity({ project }: { project: Project }) {
+function PoolCapacity({ project, className }: ProjectPoolCapacityBadgeProps) {
   const result = useAtomValue(
     vcsEnvironment.poolCapacity({
       environmentId: project.environmentId,
@@ -43,7 +49,10 @@ function PoolCapacity({ project }: { project: Project }) {
           <span
             role="img"
             aria-label={description}
-            className="shrink-0 text-3xs tabular-nums text-sidebar-muted-foreground"
+            className={cn(
+              "shrink-0 text-3xs tabular-nums text-sidebar-muted-foreground",
+              className,
+            )}
           />
         }
       >

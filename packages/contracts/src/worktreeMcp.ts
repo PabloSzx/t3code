@@ -5,9 +5,22 @@ import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 /** Uses the managed worktree folder; handoff detaches the provider, ending this turn and resuming there next run. */
 export const WorktreeMcpHandoffInput = Schema.Struct({
   branch: TrimmedNonEmptyString,
+  expectedWorktreePath: Schema.optional(
+    Schema.NullOr(TrimmedNonEmptyString).annotate({
+      description:
+        "Current saved path from t3_worktree_status. Required to replace an attached checkout. Null: project root.",
+    }),
+  ),
+  existingWorktreePath: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Attach this existing project checkout without switching its Git branch. branch must match. Omit baseRef and startFromOrigin. Local edits are not copied or discarded.",
+    }),
+  ),
   baseRef: Schema.optional(
     TrimmedNonEmptyString.annotate({
-      description: "Default: checked-out branch.",
+      description:
+        "New checkout only. Default: this thread's saved branch, else the project branch.",
     }),
   ),
   startFromOrigin: Schema.optional(
@@ -18,7 +31,7 @@ export const WorktreeMcpHandoffInput = Schema.Struct({
   ),
   runSetupScript: Schema.optional(
     Schema.Boolean.annotate({
-      description: "Default true.",
+      description: "Default true for a new checkout, false when attaching an existing one.",
     }),
   ),
   continuationPrompt: Schema.optional(

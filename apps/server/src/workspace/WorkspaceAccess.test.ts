@@ -98,6 +98,73 @@ it.live("admits active and native I/O but refuses missing, foreign and stale ide
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.live("moves an inspected binding between live leases without releasing either checkout", () =>
+  Effect.gen(function* () {
+    const f = yield* activeWorkspace();
+    const threadId = f.context.threadId;
+    const previous = yield* f.leases.read(f.slot);
+    const releaseProvider = yield* f.leases.pinUse({ path: f.slot, threadId, kind: "provider" });
+    yield* f.fs.writeFileString(f.path.join(f.slot, "local.txt"), "retain local work\n");
+    yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+    const next = yield* f.driver.createWorktree({
+      cwd: f.cwd,
+      refName: f.parentSha,
+      newRefName: "next-owner",
+      path: null,
+    });
+    const nextPath = next.worktree.path;
+    expect(
+      yield* f.leases
+        .bindThread({ path: nextPath, threadId, sequence: 2, expectedPreviousPath: "/stale" })
+        .pipe(Effect.flip),
+    ).toMatchObject({ reason: "stale-binding" });
+    yield* f.leases.bindThread({ path: nextPath, threadId: "foreign-owner", sequence: 2 });
+    expect(
+      yield* f.leases
+        .bindThread({ path: nextPath, threadId, sequence: 3, expectedPreviousPath: f.slot })
+        .pipe(Effect.flip),
+    ).toMatchObject({ _tag: "TreehouseLeaseError" });
+    yield* f.leases.commitThread({
+      path: null,
+      threadId: "foreign-owner",
+      deleted: false,
+      sequence: 4,
+    });
+    yield* f.leases.bindThread({
+      path: nextPath,
+      threadId,
+      sequence: 5,
+      expectedPreviousPath: f.slot,
+    });
+    const generation = yield* f.leases.operationGeneration({ path: nextPath, threadId });
+    expect(generation).not.toBe(f.context.generation);
+    expect(yield* f.fs.readFileString(f.path.join(f.slot, "local.txt"))).toBe(
+      "retain local work\n",
+    );
+    expect((yield* f.leases.read(f.slot))?.record.returned).toBe(false);
+    expect((yield* f.leases.read(nextPath))?.record.returned).toBe(false);
+    expect(yield* f.leases.assertReturnable(previous!).pipe(Effect.flip)).toMatchObject({
+      reason: "in-use",
+    });
+    expect(
+      yield* f.access
+        .use({ targets: [f.slot], effect: Effect.die("stale operation must not run") })
+        .pipe(Effect.provideService(WorkspaceOperation, f.context), Effect.flip),
+    ).toMatchObject({ reason: "stale-binding" });
+    expect(
+      yield* f.access
+        .useThread({
+          threadId,
+          cwd: nextPath,
+          targets: [],
+          effect: f.fs.readFileString(f.path.join(nextPath, "file")),
+        })
+        .pipe(Effect.provideService(WorkspaceOperation, undefined)),
+    ).toBe("parent\n");
+    yield* releaseProvider;
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.live.each(["complete", "interrupt"] as const)(
   "protects admitted I/O against return and releases the pin on %s",
   (completion) =>

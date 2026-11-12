@@ -167,6 +167,7 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { ProjectRowActions } from "./ProjectComboboxRow";
+import { ProjectPoolCapacityBadge } from "./sidebar/ProjectPoolCapacityBadge";
 import {
   buildDraftActionMenuItems,
   buildThreadActionMenuItems,
@@ -3126,6 +3127,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               )}
                             </ProjectScopeRowIcon>
                             <span className="min-w-0 truncate text-sm">{item.label}</span>
+                            {project ? <ProjectPoolCapacityBadge project={project} /> : null}
                             {project && showProjectEnvironments ? (
                               <ProjectEnvironmentBadge
                                 group={project}

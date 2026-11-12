@@ -240,6 +240,7 @@ export const make = Effect.gen(function* () {
       settledWorktreeCleanup: true,
       worktreesDirectory: true,
       treehouseWorktrees: true,
+      treehousePoolCapacity: true,
       ...(hostPlatform === "darwin" ? { fastWorktreeCheckout: true } : {}),
       threadAutoSettlementScope: true,
       threadRestartContinuation: true,

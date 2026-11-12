@@ -154,6 +154,7 @@ import {
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
   VcsStatusInput,
+  TreehousePoolCapacity,
   VcsBranchStatus,
   VcsStatusSubscriptionInput,
   VcsStatusResult,
@@ -473,6 +474,7 @@ export const WS_METHODS = {
 
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
+  vcsGetPoolCapacity: "vcs.getPoolCapacity",
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
@@ -1562,6 +1564,12 @@ const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsVcsGetPoolCapacityRpc = Rpc.make(WS_METHODS.vcsGetPoolCapacity, {
+  payload: VcsStatusInput,
+  success: Schema.NullOr(TreehousePoolCapacity),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+});
+
 const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   payload: Schema.Struct({
     ...VcsStatusInput.fields,
@@ -2276,6 +2284,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsWorktreeSetupCancelRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
+  WsVcsGetPoolCapacityRpc,
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,

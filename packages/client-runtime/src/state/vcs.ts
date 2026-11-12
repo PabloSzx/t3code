@@ -20,6 +20,7 @@ import { Atom, AtomRegistry } from "effect/reactivity";
 import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcSubscriptionAtomFamily,
+  createEnvironmentRpcQueryAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
   registerWorkspaceQuery,
   type EnvironmentRpcTarget,
@@ -308,6 +309,13 @@ export function createVcsEnvironmentAtoms<R, E>(
 
   return {
     listRefs,
+    poolCapacity: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:vcs:pool-capacity",
+      tag: WS_METHODS.vcsGetPoolCapacity,
+      staleTimeMs: 15_000,
+      idleTtlMs: 0,
+      refreshIntervalMs: 30_000,
+    }),
     // An uncached read for decisions that must match the repository now, not
     // the persisted list a picker renders from.
     readRefs: createEnvironmentRpcCommand(runtime, {

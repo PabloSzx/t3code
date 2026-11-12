@@ -921,7 +921,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const session = sessionResult.success;
+      let session = sessionResult.success;
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const loadFromProvider = Effect.fn("ProviderTurnStartService.loadFromProvider")(function* (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
@@ -1454,6 +1454,32 @@ export const layer: Layer.Layer<
               : "resume_failed",
           errorTag: resumed._tag === "Failure" ? resumed.failure._tag : "ContextHandoffBudgetError",
         });
+        if (session.driver === "pi" && resumed._tag === "Failure") {
+          // A failed Pi lifecycle RPC retires its transport; portable recovery needs a new process.
+          const reopened = yield* Effect.result(
+            providerSessions.close(providerSessionId).pipe(
+              Effect.andThen(() =>
+                providerSessions.open({
+                  threadId: projection.thread.id,
+                  providerSessionId,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                }),
+              ),
+            ),
+          );
+          if (reopened._tag === "Failure") {
+            if (input.willRetry === true) return yield* reopened.failure;
+            yield* settleStartFailure({
+              signal: "provider-session-open-failure",
+              title: "Provider session failed to open",
+              error: reopened.failure,
+            });
+            return undefined;
+          }
+          session = reopened.success;
+          if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
+        }
         const replacement = yield* loadFromProvider(
           session.ensureThread({
             threadId: projection.thread.id,
@@ -1462,7 +1488,12 @@ export const layer: Layer.Layer<
             runtimePolicy: resolvedRuntimePolicy,
             providerSessionId,
             // Clear the native ref to force a fresh session while preserving row identity.
-            existingProviderThread: { ...providerThread, nativeThreadRef: null },
+            existingProviderThread: {
+              ...providerThread,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              contextUsage: null,
+            },
             forceNewNativeThread: true,
           }),
         );

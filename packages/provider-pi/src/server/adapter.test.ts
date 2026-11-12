@@ -3871,49 +3871,57 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("rolls back past turns that left nothing in the session tree", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime } = yield* openRuntime(fake);
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      const turn = (ordinal: number, entryId: string | null): OrchestrationV2ProviderTurn => ({
-        id: ProviderTurnId.make(`turn-${ordinal}`),
-        providerThreadId: providerThread.id,
-        nodeId: NodeId.make(`node-${ordinal}`),
-        runAttemptId: null,
-        nativeTurnRef:
-          entryId === null ? null : { driver: PI_PROVIDER, nativeId: entryId, strength: "strong" },
-        ordinal,
-        status: "completed",
-        startedAt: null,
-        completedAt: null,
-      });
-      const rollBackToFirst = (turns: ReadonlyArray<OrchestrationV2ProviderTurn>) =>
-        runtime.rollbackThread({
-          providerThread,
-          target: {
-            type: "provider_turn",
-            checkpointId: CheckpointId.make("checkpoint-1"),
-            appRunOrdinal: 1,
-            providerTurn: turns[0]!,
-          },
-          providerThreadTurns: turns,
+  it.effect.each(["loaded", "reopened"] as const)(
+    "rolls back past turns that left nothing in the session tree with a %s session",
+    (session) =>
+      Effect.gen(function* () {
+        const originalFake = yield* makeFakePi;
+        const original = yield* openRuntime(originalFake);
+        const providerThread = yield* original.runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
         });
-      const forkedEntries = () =>
-        fake
-          .allRequests()
-          .filter((request) => request.type === "fork")
-          .map((request) => request.entryId);
+        const fake = session === "loaded" ? originalFake : yield* makeFakePi;
+        const { runtime } = session === "loaded" ? original : yield* openRuntime(fake);
+        const turn = (ordinal: number, entryId: string | null): OrchestrationV2ProviderTurn => ({
+          id: ProviderTurnId.make(`turn-${ordinal}`),
+          providerThreadId: providerThread.id,
+          nodeId: NodeId.make(`node-${ordinal}`),
+          runAttemptId: null,
+          nativeTurnRef:
+            entryId === null
+              ? null
+              : { driver: PI_PROVIDER, nativeId: entryId, strength: "strong" },
+          ordinal,
+          status: "completed",
+          startedAt: null,
+          completedAt: null,
+        });
+        const rollBackToFirst = (turns: ReadonlyArray<OrchestrationV2ProviderTurn>) =>
+          runtime.rollbackThread({
+            providerThread,
+            target: {
+              type: "provider_turn",
+              checkpointId: CheckpointId.make("checkpoint-1"),
+              appRunOrdinal: 1,
+              providerTurn: turns[0]!,
+            },
+            providerThreadTurns: turns,
+          });
+        const forkedEntries = () =>
+          fake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId);
 
-      yield* rollBackToFirst([turn(1, "u1"), turn(2, null)]);
-      assert.deepEqual(forkedEntries(), []);
-      yield* rollBackToFirst([turn(1, "u1"), turn(2, null), turn(3, "u3")]);
-      assert.deepEqual(forkedEntries(), ["u3"]);
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        yield* rollBackToFirst([turn(1, "u1"), turn(2, null)]);
+        assert.deepEqual(forkedEntries(), []);
+        const snapshot = yield* rollBackToFirst([turn(1, "u1"), turn(2, null), turn(3, "u3")]);
+        assert.deepEqual(forkedEntries(), ["u3"]);
+        assert.equal(snapshot.providerThread.id, providerThread.id);
+        assert.deepEqual(snapshot.providerThread.nativeThreadRef, providerThread.nativeThreadRef);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("rolls back past a turn whose start entry was never captured", () =>

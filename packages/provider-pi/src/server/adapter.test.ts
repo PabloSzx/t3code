@@ -1199,7 +1199,7 @@ describe("PiAdapterV2", () => {
   );
 
   it.effect.each(["same", "different", "missing"] as const)(
-    "resumes retained history in the selected checkout when the saved cwd is %s",
+    "resumes the same T3 thread in the selected checkout when the saved cwd is %s",
     (savedCwd) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;

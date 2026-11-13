@@ -552,10 +552,8 @@ const make = Effect.gen(function* () {
     return yield* input.existingWorktreePath === undefined
       ? handoffEffect
       : access
-          .useThread({
-            threadId: scope.thread.threadId,
-            cwd: input.existingWorktreePath,
-            targets: [],
+          .use({
+            targets: [input.existingWorktreePath],
             effect: handoffEffect,
           })
           .pipe(

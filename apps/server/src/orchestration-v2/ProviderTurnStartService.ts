@@ -348,6 +348,13 @@ export const layer: Layer.Layer<
           ),
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         shouldFinalizeRun: () => isCurrentAttemptIn(["starting", "running"]),
+        loadCurrentWorkspace: () =>
+          projectionStore.getThreadRecords(input.threadId, ["providerSessions"]).pipe(
+            Effect.map(({ thread, providerSessions }) => ({
+              worktreePath: thread.worktreePath,
+              attachedProviderSessionIds: providerSessions.map((session) => session.id),
+            })),
+          ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
             .hasUnpairedRunInterruptRequest(
@@ -1849,6 +1856,7 @@ export const layer: Layer.Layer<
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
+        loadCurrentWorkspace: runControls.loadCurrentWorkspace,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         loadRunInterruptReason: runControls.loadRunInterruptReason,
         message: {

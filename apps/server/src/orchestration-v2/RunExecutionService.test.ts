@@ -77,6 +77,7 @@ const driver = ProviderDriverKind.make("codex");
 const rootAppThread = (id: ThreadId) =>
   ({
     id,
+    worktreePath: null,
     lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
   }) as OrchestrationV2AppThread;
 
@@ -2715,28 +2716,40 @@ it.effect("does not refresh pull requests for auxiliary or stale provider termin
   }),
 );
 
-it.effect("refreshes pull requests after a provider stream exits with an error", () =>
-  Effect.gen(function* () {
-    const { written, observed } = yield* captureRootRunTermination({
-      key: "pull-request-refresh:stream-error",
-      shouldFinalizeRun: () => Effect.succeed(true),
-      events: () =>
-        Stream.fail(
-          new ProviderAdapter.ProviderAdapterEventStreamError({
-            driver,
-            providerSessionId: ProviderSessionId.make("session:exited"),
-            cause: "provider process exited",
-          }),
-        ),
-    });
-    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
-    assert.deepEqual(
-      written.map((item) => item.type),
-      ["error"],
-    );
-    const error = written.find((item) => item.type === "error");
-    assert.include(error?.failure.message ?? "", "provider event stream closed unexpectedly");
-  }),
+it.effect.each([
+  { workspace: "unchanged", attached: false, status: "failed" },
+  { workspace: "changed", attached: true, status: "failed" },
+  { workspace: "changed", attached: false, status: "interrupted" },
+] as const)(
+  "settles a closed provider stream as $status when the workspace is $workspace and attachment is $attached",
+  ({ workspace, attached, status }) =>
+    Effect.gen(function* () {
+      const { written, observed } = yield* captureRootRunTermination({
+        key: `pull-request-refresh:stream-error:${workspace}:${attached}`,
+        currentWorkspace: {
+          worktreePath: workspace === "changed" ? "/moved" : null,
+          providerSessionAttached: attached,
+        },
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: () =>
+          Stream.fail(
+            new ProviderAdapter.ProviderAdapterEventStreamError({
+              driver,
+              providerSessionId: ProviderSessionId.make("session:exited"),
+              cause: "provider process exited",
+            }),
+          ),
+      });
+      assert.deepEqual(observed, [`run:${status}`, "pull-requests-refreshed"]);
+      assert.deepEqual(
+        written.map((item) => item.type),
+        status === "failed" ? ["error"] : ["run_interrupt_result"],
+      );
+      if (status === "failed") {
+        const error = written.find((item) => item.type === "error");
+        assert.include(error?.failure.message ?? "", "provider event stream closed unexpectedly");
+      }
+    }),
 );
 
 it.effect("records a provider's input rejection at turn start in the terminal error", () =>
@@ -2783,6 +2796,7 @@ it.effect.each(["failure", "defect", "interrupt-failure", "ownership-lost"] as c
       const ids = backgroundScenarioIds(`ingestion:${failureMode}`);
       const { written, observed, finalEvents } = yield* captureRootRunTermination({
         key: `ingestion:${failureMode}`,
+        currentWorkspace: { worktreePath: "/moved", providerSessionAttached: false },
         initialProviderTurnId: null,
         rejectTerminalWrite: failureMode === "ownership-lost",
         shouldFinalizeRun: () => Effect.succeed(true),
@@ -3179,6 +3193,10 @@ function captureRootRunTermination(input: {
   readonly key: string;
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
   readonly rejectTerminalWrite?: boolean;
+  readonly currentWorkspace?: {
+    readonly worktreePath: string | null;
+    readonly providerSessionAttached: boolean;
+  };
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapter.ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
@@ -3209,6 +3227,7 @@ function captureRootRunTermination(input: {
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
+    const currentWorkspace = input.currentWorkspace;
     const providerInstanceId = ProviderInstanceId.make("codex");
     const runningSubagent = makeRunOwnedSubagentFixture({
       ids,
@@ -3365,6 +3384,17 @@ function captureRootRunTermination(input: {
         attemptId: ids.attemptId,
         providerTurnOrdinal: 1,
         shouldFinalizeRun: input.shouldFinalizeRun,
+        ...(currentWorkspace === undefined
+          ? {}
+          : {
+              loadCurrentWorkspace: () =>
+                Effect.succeed({
+                  worktreePath: currentWorkspace.worktreePath,
+                  attachedProviderSessionIds: currentWorkspace.providerSessionAttached
+                    ? [ProviderSessionId.make(`session:${input.key}`)]
+                    : [],
+                }),
+            }),
         ...(input.loadRunInterruptReason === undefined
           ? {}
           : { loadRunInterruptReason: input.loadRunInterruptReason }),

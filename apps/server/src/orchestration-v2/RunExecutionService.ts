@@ -557,6 +557,9 @@ export class RunExecutionIngestError extends Schema.TaggedError<RunExecutionInge
   }
 }
 
+const isRunExecutionIngestError = Schema.is(RunExecutionIngestError);
+const isProviderEventStreamError = Schema.is(ProviderAdapter.ProviderAdapterEventStreamError);
+
 export const RunExecutionServiceV2Error = Schema.Union([
   RunExecutionStartError,
   RunExecutionIngestError,
@@ -585,6 +588,13 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly relatedProviderThreadIds?: ReadonlyArray<ProviderThreadId>;
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly loadCurrentWorkspace?: () => Effect.Effect<
+    {
+      readonly worktreePath: string | null;
+      readonly attachedProviderSessionIds: ReadonlyArray<ProviderSessionId>;
+    },
+    ProjectionStoreV2Error
+  >;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
@@ -1636,18 +1646,33 @@ export const layer: Layer.Layer<
                 yield* finalizeRootRun(terminal);
               }),
             ),
-            // Server shutdown interrupts the subscription and leaves the run to
-            // restart recovery; every other failure fails the run.
+            // Server shutdown leaves the run to restart recovery; a workspace detach
+            // interrupts it without holding the continuation behind a failed run.
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) =>
                 Effect.gen(function* () {
                   const completedAt = yield* DateTime.now;
-                  yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
-                    runId: input.run.id,
-                    cause,
-                  });
                   if (yield* Ref.get(rootRunFinalized)) return;
+                  const squashed = Cause.squash(cause);
+                  const currentWorkspace =
+                    isRunExecutionIngestError(squashed) &&
+                    isProviderEventStreamError(squashed.cause) &&
+                    input.loadCurrentWorkspace !== undefined
+                      ? yield* input
+                          .loadCurrentWorkspace()
+                          .pipe(Effect.catchCause(() => Effect.undefined))
+                      : undefined;
+                  const workspaceDetached =
+                    currentWorkspace !== undefined &&
+                    currentWorkspace.worktreePath !== input.appThread.worktreePath &&
+                    !currentWorkspace.attachedProviderSessionIds.includes(input.providerSessionId);
+                  if (!workspaceDetached) {
+                    yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
+                      runId: input.run.id,
+                      cause,
+                    });
+                  }
                   const providerThread = yield* Ref.get(latestProviderThread);
                   const routing = yield* Ref.get(eventRouting);
                   const rootProviderTurn = yield* Ref.get(latestRootProviderTurn);
@@ -1688,7 +1713,6 @@ export const layer: Layer.Layer<
                       : null;
                   const latestItemOrdinal = yield* Ref.get(latestTurnItemOrdinal);
                   const openSubagents = yield* Ref.get(openRunOwnedSubagents);
-                  const squashed = Cause.squash(cause);
                   let nextRetryWarningAt = completedAt;
                   yield* writeFinalRunEvents({
                     run: input.run,
@@ -1703,16 +1727,34 @@ export const layer: Layer.Layer<
                     openRunOwnedSubagents: openSubagents,
                     ...(abandonedProviderTurn === null ? {} : { abandonedProviderTurn }),
                     completedAt,
-                    terminal: makeFailedTerminalEvent(
-                      makeProviderFailure({
-                        cause: squashed,
-                        message:
-                          knownProviderFailureMessage(squashed) ??
-                          userFacingDatabaseErrorMessage(squashed),
-                        class: "unknown",
-                      }),
-                      latestItemOrdinal + 1,
-                    ),
+                    terminal: workspaceDetached
+                      ? {
+                          type: "turn.terminal",
+                          driver: providerThread.driver,
+                          providerThreadId: providerThread.id,
+                          providerTurnId:
+                            routing.rootProviderTurnId ??
+                            input.attempt.providerTurnId ??
+                            idAllocator.derive.providerTurn({
+                              driver: providerThread.driver,
+                              nativeTurnId: `workspace-change:${input.attempt.id}`,
+                            }),
+                          runOrdinal: input.run.ordinal,
+                          status: "interrupted",
+                          failure: null,
+                          reason: "Workspace changed.",
+                          threadDisposition: "reusable",
+                        }
+                      : makeFailedTerminalEvent(
+                          makeProviderFailure({
+                            cause: squashed,
+                            message:
+                              knownProviderFailureMessage(squashed) ??
+                              userFacingDatabaseErrorMessage(squashed),
+                            class: "unknown",
+                          }),
+                          latestItemOrdinal + 1,
+                        ),
                     failureItemPersisted: false,
                     refreshAfterTurn,
                   }).pipe(

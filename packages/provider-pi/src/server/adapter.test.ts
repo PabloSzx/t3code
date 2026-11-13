@@ -199,6 +199,7 @@ interface FakePi {
   ) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
+    readonly cwd: string | undefined;
     readonly args: ReadonlyArray<string>;
     readonly env: NonNullable<ChildProcess.CommandOptions["env"]>;
   };
@@ -368,7 +369,10 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       case "switch_session": {
         const cancelled = vetoSwitch;
         vetoSwitch = false;
-        if (!cancelled) serviceTier = null;
+        if (!cancelled) {
+          serviceTier = null;
+          sessionFile = piRecordString(record, "sessionPath") ?? sessionFile;
+        }
         return { ...base, data: { cancelled } };
       }
       case "get_entries":
@@ -448,6 +452,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     });
 
   let lastSpawn: ReturnType<FakePi["lastSpawn"]> = {
+    cwd: undefined,
     args: [],
     env: {},
   };
@@ -455,6 +460,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     Effect.sync(() => {
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
+          cwd: command.options.cwd,
           args: command.args.map(String),
           env: command.options.env ?? {},
         };
@@ -1190,6 +1196,53 @@ describe("PiAdapterV2", () => {
       assert.equal((yield* fake.takeDelivery("deliver"))["inputId"], "first-steer");
       assert.equal((yield* fake.takeDelivery("deliver"))["inputId"], "second-steer");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each(["same", "different", "missing"] as const)(
+    "resumes retained history in the selected checkout when the saved cwd is %s",
+    (savedCwd) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const host = yield* ProviderHost.ProviderHost;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        const sourceFile = `${directory}/source.jsonl`;
+        const forkFile = `${directory}/rebased.jsonl`;
+        const sourceBytes = `${JSON.stringify({ type: "session", cwd: savedCwd === "same" ? host.paths.cwd : savedCwd === "different" ? directory : `${directory}/missing` })}\n`;
+        yield* fileSystem.writeFileString(sourceFile, sourceBytes);
+        const fake = yield* makeFakePi;
+        const forkFake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, forkFake);
+        const original = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        forkFake.queueState({ sessionFile: forkFile });
+        const source = {
+          ...original,
+          nativeThreadRef: {
+            driver: PI_PROVIDER,
+            nativeId: sourceFile,
+            strength: "strong" as const,
+          },
+        };
+        const resumed = yield* runtime.resumeThread({ providerThread: source });
+        assert.equal(resumed.id, original.id);
+        assert.equal(resumed.appThreadId, THREAD_ID);
+        assert.equal(
+          resumed.nativeThreadRef?.nativeId,
+          savedCwd === "same" ? sourceFile : forkFile,
+        );
+        assert.equal(yield* fileSystem.readFileString(sourceFile), sourceBytes);
+        if (savedCwd !== "same") {
+          assert.equal(forkFake.lastSpawn().cwd, runtime.providerSession.cwd);
+          const args = forkFake.lastSpawn().args;
+          assert.equal(args[args.indexOf("--fork") + 1], sourceFile);
+          assert.include(args, "--no-extensions");
+          assert.include(args, "--no-tools");
+          assert.include(args, "--offline");
+        }
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("preserves extension statuses when a native session switch is vetoed", () =>

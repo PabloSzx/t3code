@@ -25,6 +25,7 @@ import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as TreehouseTest from "../vcs/TreehouseWorktrees.testkit.ts";
 import * as ServerConfig from "../config.ts";
 import {
   OrchestratorDispatchError,
@@ -520,6 +521,45 @@ describe("t3_worktree_handoff", () => {
       expect(harness.createWorktree).not.toHaveBeenCalled();
     });
   });
+
+  it.live("attaches a native checkout while retaining the thread's active managed lease", () =>
+    Effect.gen(function* () {
+      const f = yield* TreehouseTest.fixture();
+      yield* f.driver.createWorktree({
+        cwd: f.cwd,
+        refName: f.parentSha,
+        newRefName: "managed-source",
+        path: null,
+      });
+      yield* f.leases.bindThread({ path: f.slot, threadId, sequence: 1 });
+      const native = f.path.join(f.root, "native");
+      yield* f.git({ args: ["worktree", "add", "-b", "native", native, f.parentSha] });
+      const harness = makeHarness({
+        thread: { branch: "managed-source", worktreePath: f.slot },
+        git: {
+          listRefs: () =>
+            Effect.succeed({
+              refs: [{ name: "native", current: false, isDefault: false, worktreePath: native }],
+              isRepo: true,
+              hasPrimaryRemote: true,
+              nextCursor: null,
+              totalCount: 1,
+            }),
+          currentBranch: (cwd) =>
+            f.git({ cwd, args: ["symbolic-ref", "--short", "HEAD"] }).pipe(Effect.orDie),
+        },
+      });
+      const result = yield* runHandoff(harness, {
+        branch: "native",
+        existingWorktreePath: native,
+        expectedWorktreePath: f.slot,
+      });
+      expect(result.worktreePath).toBe(native);
+      expect((yield* f.leases.read(f.slot))?.record.returned).toBe(false);
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+      expect(harness.removeWorktree).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(TreehouseTest.testLayer)),
+  );
 
   it.effect("replaces an inspected checkout without changing its staged or untracked files", () =>
     Effect.gen(function* () {

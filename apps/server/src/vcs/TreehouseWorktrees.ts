@@ -535,88 +535,98 @@ const make = Effect.gen(function* () {
           return "Treehouse expiry deletion needs a junction-safe Windows backend";
         return yield* withWorkspaceLease(
           path.resolve(input.path),
-          leases.withLock({
-            path: input.path,
-            effect: Effect.gen(function* () {
-              const owned = yield* leases.read(input.path);
-              if (owned === null || owned.record.lease.lease_id !== input.leaseId)
-                return "Treehouse lease generation changed since check";
-              const checkout = yield* fs.realPath(input.path);
-              if (checkout !== input.path || checkout === (yield* fs.realPath(input.cwd)))
-                return "worktree path is not a canonical linked checkout";
-              const blocked = yield* input.recheck;
-              if (blocked !== null) return blocked;
-              const commonArgs = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
-              const repository = yield* run({ cwd: input.cwd, command: "git", args: commonArgs });
-              const actual = yield* run({ cwd: input.path, command: "git", args: commonArgs });
-              const head = yield* run({
-                cwd: input.path,
-                command: "git",
-                args: ["rev-parse", "HEAD"],
-              });
-              if (
-                (yield* fs.realPath(repository)) !== (yield* fs.realPath(actual)) ||
-                head !== input.headSha
-              )
-                return "repository or commit changed since check";
-              const help = yield* run({
-                cwd: input.cwd,
-                command: owned.record.binary,
-                args: ["destroy", "--help"],
-              });
-              if (
-                !help.includes("--if-lease-id") ||
-                !help.includes("--expire-after") ||
-                !help.includes("--terminate-agent-sessions")
-              )
-                return "recorded Treehouse binary needs verified process-terminating destroy support";
-              const acquired = yield* decodeAcquiredAt(owned.record.lease.leased_at);
-              if (DateTime.toEpochMillis(acquired) > (yield* Clock.currentTimeMillis))
-                return "lease acquisition time cannot be verified";
-              const blockedBeforeReturn = yield* input.recheck;
-              if (blockedBeforeReturn !== null) return blockedBeforeReturn;
-              const releasing = yield* leases.beginCleanupReturn({
-                owned,
-                discardLocalFiles: true,
-                release: {
-                  projectPath: yield* fs.realPath(input.cwd),
-                  repository: yield* fs.realPath(repository),
-                  branch: input.branch,
-                  headSha: head,
-                  threadIds: [...input.threadIds],
-                },
-              });
-              const destroyed = yield* Effect.gen(function* () {
-                yield* run({
+          Effect.gen(function* () {
+            const releasing = yield* leases.withLock({
+              path: input.path,
+              effect: Effect.gen(function* () {
+                const owned = yield* leases.read(input.path);
+                if (owned === null || owned.record.lease.lease_id !== input.leaseId)
+                  return "Treehouse lease generation changed since check";
+                const checkout = yield* fs.realPath(input.path);
+                if (checkout !== input.path || checkout === (yield* fs.realPath(input.cwd)))
+                  return "worktree path is not a canonical linked checkout";
+                const blocked = yield* input.recheck;
+                if (blocked !== null) return blocked;
+                const commonArgs = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+                const repository = yield* run({ cwd: input.cwd, command: "git", args: commonArgs });
+                const actual = yield* run({ cwd: input.path, command: "git", args: commonArgs });
+                const head = yield* run({
+                  cwd: input.path,
+                  command: "git",
+                  args: ["rev-parse", "HEAD"],
+                });
+                if (
+                  (yield* fs.realPath(repository)) !== (yield* fs.realPath(actual)) ||
+                  head !== input.headSha
+                )
+                  return "repository or commit changed since check";
+                const help = yield* run({
                   cwd: input.cwd,
                   command: owned.record.binary,
-                  args: [
-                    "destroy",
-                    owned.record.lease.path,
-                    "--yes",
-                    "--include-leased",
-                    "--include-unlanded",
-                    "--include-in-use",
-                    "--if-lease-id",
-                    input.leaseId,
-                    // T3 rechecks the configured deadline; the allocator verifies this exact acquisition.
-                    "--expire-after",
-                    "1ns",
-                    "--terminate-agent-sessions",
-                  ],
+                  args: ["destroy", "--help"],
                 });
-                yield* leases.markReturned(releasing);
-                return null;
-              }).pipe(Effect.result);
-              if (destroyed._tag === "Failure") {
-                if (yield* fs.exists(input.path))
-                  yield* leases
-                    .cancelCleanupReturn(releasing)
-                    .pipe(Effect.ignoreCause({ log: true }));
-                return yield* destroyed.failure;
-              }
-              return destroyed.success;
-            }),
+                if (
+                  !help.includes("--if-lease-id") ||
+                  !help.includes("--expire-after") ||
+                  !help.includes("--terminate-agent-sessions")
+                )
+                  return "recorded Treehouse binary needs verified process-terminating destroy support";
+                const acquired = yield* decodeAcquiredAt(owned.record.lease.leased_at);
+                if (DateTime.toEpochMillis(acquired) > (yield* Clock.currentTimeMillis))
+                  return "lease acquisition time cannot be verified";
+                const blockedBeforeReturn = yield* input.recheck;
+                if (blockedBeforeReturn !== null) return blockedBeforeReturn;
+                return yield* leases.beginCleanupReturn({
+                  owned,
+                  discardLocalFiles: true,
+                  release: {
+                    projectPath: yield* fs.realPath(input.cwd),
+                    repository: yield* fs.realPath(repository),
+                    branch: input.branch,
+                    headSha: head,
+                    threadIds: [...input.threadIds],
+                  },
+                });
+              }),
+            });
+            if (typeof releasing === "string") return releasing;
+            // The release intent fences this generation while slow deletion leaves other workspaces usable.
+            const destroyed = yield* Effect.gen(function* () {
+              yield* run({
+                cwd: input.cwd,
+                command: releasing.record.binary,
+                args: [
+                  "destroy",
+                  releasing.record.lease.path,
+                  "--yes",
+                  "--include-leased",
+                  "--include-unlanded",
+                  "--include-in-use",
+                  "--if-lease-id",
+                  input.leaseId,
+                  // T3 rechecks the configured deadline; the allocator verifies this exact acquisition.
+                  "--expire-after",
+                  "1ns",
+                  "--terminate-agent-sessions",
+                ],
+              });
+              yield* leases.withLock({
+                path: input.path,
+                effect: leases.markReturned(releasing),
+              });
+              return null;
+            }).pipe(Effect.result);
+            if (destroyed._tag === "Failure") {
+              if (yield* fs.exists(input.path))
+                yield* leases
+                  .withLock({
+                    path: input.path,
+                    effect: leases.cancelCleanupReturn(releasing),
+                  })
+                  .pipe(Effect.ignoreCause({ log: true }));
+              return yield* destroyed.failure;
+            }
+            return destroyed.success;
           }),
         );
       },

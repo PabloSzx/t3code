@@ -1055,7 +1055,7 @@ const make = Effect.gen(function* () {
             reason: "metadata",
           });
         const updated = { ...owned, record: { ...owned.record, pool, release: input.release } };
-        yield* writeJson({ target: updated.recordPath, value: updated.record });
+        yield* writeJson({ target: updated.recordPath, value: updated.record, durable: true });
         return updated;
       },
       (effect, input) =>

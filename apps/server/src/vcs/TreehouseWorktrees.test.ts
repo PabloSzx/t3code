@@ -1,3 +1,4 @@
+import * as NodeNet from "node:net";
 import { assert, describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
@@ -693,6 +694,7 @@ describe("Treehouse worktrees", () => {
     "wrong-generation",
     "old-binary",
     "failed-command",
+    "intent-sync-failure",
     "windows",
   ] as const)("destroys only the expired acquisition and retains retry evidence (%s)", (state) =>
     Effect.gen(function* () {
@@ -715,6 +717,27 @@ describe("Treehouse worktrees", () => {
         yield* f.fs.writeFileString(f.path.join(f.root, "reacquire-after-destroy"), "");
       const treehouse = yield* TreehouseWorktrees.TreehouseWorktrees.pipe(
         Effect.provide(TreehouseWorktrees.layer),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...f.fs,
+          open: (target, options) =>
+            Effect.gen(function* () {
+              const file = yield* f.fs.open(target, options);
+              return state === "intent-sync-failure" &&
+                target.startsWith(f.path.join(f.registry, "leases"))
+                ? {
+                    ...file,
+                    sync: Effect.fail(
+                      PlatformError.systemError({
+                        _tag: "PermissionDenied",
+                        module: "FileSystem",
+                        method: "sync",
+                        pathOrDescriptor: target,
+                      }),
+                    ),
+                  }
+                : file;
+            }),
+        }),
       );
       const request = {
         cwd: f.cwd,
@@ -764,6 +787,10 @@ describe("Treehouse worktrees", () => {
           "synthetic expired private data",
         );
         assert.isUndefined((yield* f.leases.read(f.slot))?.record.release);
+        if (state === "intent-sync-failure")
+          expect(yield* f.fs.readFileString(f.path.join(f.root, "calls"))).not.toContain(
+            `destroy ${f.slot}`,
+          );
         if (state === "old-binary" || state === "failed-command") {
           yield* f.fs.remove(
             f.path.join(f.root, state === "old-binary" ? "old-destroy" : "fail-destroy"),
@@ -773,6 +800,134 @@ describe("Treehouse worktrees", () => {
         }
       }
     }).pipe(provide),
+  );
+
+  it.live.each(["complete", "interrupt"] as const)(
+    "keeps other workspaces usable while an expired checkout is being deleted (%s)",
+    (outcome) =>
+      Effect.gen(function* () {
+        const f = yield* accessFixture();
+        const expired = yield* f.leases.read(f.slot);
+        assert.isNotNull(expired);
+        yield* f.fs.writeFileString(f.path.join(f.root, "next-slot"), "");
+        const other = (yield* f.driver.createWorktree({
+          cwd: f.cwd,
+          refName: f.parentSha,
+          newRefName: "other-workspace",
+          path: null,
+        })).worktree.path;
+        const otherThread = ThreadId.make("other-workspace");
+        yield* f.leases.bindThread({ path: other, threadId: otherThread, sequence: 1 });
+        const otherContext = {
+          threadId: otherThread,
+          generation: yield* f.leases.operationGeneration({ path: other, threadId: otherThread }),
+        };
+        const entered = yield* Deferred.make<NodeNet.Socket>();
+        let connection: NodeNet.Socket | undefined;
+        const server = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            NodeNet.createServer((socket) => {
+              connection = socket;
+              Deferred.doneUnsafe(entered, Effect.succeed(socket));
+            }),
+          ),
+          (listening) =>
+            Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  connection?.destroy();
+                  listening.close(() => resolve());
+                }),
+            ),
+        );
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve, reject) => {
+              server.once("error", reject);
+              server.listen(0, "127.0.0.1", resolve);
+            }),
+        );
+        const address = server.address();
+        assert(address !== null && typeof address !== "string");
+        yield* f.fs.writeFileString(
+          f.path.join(f.root, "allocator-impl.mjs"),
+          yield* f.fs.readFileString(f.binary),
+        );
+        yield* f.fs.writeFileString(
+          f.binary,
+          `#!${process.execPath}
+import { connect } from "node:net";
+if (process.argv[2] === "destroy" && process.argv[3] !== "--help") {
+  await new Promise((resolve, reject) => {
+    const socket = connect(${address.port}, "127.0.0.1");
+    socket.on("error", reject);
+    socket.once("data", () => { socket.destroy(); resolve(); });
+  });
+}
+await import("./allocator-impl.mjs");
+`,
+        );
+        const deletion = yield* f.treehouse
+          .destroyIdle({
+            cwd: f.cwd,
+            path: f.slot,
+            branch: "access-owner",
+            headSha: f.parentSha,
+            threadIds: [f.context.threadId],
+            leaseId: expired!.record.lease.lease_id,
+            recheck: Effect.succeed(null),
+          })
+          .pipe(Effect.forkChild());
+        const gate = yield* Deferred.await(entered);
+        const release = yield* f.leases.pinOperation({ targets: [other], context: otherContext });
+        yield* Effect.addFinalizer(() => release);
+        expect(yield* f.fs.readFileString(f.path.join(other, "file"))).toBe("parent\n");
+        const provider = yield* f.leases.pinUse({
+          path: other,
+          threadId: otherThread,
+          kind: "provider",
+        });
+        yield* Effect.addFinalizer(() => provider);
+        expect(
+          yield* f.leases
+            .pinOperation({ targets: [f.slot], context: f.context })
+            .pipe(Effect.result),
+        ).toMatchObject({ _tag: "Failure", failure: { _tag: "TreehouseLeaseError" } });
+        expect(
+          yield* f.leases
+            .bindThread({ path: f.slot, threadId: "late-owner", sequence: 2 })
+            .pipe(Effect.result),
+        ).toMatchObject({ _tag: "Failure", failure: { _tag: "TreehouseLeaseError" } });
+        expect(
+          yield* f.treehouse
+            .resume({
+              cwd: f.cwd,
+              path: f.slot,
+              branch: "access-owner",
+              threadId: f.context.threadId,
+              preparationScope: yield* Effect.scope,
+            })
+            .pipe(Effect.result),
+        ).toMatchObject({ _tag: "Failure", failure: { _tag: "GitCommandError" } });
+        if (outcome === "interrupt") {
+          yield* Fiber.interrupt(deletion);
+          const retained = yield* f.leases.releasedThread({
+            path: f.slot,
+            threadId: f.context.threadId,
+          });
+          expect(retained?.record.returned).toBe(false);
+          expect(retained?.record.release).toBeDefined();
+          expect(yield* f.leases.read(f.slot).pipe(Effect.result)).toMatchObject({
+            _tag: "Failure",
+          });
+        } else {
+          gate.end("finish deletion");
+          expect(yield* Fiber.join(deletion)).toBeNull();
+        }
+        expect(yield* f.fs.exists(f.slot)).toBe(outcome === "interrupt");
+        expect(yield* f.fs.readFileString(f.path.join(other, "file"))).toBe("parent\n");
+        expect(yield* f.git({ args: ["rev-parse", "refs/heads/access-owner"] })).toBe(f.parentSha);
+      }).pipe(provide),
   );
 
   it.live.each(["external return", "durable marking"] as const)(
